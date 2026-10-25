@@ -15,6 +15,11 @@ impl Db {
         Self(Arc::new(Mutex::new(store)))
     }
 
+    /// The shared store, for long-running workers such as the analysis runner.
+    pub fn shared(&self) -> Arc<Mutex<Store>> {
+        self.0.clone()
+    }
+
     /// Runs `f` with exclusive access to the store on a blocking thread.
     /// Errors are flattened to strings for display.
     pub async fn call<T, E>(&self, f: impl FnOnce(&mut Store) -> Result<T, E> + Send + 'static) -> Result<T, String>

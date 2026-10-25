@@ -4,7 +4,9 @@ mod app;
 mod db;
 mod format;
 mod labels;
+mod providers;
 mod research;
+mod secrets;
 mod settings;
 
 use std::path::PathBuf;

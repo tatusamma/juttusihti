@@ -10,6 +10,7 @@ SQLite is the source of truth and DuckDB runs analytics. Optional AI-assisted re
 | --- | --- | --- | --- |
 | `crates/core` (`juttusihti-core`) | Domain model, SQLite schema + migrations, FTS5 search, feed parsing, OPML, discovery, research data model | no | no |
 | `crates/fetch` (`juttusihti-fetch`) | HTTP fetching: conditional requests, timeouts, bounded retries, size limits, discovery | yes | no |
+| `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
 
@@ -104,8 +105,35 @@ tokenizer, or AI-assisted query expansion.
     prior spend from the ledger.
   - Not done: provider token-counting endpoints (they need network access and consent), and
     calibrating the local token approximation against real tokenizers.
-- **M4, M6–M8**: not started. No AI provider code exists, so nothing can incur cost; a saved
-  session cannot be run yet.
+- **M4 AI analytics**: done; tested against fake local servers only.
+  - Provider clients:
+    - Anthropic Messages API (`anthropic-version: 2026-10-21`, `output_config.format`).
+    - OpenAI Responses API (`text.format` with a strict JSON schema; `store: false`).
+    - Gemini `generateContent` (`responseMimeType` + `responseJsonSchema`).
+    - Provider token counting is implemented for all three.
+  - Runner, per approved session:
+    - Tasks: label, entity (with location roles) and relevance extraction in batches of 20;
+      validation of locally generated story pairs; a hierarchical summary with cited article ids.
+    - Results are stored only as AI suggestions with provenance (provider, model, prompt
+      version, evidence).
+    - Each call reserves budget before it is sent, and actual usage is recorded in the ledger.
+    - Pause, cancel and resume are supported. A request cancelled mid-flight is charged at its
+      worst case, and finished articles are cached so resuming does not repeat paid work.
+  - Model output is untrusted:
+    - Article text is escaped inside a data block.
+    - The output schema is enforced, then checked again locally: only ids from the request
+      are accepted, and string lengths are bounded.
+    - Entities must occur in the article, and evidence quotes must appear in the text.
+    - Summary points need valid citations.
+  - API keys live in the OS secret store (Windows Credential Manager, or the Secret Service on
+    GNOME/KDE), set on the AI Providers screen.
+  - Starting a run requires a consent checkbox naming the provider and the content depth.
+  - Live API tests are opt-in and ignored by default (`crates/ai/tests/live.rs`). **Not run
+    yet.** The Gemini `responseJsonSchema` field in particular still needs live confirmation.
+  - Linux builds of the secret store need `libdbus-1-dev` (Debian/Ubuntu) or `dbus-devel`
+    (Fedora).
+- **M6–M8**: not started. A review UI for AI suggestions beyond labels (entities,
+  relationships, relevance, summaries) is part of the remaining work.
 
 ## Invariants enforced in code and tests
 

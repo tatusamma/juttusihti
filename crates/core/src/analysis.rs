@@ -334,8 +334,20 @@ impl Store {
     /// Builds the local scope for a configuration: matching, dedup, cache
     /// lookup and candidate generation. Read-only.
     pub fn analysis_scope(&self, config: &AnalysisConfig) -> Result<Scope> {
+        let (from_where, params, _) = build_where(&config.scope)?;
+        self.scope_from(config, &from_where, params)
+    }
+
+    /// Rebuilds the scope of a saved session from its article snapshot, so a
+    /// run (or resume) covers exactly the articles that were approved.
+    pub fn session_scope(&self, session_id: i64, config: &AnalysisConfig) -> Result<Scope> {
+        let from_where =
+            " FROM articles a JOIN analysis_session_articles s ON s.article_id = a.id WHERE s.session_id = ?";
+        self.scope_from(config, from_where, vec![Value::Integer(session_id)])
+    }
+
+    fn scope_from(&self, config: &AnalysisConfig, from_where: &str, mut params: Vec<Value>) -> Result<Scope> {
         let conn = self.conn();
-        let (from_where, mut params, _) = build_where(&config.scope)?;
         let matched: i64 =
             conn.query_row(&format!("SELECT count(*){from_where}"), params_from_iter(params.iter()), |r| r.get(0))?;
 
@@ -456,6 +468,60 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn is_cached(&self, key: &str) -> Result<bool> {
+        Ok(self.conn().prepare_cached("SELECT 1 FROM ai_result_cache WHERE cache_key = ?1")?.exists([key])?)
+    }
+
+    /// Usage already charged to a session, so a resumed run keeps counting
+    /// against the same budget.
+    pub fn session_usage(&self, session: i64) -> Result<budget::Totals> {
+        let (tokens, cost, unknown, calls): (i64, i64, i64, i64) = self.conn().query_row(
+            "SELECT COALESCE(sum(input_tokens + cached_input_tokens + output_tokens + reasoning_tokens), 0),
+                    COALESCE(sum(cost_microunits), 0), count(*) - count(cost_microunits), count(*)
+             FROM usage_ledger WHERE session_id = ?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(budget::Totals { tokens: tokens as u64, cost: cost as u64, cost_unknown: unknown > 0, calls: calls as u32 })
+    }
+
+    /// Appends one provider call to the usage ledger. `cost` is `None` when
+    /// unpriced; it is stored as NULL, never as zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_usage(
+        &self,
+        session: Option<i64>,
+        provider: Provider,
+        model: &str,
+        operation: &str,
+        usage: &crate::pricing::Usage,
+        reasoning_tokens: u64,
+        cost: Option<crate::pricing::Micros>,
+    ) -> Result<()> {
+        let provider = serde_json::to_value(provider)?;
+        // `usage.output` already includes reasoning tokens; the ledger keeps
+        // them apart so reports can show both.
+        let visible_output = usage.output.saturating_sub(reasoning_tokens);
+        self.conn().execute(
+            "INSERT INTO usage_ledger(session_id, provider, model, operation, input_tokens, cached_input_tokens,
+                                      output_tokens, reasoning_tokens, cost_microunits, currency, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'USD', ?10)",
+            rusqlite::params![
+                session,
+                provider.as_str().unwrap_or_default(),
+                model,
+                operation,
+                (usage.input + usage.cache_write) as i64,
+                usage.cached_input as i64,
+                visible_output as i64,
+                reasoning_tokens as i64,
+                cost.map(|c| c as i64),
+                crate::now()
+            ],
+        )?;
+        Ok(())
     }
 
     /// Usage recorded since `since` (UTC seconds), for daily/monthly budgets.

@@ -48,6 +48,7 @@ pub enum Screen {
     Reports,
     Research,
     Labels,
+    Providers,
     Settings,
 }
 
@@ -132,6 +133,7 @@ pub enum Message {
     ShowScreen(Screen),
     Research(crate::research::Msg),
     Labels(crate::labels::Msg),
+    Providers(crate::providers::Msg),
     Settings(crate::settings::Msg),
     RetentionApplied(Result<usize, String>),
     LabelInput(String),
@@ -175,6 +177,7 @@ pub struct App {
     reports: Option<Reports>,
     research: crate::research::State,
     labels: crate::labels::State,
+    providers: crate::providers::State,
     settings: crate::settings::State,
 }
 
@@ -188,6 +191,7 @@ impl App {
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
             labels: crate::labels::State::new(db.clone()),
+            providers: crate::providers::State::new(),
             settings: crate::settings::State::new(db.clone()),
             db,
             db_path,
@@ -612,6 +616,7 @@ impl App {
                     Screen::Reports => self.load_reports(),
                     Screen::Research => self.research.load().map(Message::Research),
                     Screen::Labels => self.labels.load().map(Message::Labels),
+                    Screen::Providers => self.providers.load().map(Message::Providers),
                     Screen::Settings => self.settings.load().map(Message::Settings),
                     Screen::Reader => Task::none(),
                 }
@@ -622,6 +627,7 @@ impl App {
             }
             Message::Research(msg) => self.research.update(msg).map(Message::Research),
             Message::Labels(msg) => self.labels.update(msg).map(Message::Labels),
+            Message::Providers(msg) => self.providers.update(msg).map(Message::Providers),
             Message::Settings(msg) => {
                 // Apply retention once settings are known at startup, and
                 // reload lists after a save (retention may remove articles).
@@ -785,6 +791,7 @@ impl App {
             Screen::Reports => self.view_reports(),
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Labels => self.labels.view().map(Message::Labels),
+            Screen::Providers => self.providers.view().map(Message::Providers),
             Screen::Settings => self.settings.view().map(Message::Settings),
         };
         let body = row![container(self.view_sidebar()).width(260), rule::vertical(1), main].height(Fill);
@@ -862,6 +869,7 @@ impl App {
                 .style(if self.screen == Screen::Research { button::primary } else { button::text })
                 .on_press(Message::ShowScreen(Screen::Research)),
             self.screen_button("Labels", Screen::Labels),
+            self.screen_button("AI Providers", Screen::Providers),
             self.screen_button("Settings", Screen::Settings),
             rule::horizontal(1),
         ]

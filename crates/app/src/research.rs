@@ -8,12 +8,13 @@ use iced::widget::{
     Space, button, checkbox, column, container, pick_list, radio, row, rule, scrollable, text, text_input,
 };
 use iced::{Element, Fill, Font, Length, Task as Cmd, font};
+use juttusihti_ai::{Approval, Control, Progress, RunSummary};
 use juttusihti_core::analysis::{AnalysisConfig, Depth, SessionSummary, Task};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::{Estimate, Scenario};
 use juttusihti_core::pricing::{Catalog, Provider, format_usd, usd_to_micros};
 use juttusihti_core::search::SearchQuery;
-use juttusihti_core::{Feed, Folder, Label};
+use juttusihti_core::{Feed, Folder, Label, SessionStatus};
 
 use crate::db::Db;
 use crate::format;
@@ -53,6 +54,38 @@ pub enum Msg {
     Previewed(Result<Box<(AnalysisConfig, Estimate)>, String>),
     Save,
     Saved(Result<i64, String>),
+    SelectSession(i64),
+    SessionLoaded(Result<Box<SessionDetail>, String>),
+    Consent(bool),
+    StartRun,
+    Run(RunEvent),
+    PauseRun,
+    CancelRun,
+}
+
+/// A saved session as shown in the run panel.
+#[derive(Debug, Clone)]
+pub struct SessionDetail {
+    id: i64,
+    status: SessionStatus,
+    error: Option<String>,
+    config: AnalysisConfig,
+    estimate: Option<Estimate>,
+    spent: juttusihti_core::budget::Totals,
+}
+
+#[derive(Debug, Clone)]
+pub enum RunEvent {
+    Progress(Progress),
+    Finished(Result<RunSummary, String>),
+}
+
+struct ActiveRun {
+    session: i64,
+    control: Control,
+    log: Vec<String>,
+    tokens: u64,
+    cost: Option<u64>,
 }
 
 pub struct State {
@@ -81,6 +114,10 @@ pub struct State {
     error: Option<String>,
     preview: Option<(AnalysisConfig, Estimate)>,
     saved: Option<i64>,
+    session: Option<SessionDetail>,
+    consent: bool,
+    run: Option<ActiveRun>,
+    last_log: Vec<String>,
 }
 
 const DATE_FORMATS: &[&str] = &["%-d.%-m.%Y", "%d.%m.%Y", "%Y-%m-%d"];
@@ -136,7 +173,92 @@ impl State {
             error: None,
             preview: None,
             saved: None,
+            session: None,
+            consent: false,
+            run: None,
+            last_log: Vec::new(),
         }
+    }
+
+    fn load_session(&self, id: i64) -> Cmd<Msg> {
+        let db = self.db.clone();
+        Cmd::perform(
+            async move {
+                db.call(move |s| -> juttusihti_core::Result<Box<SessionDetail>> {
+                    let rec = s.session(id)?;
+                    let config: AnalysisConfig = serde_json::from_value(rec.config)?;
+                    let estimate = rec.estimate.map(serde_json::from_value).transpose()?;
+                    Ok(Box::new(SessionDetail {
+                        id,
+                        status: rec.status,
+                        error: rec.error,
+                        config,
+                        estimate,
+                        spent: s.session_usage(id)?,
+                    }))
+                })
+                .await
+            },
+            Msg::SessionLoaded,
+        )
+    }
+
+    fn start_run(&mut self) -> Cmd<Msg> {
+        let Some(detail) = &self.session else { return Cmd::none() };
+        if !self.consent || self.run.is_some() {
+            return Cmd::none();
+        }
+        let (id, provider) = (detail.id, detail.config.provider);
+        let control = Control::default();
+        self.run = Some(ActiveRun { session: id, control: control.clone(), log: Vec::new(), tokens: 0, cost: Some(0) });
+        let shared = self.db.shared();
+        let catalog = self.catalog.clone();
+        let stream = iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
+            use iced::futures::SinkExt;
+            let key = tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await;
+            let key = match key {
+                Ok(Ok(Some(k))) => k,
+                Ok(Ok(None)) => {
+                    let _ = out
+                        .send(RunEvent::Finished(Err(format!(
+                            "No API key for {provider}. Add one under AI Providers."
+                        ))))
+                        .await;
+                    return;
+                }
+                Ok(Err(e)) => {
+                    let _ = out.send(RunEvent::Finished(Err(e))).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = out.send(RunEvent::Finished(Err(e.to_string()))).await;
+                    return;
+                }
+            };
+            let client = match juttusihti_ai::Client::new(
+                juttusihti_ai::Endpoint::official(provider, key),
+                juttusihti_ai::RetryPolicy::default(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = out.send(RunEvent::Finished(Err(e.to_string()))).await;
+                    return;
+                }
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let runner = juttusihti_ai::Runner::new(shared, client, catalog, control).with_progress(tx);
+            let handle = tokio::spawn(async move { runner.run(id, Approval { consent_to_send: true }).await });
+            while let Some(p) = rx.recv().await {
+                let _ = out.send(RunEvent::Progress(p)).await;
+            }
+            let result = match handle.await {
+                Ok(Ok(summary)) => Ok(summary),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(e) => Err(format!("analysis task failed: {e}")),
+            };
+            let _ = out.send(RunEvent::Finished(result)).await;
+        });
+        Cmd::run(stream, Msg::Run)
     }
 
     pub fn load(&self) -> Cmd<Msg> {
@@ -372,6 +494,67 @@ impl State {
                     },
                     Msg::Saved,
                 );
+            }
+            Msg::SelectSession(id) => {
+                self.consent = false;
+                return self.load_session(id);
+            }
+            Msg::SessionLoaded(Ok(d)) => {
+                if self.session.as_ref().is_none_or(|s| s.id != d.id) {
+                    self.consent = false;
+                }
+                self.session = Some(*d);
+            }
+            Msg::SessionLoaded(Err(e)) => self.error = Some(e),
+            Msg::Consent(on) => self.consent = on,
+            Msg::StartRun => return self.start_run(),
+            Msg::PauseRun => {
+                if let Some(r) = &self.run {
+                    r.control.pause();
+                }
+            }
+            Msg::CancelRun => {
+                if let Some(r) = &self.run {
+                    r.control.cancel();
+                }
+            }
+            Msg::Run(RunEvent::Progress(p)) => {
+                if let Some(r) = self.run.as_mut() {
+                    match p {
+                        Progress::Stage { name, requests } => r.log.push(format!("{name}: {requests} requests")),
+                        Progress::Call { stage, done, total, tokens, cost } => {
+                            r.tokens = tokens;
+                            r.cost = cost;
+                            r.log.push(format!("{stage}: {done}/{total} done"));
+                        }
+                        Progress::Note(n) => r.log.push(n),
+                    }
+                    if r.log.len() > 200 {
+                        r.log.drain(..r.log.len() - 200);
+                    }
+                }
+            }
+            Msg::Run(RunEvent::Finished(result)) => {
+                let session = self.run.as_ref().map(|r| r.session);
+                if let Some(r) = self.run.as_mut() {
+                    match &result {
+                        Ok(s) => r.log.push(format!(
+                            "Finished: {} · {} calls · {} tokens · {}",
+                            s.final_status.map(|st| st.as_str()).unwrap_or("?"),
+                            s.calls,
+                            thousands(s.usage.total()),
+                            s.cost.map(format_usd).unwrap_or_else(|| "cost unknown".into())
+                        )),
+                        Err(e) => r.log.push(format!("Stopped: {e}")),
+                    }
+                }
+                let finished_log = self.run.take().map(|r| r.log).unwrap_or_default();
+                self.last_log = finished_log;
+                let mut cmds = vec![self.load()];
+                if let Some(id) = session {
+                    cmds.push(self.load_session(id));
+                }
+                return Cmd::batch(cmds);
             }
             Msg::Saved(result) => {
                 self.busy = false;
@@ -644,20 +827,121 @@ impl State {
         match &self.lists {
             Some(l) if !l.sessions.is_empty() => {
                 for s in &l.sessions {
+                    let selected = self.session.as_ref().is_some_and(|d| d.id == s.id);
                     col = col.push(
-                        text(format!(
-                            "#{} · {} · {} · {} · {}",
-                            s.id,
-                            format::full_date(s.created_at),
-                            s.status.as_str(),
-                            s.range_label,
-                            s.model
-                        ))
-                        .size(12),
+                        button(
+                            text(format!(
+                                "#{} · {} · {} · {} · {}",
+                                s.id,
+                                format::full_date(s.created_at),
+                                s.status.as_str(),
+                                s.range_label,
+                                s.model
+                            ))
+                            .size(12),
+                        )
+                        .width(Fill)
+                        .style(if selected { button::secondary } else { button::text })
+                        .on_press(Msg::SelectSession(s.id)),
                     );
                 }
             }
             _ => col = col.push(text("No sessions yet.").size(12)),
+        }
+        if let Some(d) = &self.session {
+            col = col.push(Space::new().height(8)).push(self.view_session(d));
+        }
+        col.into()
+    }
+
+    fn view_session<'a>(&'a self, d: &'a SessionDetail) -> Element<'a, Msg> {
+        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
+        let c = &d.config;
+        let mut col = column![
+            text(format!("Session #{} — {}", d.id, d.status.as_str())).size(16).font(bold),
+            text(format!("{} · {} · {}", c.range_label, c.provider, c.model)).size(12),
+            text(format!(
+                "Content sent: {}. Tasks: {}.",
+                c.depth,
+                c.tasks.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ")
+            ))
+            .size(12),
+        ]
+        .spacing(6);
+        if let Some(e) = &d.estimate {
+            col = col.push(
+                text(format!(
+                    "Estimate: {} articles, {} requests, expected {} (conservative {}).",
+                    e.stats.to_process,
+                    e.requests,
+                    e.expected().cost.map(format_usd).unwrap_or_else(|| "unknown".into()),
+                    e.conservative().cost.map(format_usd).unwrap_or_else(|| "unknown".into())
+                ))
+                .size(12),
+            );
+        }
+        if d.spent.calls > 0 {
+            col = col.push(
+                text(format!(
+                    "Already used: {} calls, {} tokens, {}{}.",
+                    d.spent.calls,
+                    thousands(d.spent.tokens),
+                    format_usd(d.spent.cost),
+                    if d.spent.cost_unknown { " + unknown" } else { "" }
+                ))
+                .size(12),
+            );
+        }
+        if let Some(e) = &d.error {
+            col = col.push(container(text(e).size(12)).padding(6).style(container::warning));
+        }
+        let running_here = self.run.as_ref().is_some_and(|r| r.session == d.id);
+        let runnable =
+            matches!(d.status, SessionStatus::AwaitingApproval | SessionStatus::Paused | SessionStatus::Failed);
+        if running_here {
+            let r = self.run.as_ref().expect("checked");
+            col = col.push(
+                text(format!(
+                    "Running… {} tokens so far, {}",
+                    thousands(r.tokens),
+                    r.cost.map(format_usd).unwrap_or_else(|| "cost unknown".into())
+                ))
+                .size(13)
+                .font(bold),
+            );
+            col = col.push(
+                row![
+                    button(text("Pause")).style(button::secondary).on_press(Msg::PauseRun),
+                    button(text("Cancel")).style(button::danger).on_press(Msg::CancelRun),
+                ]
+                .spacing(8),
+            );
+            col = col.push(
+                text("Cancelling stops new requests at once. A request already accepted by the provider may still be charged.")
+                    .size(11),
+            );
+        } else if runnable {
+            col = col.push(
+                checkbox(self.consent)
+                    .label(format!(
+                        "I agree to send the content of these articles ({}) to {}.",
+                        c.depth.label().to_lowercase(),
+                        c.provider
+                    ))
+                    .on_toggle(Msg::Consent),
+            );
+            let label = if d.status == SessionStatus::AwaitingApproval { "Start analysis" } else { "Resume" };
+            col = col.push(
+                button(text(label)).on_press_maybe((self.consent && self.run.is_none()).then_some(Msg::StartRun)),
+            );
+            col = col.push(
+                text("Limits are enforced by Juttusihti before each request; they are estimates, not provider billing caps.")
+                    .size(11),
+            );
+        }
+        let log = self.run.as_ref().filter(|r| r.session == d.id).map(|r| &r.log).unwrap_or(&self.last_log);
+        for line in log.iter().rev().take(12) {
+            col = col.push(text(line).size(11));
         }
         col.into()
     }
