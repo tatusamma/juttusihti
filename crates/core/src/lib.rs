@@ -9,6 +9,7 @@ pub mod db;
 pub mod discovery;
 pub mod estimate;
 pub mod feed;
+pub mod graph;
 pub mod model;
 pub mod normalize;
 pub mod opml_io;
@@ -17,6 +18,7 @@ pub mod research;
 pub mod review;
 pub mod search;
 pub mod store;
+pub mod timeline;
 
 pub use model::*;
 

@@ -31,7 +31,7 @@ impl std::fmt::Display for SessionChoice {
 pub struct KindChoice(pub RelationshipKind);
 
 impl KindChoice {
-    const ALL: [KindChoice; 6] = [
+    pub const ALL: [KindChoice; 6] = [
         KindChoice(RelationshipKind::Duplicate),
         KindChoice(RelationshipKind::SameEvent),
         KindChoice(RelationshipKind::FollowUp),

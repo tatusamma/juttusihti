@@ -3,6 +3,7 @@
 mod app;
 mod db;
 mod format;
+mod graph_view;
 mod labels;
 mod providers;
 mod reports;
@@ -10,6 +11,7 @@ mod research;
 mod review;
 mod secrets;
 mod settings;
+mod timeline_view;
 
 use std::path::PathBuf;
 

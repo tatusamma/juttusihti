@@ -49,6 +49,8 @@ pub enum Screen {
     Research,
     Labels,
     Review,
+    Graph,
+    Timeline,
     Providers,
     Settings,
 }
@@ -128,6 +130,9 @@ pub enum Message {
     Research(crate::research::Msg),
     Labels(crate::labels::Msg),
     Review(crate::review::Msg),
+    Graph(crate::graph_view::Msg),
+    Timeline(crate::timeline_view::Msg),
+    MapArticle,
     ToggleHideDismissed,
     Providers(crate::providers::Msg),
     Settings(crate::settings::Msg),
@@ -172,6 +177,8 @@ pub struct App {
     research: crate::research::State,
     labels: crate::labels::State,
     review: crate::review::State,
+    graph: crate::graph_view::State,
+    timeline: crate::timeline_view::State,
     hide_dismissed: bool,
     providers: crate::providers::State,
     settings: crate::settings::State,
@@ -188,6 +195,8 @@ impl App {
             research: crate::research::State::new(db.clone()),
             labels: crate::labels::State::new(db.clone()),
             review: crate::review::State::new(db.clone()),
+            graph: crate::graph_view::State::new(db.clone()),
+            timeline: crate::timeline_view::State::new(db.clone()),
             hide_dismissed: false,
             providers: crate::providers::State::new(),
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
@@ -589,6 +598,8 @@ impl App {
                     Screen::Research => self.research.load().map(Message::Research),
                     Screen::Labels => self.labels.load().map(Message::Labels),
                     Screen::Review => self.review.load().map(Message::Review),
+                    Screen::Graph => self.graph.load().map(Message::Graph),
+                    Screen::Timeline => self.timeline.load().map(Message::Timeline),
                     Screen::Providers => self.providers.load().map(Message::Providers),
                     Screen::Settings => self.settings.load().map(Message::Settings),
                     Screen::Reader => Task::none(),
@@ -606,6 +617,19 @@ impl App {
                 self.update(Message::Open(id))
             }
             Message::Review(msg) => self.review.update(msg).map(Message::Review),
+            Message::Graph(crate::graph_view::Msg::OpenArticle(id))
+            | Message::Timeline(crate::timeline_view::Msg::OpenArticle(id)) => {
+                self.screen = Screen::Reader;
+                self.update(Message::Open(id))
+            }
+            Message::Graph(msg) => self.graph.update(msg).map(Message::Graph),
+            Message::Timeline(msg) => self.timeline.update(msg).map(Message::Timeline),
+            Message::MapArticle => {
+                let Some(p) = &self.preview else { return Task::none() };
+                let (id, title) = (p.article.id, p.article.title.clone());
+                self.screen = Screen::Graph;
+                self.graph.focus_article(id, &title).map(Message::Graph)
+            }
             Message::ToggleHideDismissed => {
                 self.hide_dismissed = !self.hide_dismissed;
                 self.page = Page::first(PAGE_SIZE);
@@ -775,6 +799,8 @@ impl App {
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Labels => self.labels.view().map(Message::Labels),
             Screen::Review => self.review.view().map(Message::Review),
+            Screen::Graph => self.graph.view().map(Message::Graph),
+            Screen::Timeline => self.timeline.view().map(Message::Timeline),
             Screen::Providers => self.providers.view().map(Message::Providers),
             Screen::Settings => self.settings.view().map(Message::Settings),
         };
@@ -853,6 +879,8 @@ impl App {
                 .style(if self.screen == Screen::Research { button::primary } else { button::text })
                 .on_press(Message::ShowScreen(Screen::Research)),
             self.screen_button("Review", Screen::Review),
+            self.screen_button("Relationship map", Screen::Graph),
+            self.screen_button("Timeline", Screen::Timeline),
             self.screen_button("Labels", Screen::Labels),
             self.screen_button("AI Providers", Screen::Providers),
             self.screen_button("Settings", Screen::Settings),
@@ -1056,6 +1084,7 @@ impl App {
                 .style(button::secondary)
                 .on_press(Message::ToggleRead),
             button(text("Open in browser")).on_press_maybe(a.url.as_ref().map(|_| Message::OpenInBrowser)),
+            button(text("Map")).style(button::secondary).on_press(Message::MapArticle),
         ]
         .spacing(8);
         let mut labels = row![].spacing(6);
