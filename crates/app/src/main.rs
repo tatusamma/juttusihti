@@ -5,6 +5,7 @@ mod db;
 mod format;
 mod labels;
 mod providers;
+mod reports;
 mod research;
 mod review;
 mod secrets;

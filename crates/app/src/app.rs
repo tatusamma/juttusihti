@@ -9,7 +9,7 @@ use iced::widget::{
     Space, button, column, container, operation, pick_list, rich_text, row, rule, scrollable, span, text, text_input,
 };
 use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font};
-use juttusihti_analytics::{AnalyticsWorker, Bucket, LabelRow, Limits, VolumeRow, Window};
+use juttusihti_analytics::{AnalyticsWorker, Limits};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::ListFilter;
 use juttusihti_core::{
@@ -94,13 +94,6 @@ pub struct Preview {
     labels: Vec<ArticleLabel>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Reports {
-    volume: Vec<VolumeRow>,
-    labels: Vec<LabelRow>,
-    articles_in_snapshot: usize,
-}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     SidebarLoaded(Result<Sidebar, String>),
@@ -151,17 +144,15 @@ pub enum Message {
     SaveFeed,
     CancelEditFeed,
     FeedSaved(Result<(), String>),
-    ReportsLoaded(Result<Reports, String>),
+    Reports(crate::reports::Msg),
     Key(keyboard::Key, keyboard::Modifiers),
     DismissStatus,
 }
 
 pub struct App {
     db: Db,
-    db_path: PathBuf,
     fetcher: Option<Fetcher>,
     fetch_slots: Arc<Semaphore>,
-    analytics: Option<Arc<AnalyticsWorker>>,
     sidebar: Sidebar,
     selection: Selection,
     screen: Screen,
@@ -177,7 +168,7 @@ pub struct App {
     status: Option<String>,
     label_input: String,
     feed_edit: Option<FeedEdit>,
-    reports: Option<Reports>,
+    reports: crate::reports::State,
     research: crate::research::State,
     labels: crate::labels::State,
     review: crate::review::State,
@@ -199,12 +190,10 @@ impl App {
             review: crate::review::State::new(db.clone()),
             hide_dismissed: false,
             providers: crate::providers::State::new(),
-            settings: crate::settings::State::new(db.clone()),
+            settings: crate::settings::State::new(db.clone(), db_path.clone()),
             db,
-            db_path,
             fetcher,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
-            analytics,
             sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![] },
             selection: Selection::View(View::All),
             screen: Screen::Reader,
@@ -219,7 +208,7 @@ impl App {
             status,
             label_input: String::new(),
             feed_edit: None,
-            reports: None,
+            reports: crate::reports::State::new(analytics.clone()),
         };
         let task = Task::batch([app.load_sidebar(), app.load_list(), app.settings.load().map(Message::Settings)]);
         (app, task)
@@ -348,31 +337,6 @@ impl App {
         };
         let id = self.listing.items[next].id;
         self.update(Message::Open(id))
-    }
-
-    fn load_reports(&self) -> Task<Message> {
-        let Some(worker) = self.analytics.clone() else {
-            return Task::done(Message::ReportsLoaded(Err("analytics is unavailable".into())));
-        };
-        Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || -> Result<Reports, String> {
-                    let stats = worker.refresh().map_err(|e| e.to_string())?.recv().map_err(|e| e.to_string())?;
-                    let stats = stats.map_err(|e| e.to_string())?;
-                    let now = chrono::Utc::now().timestamp();
-                    let offset = i64::from(chrono::Local::now().offset().local_minus_utc());
-                    let window = Window { from: now - 30 * 86_400, to: now + 1, utc_offset_secs: offset };
-                    let rx = worker
-                        .run(move |a| Ok((a.volume_by_source(window, Bucket::Day)?, a.label_distribution(window)?)))
-                        .map_err(|e| e.to_string())?;
-                    let (volume, labels) = rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                    Ok(Reports { volume, labels, articles_in_snapshot: stats.articles })
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            },
-            Message::ReportsLoaded,
-        )
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -621,7 +585,7 @@ impl App {
             Message::ShowScreen(screen) => {
                 self.screen = screen;
                 match screen {
-                    Screen::Reports => self.load_reports(),
+                    Screen::Reports => self.reports.load().map(Message::Reports),
                     Screen::Research => self.research.load().map(Message::Research),
                     Screen::Labels => self.labels.load().map(Message::Labels),
                     Screen::Review => self.review.load().map(Message::Review),
@@ -630,10 +594,7 @@ impl App {
                     Screen::Reader => Task::none(),
                 }
             }
-            Message::ReportsLoaded(Ok(r)) => {
-                self.reports = Some(r);
-                Task::none()
-            }
+            Message::Reports(msg) => self.reports.update(msg).map(Message::Reports),
             Message::Research(crate::research::Msg::ReviewSession(id)) => {
                 self.screen = Screen::Review;
                 self.review.open(id).map(Message::Review)
@@ -768,7 +729,6 @@ impl App {
             | Message::FeedAdded(Err(e))
             | Message::Imported(Err(e))
             | Message::Exported(Err(e))
-            | Message::ReportsLoaded(Err(e))
             | Message::RetentionApplied(Err(e))
             | Message::LabelsChanged(Err(e))
             | Message::FeedSaved(Err(e)) => {
@@ -811,7 +771,7 @@ impl App {
             ]
             .height(Fill)
             .into(),
-            Screen::Reports => self.view_reports(),
+            Screen::Reports => self.reports.view().map(Message::Reports),
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Labels => self.labels.view().map(Message::Labels),
             Screen::Review => self.review.view().map(Message::Review),
@@ -1152,64 +1112,6 @@ impl App {
             .spacing(12)
             .padding(24)
             .max_width(820),
-        )
-        .height(Fill)
-        .into()
-    }
-
-    fn view_reports(&self) -> Element<'_, Message> {
-        let Some(r) = &self.reports else {
-            return container(text("Building DuckDB snapshot…")).center(Fill).into();
-        };
-        let mut by_feed: Vec<(String, i64)> = Vec::new();
-        for v in &r.volume {
-            match by_feed.iter_mut().find(|(t, _)| *t == v.feed_title) {
-                Some((_, n)) => *n += v.articles,
-                None => by_feed.push((v.feed_title.clone(), v.articles)),
-            }
-        }
-        by_feed.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-        let max = by_feed.first().map_or(1, |(_, n)| *n).max(1);
-        let mut feeds = column![text("Articles per source, last 30 days").size(18)].spacing(6);
-        for (title, n) in &by_feed {
-            let share = (*n as f32 / max as f32 * 300.0).max(2.0);
-            feeds = feeds.push(
-                row![
-                    text(title.clone()).size(13).width(220),
-                    container(Space::new().width(share).height(12)).style(container::primary),
-                    text(n.to_string()).size(13),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            );
-        }
-        if by_feed.is_empty() {
-            feeds = feeds.push(text("No articles in the last 30 days.").size(13));
-        }
-        let mut labels = column![text("Labels").size(18)].spacing(4);
-        for l in &r.labels {
-            labels = labels
-                .push(text(format!("{} — {} confirmed, {} suggested", l.label, l.confirmed, l.suggested)).size(13));
-        }
-        if r.labels.is_empty() {
-            labels = labels.push(text("No labels yet.").size(13));
-        }
-        scrollable(
-            column![
-                text(format!(
-                    "Snapshot of {} articles (DuckDB, read-only copy of the local database)",
-                    r.articles_in_snapshot
-                ))
-                .size(13),
-                feeds,
-                labels,
-                button(text("Rebuild snapshot"))
-                    .style(button::secondary)
-                    .on_press(Message::ShowScreen(Screen::Reports)),
-                text(format!("Database: {}", self.db_path.display())).size(11),
-            ]
-            .spacing(20)
-            .padding(24),
         )
         .height(Fill)
         .into()

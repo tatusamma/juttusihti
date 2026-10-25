@@ -150,3 +150,60 @@ fn missing_database_reports_an_error() {
     let worker = AnalyticsWorker::spawn(dir.path().join("nope.db"), Limits::default()).unwrap();
     assert!(worker.refresh().unwrap().recv().unwrap().is_err());
 }
+
+#[test]
+fn trend_cross_source_relationship_and_cost_reports() {
+    let mut store = Store::open_in_memory().unwrap();
+    seed(&mut store);
+    let ids: Vec<i64> = store
+        .list_articles(Default::default(), juttusihti_core::Page::first(10))
+        .unwrap()
+        .0
+        .iter()
+        .map(|a| a.id)
+        .collect();
+    // ids: [5 (outside window), 3 (Oct 2), 4 (Oct 1 late), 2, 1]
+    let talous = store.labels().unwrap().into_iter().find(|l| l.name == "Talous").unwrap().id;
+    store.tag_article(ids[3], talous, Origin::User, None).unwrap();
+    store.record_relevance(ids[1], None, "clickbait", None, Origin::User, None).unwrap();
+    store.record_relevance(ids[2], None, "clickbait", None, Origin::Ai, None).unwrap();
+    store
+        .relate(ids[1], ids[2], juttusihti_core::RelationshipKind::SameEvent, Origin::Ai, None, Some(0.5), None)
+        .unwrap();
+    store.relate(ids[3], ids[4], juttusihti_core::RelationshipKind::FollowUp, Origin::User, None, None, None).unwrap();
+    store
+        .conn()
+        .execute_batch(&format!(
+            "INSERT INTO usage_ledger(provider, model, operation, input_tokens, output_tokens, reasoning_tokens, cost_microunits, created_at)
+             VALUES ('openai','m','x',10,5,5,100,{a}), ('openai','m','x',10,5,0,NULL,{b});",
+            a = OCT1 + 3600,
+            b = OCT1 + DAY + 3600
+        ))
+        .unwrap();
+
+    let a = Analytics::snapshot(store.conn(), &Limits::default()).unwrap();
+    let trend = a.label_trend(window(0), Bucket::Day, 5).unwrap();
+    // Talous is confirmed on ids[1] (seed, Oct 2) and ids[3] (Oct 1); ids[0] is outside the window.
+    assert_eq!(trend.iter().map(|t| t.articles).sum::<i64>(), 2, "{trend:?}");
+    assert!(trend.iter().all(|t| t.key == "Talous"));
+
+    let cross = a.labels_by_source(window(0), 5).unwrap();
+    assert_eq!(cross.iter().map(|c| c.articles).sum::<i64>(), 2);
+
+    let rel = a.relevance_trend(window(0), Bucket::Month).unwrap();
+    assert_eq!(rel.len(), 1);
+    assert_eq!((rel[0].key.as_str(), rel[0].articles, rel[0].confirmed), ("clickbait", 2, 1));
+
+    let stats = a.relationship_stats().unwrap();
+    assert_eq!(stats.len(), 2);
+    assert!(stats.iter().any(|s| s.kind == "follow_up" && s.status == "confirmed"));
+
+    let cost = a.daily_cost(window(0)).unwrap();
+    assert_eq!(cost.len(), 2);
+    assert_eq!((cost[0].tokens, cost[0].cost_microunits), (20, Some(100)));
+    assert_eq!(cost[1].cost_microunits, None, "a day with an unpriced call has unknown cost");
+
+    let usage = a.usage_by_model().unwrap();
+    let openai = usage.iter().find(|u| u.provider == "openai" && u.model == "m").unwrap();
+    assert_eq!(openai.output_tokens, 5 + 5 + 5, "reasoning tokens count as output");
+}

@@ -11,6 +11,7 @@
 //! configuration is locked so later SQL cannot loosen it. Only the fixed
 //! report queries in this crate run; there is no free-form SQL entry point.
 
+pub mod export;
 mod worker;
 
 pub use worker::{AnalyticsWorker, CancelHandle};
@@ -107,6 +108,39 @@ pub struct UsageRow {
     pub cost_microunits: Option<i64>,
 }
 
+/// A count per key and time bucket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrendRow {
+    pub key: String,
+    /// Bucket start, UTC unix seconds.
+    pub bucket_start: i64,
+    pub articles: i64,
+    pub confirmed: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossRow {
+    pub source: String,
+    pub label: String,
+    pub articles: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipStat {
+    pub kind: String,
+    pub origin: String,
+    pub status: String,
+    pub links: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostRow {
+    pub day_start: i64,
+    pub calls: i64,
+    pub tokens: i64,
+    pub cost_microunits: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SnapshotStats {
     pub feeds: usize,
@@ -128,7 +162,10 @@ CREATE TABLE article_labels (article_id BIGINT, label_id BIGINT, status VARCHAR)
 CREATE TABLE entities (id BIGINT PRIMARY KEY, kind VARCHAR, name VARCHAR);
 CREATE TABLE article_entities (article_id BIGINT, entity_id BIGINT, status VARCHAR);
 CREATE TABLE usage_ledger (provider VARCHAR, model VARCHAR, operation VARCHAR, input_tokens BIGINT,
-                           cached_input_tokens BIGINT, output_tokens BIGINT, cost_microunits BIGINT);
+                           cached_input_tokens BIGINT, output_tokens BIGINT, reasoning_tokens BIGINT,
+                           cost_microunits BIGINT, created_at BIGINT);
+CREATE TABLE article_relevance (article_id BIGINT, class VARCHAR, status VARCHAR);
+CREATE TABLE article_relationships (source_id BIGINT, target_id BIGINT, kind VARCHAR, origin VARCHAR, status VARCHAR);
 ";
 
 /// Opens a locked-down in-memory DuckDB instance.
@@ -186,7 +223,8 @@ impl Analytics {
             &tx,
             &conn,
             "usage_ledger",
-            "SELECT provider, model, operation, input_tokens, cached_input_tokens, output_tokens, cost_microunits FROM usage_ledger",
+            "SELECT provider, model, operation, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+                    cost_microunits, created_at FROM usage_ledger",
             |r, a| {
                 Ok(a.append_row(params![
                     r.get::<_, String>(0)?,
@@ -195,7 +233,27 @@ impl Analytics {
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
-                    r.get::<_, Option<i64>>(6)?
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, i64>(8)?
+                ])?)
+            },
+        )?;
+        copy(&tx, &conn, "article_relevance", "SELECT article_id, class, status FROM article_relevance", |r, a| {
+            Ok(a.append_row(params![r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?])?)
+        })?;
+        copy(
+            &tx,
+            &conn,
+            "article_relationships",
+            "SELECT source_id, target_id, kind, origin, status FROM article_relationships",
+            |r, a| {
+                Ok(a.append_row(params![
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?
                 ])?)
             },
         )?;
@@ -272,7 +330,7 @@ impl Analytics {
     /// call's cost was unknown, so unknown never silently becomes zero.
     pub fn usage_by_model(&self) -> Result<Vec<UsageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT provider, model, count(*), sum(input_tokens), sum(cached_input_tokens), sum(output_tokens),
+            "SELECT provider, model, count(*), sum(input_tokens), sum(cached_input_tokens), sum(output_tokens + reasoning_tokens),
                     CASE WHEN count(*) = count(cost_microunits) THEN sum(cost_microunits) END
              FROM usage_ledger GROUP BY provider, model ORDER BY provider, model",
         )?;
@@ -298,6 +356,93 @@ impl Analytics {
              WHERE a.effective_at >= ?1 AND a.effective_at < ?2 GROUP BY f.title ORDER BY f.title",
         )?;
         let rows = stmt.query_map(params![window.from, window.to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<duckdb::Result<_>>()?)
+    }
+
+    /// Label usage per time bucket for the `top` most used confirmed labels:
+    /// how topics emerge and fade.
+    pub fn label_trend(&self, window: Window, bucket: Bucket, top: i64) -> Result<Vec<TrendRow>> {
+        let sql = format!(
+            "WITH l AS (
+                SELECT lb.name, a.effective_at FROM article_labels al
+                JOIN labels lb ON lb.id = al.label_id JOIN articles a ON a.id = al.article_id
+                WHERE al.status = 'confirmed' AND a.effective_at >= ?2 AND a.effective_at < ?3),
+             top AS (SELECT name FROM l GROUP BY name ORDER BY count(*) DESC, name LIMIT ?4)
+             SELECT l.name,
+                    CAST(epoch(date_trunc('{b}', make_timestamp((l.effective_at + ?1) * 1000000))) AS BIGINT) - ?1 AS bucket,
+                    count(*), count(*)
+             FROM l JOIN top USING (name) GROUP BY ALL ORDER BY bucket, l.name",
+            b = bucket.sql()
+        );
+        self.trend(&sql, params![window.utc_offset_secs, window.from, window.to, top])
+    }
+
+    /// Relevance classes per time bucket (all non-rejected; `confirmed`
+    /// counts only user-confirmed ones), e.g. clickbait trends.
+    pub fn relevance_trend(&self, window: Window, bucket: Bucket) -> Result<Vec<TrendRow>> {
+        let sql = format!(
+            "SELECT r.class,
+                    CAST(epoch(date_trunc('{b}', make_timestamp((a.effective_at + ?1) * 1000000))) AS BIGINT) - ?1 AS bucket,
+                    count(*), count(*) FILTER (WHERE r.status = 'confirmed')
+             FROM article_relevance r JOIN articles a ON a.id = r.article_id
+             WHERE r.status <> 'rejected' AND a.effective_at >= ?2 AND a.effective_at < ?3
+             GROUP BY ALL ORDER BY bucket, r.class",
+            b = bucket.sql()
+        );
+        self.trend(&sql, params![window.utc_offset_secs, window.from, window.to])
+    }
+
+    fn trend(&self, sql: &str, p: impl duckdb::Params) -> Result<Vec<TrendRow>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(p, |r| {
+            Ok(TrendRow { key: r.get(0)?, bucket_start: r.get(1)?, articles: r.get(2)?, confirmed: r.get(3)? })
+        })?;
+        Ok(rows.collect::<duckdb::Result<_>>()?)
+    }
+
+    /// Confirmed labels per source: how coverage differs across sources.
+    pub fn labels_by_source(&self, window: Window, top_labels: i64) -> Result<Vec<CrossRow>> {
+        let mut stmt = self.conn.prepare(
+            "WITH l AS (
+                SELECT f.title AS source, lb.name AS label FROM article_labels al
+                JOIN labels lb ON lb.id = al.label_id JOIN articles a ON a.id = al.article_id
+                JOIN feeds f ON f.id = a.feed_id
+                WHERE al.status = 'confirmed' AND a.effective_at >= ?1 AND a.effective_at < ?2),
+             top AS (SELECT label FROM l GROUP BY label ORDER BY count(*) DESC, label LIMIT ?3)
+             SELECT source, label, count(*) FROM l JOIN top USING (label)
+             GROUP BY ALL ORDER BY label, count(*) DESC, source",
+        )?;
+        let rows = stmt.query_map(params![window.from, window.to, top_labels], |r| {
+            Ok(CrossRow { source: r.get(0)?, label: r.get(1)?, articles: r.get(2)? })
+        })?;
+        Ok(rows.collect::<duckdb::Result<_>>()?)
+    }
+
+    /// Story-link counts by type, origin and review status.
+    pub fn relationship_stats(&self) -> Result<Vec<RelationshipStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, origin, status, count(*) FROM article_relationships
+             GROUP BY ALL ORDER BY kind, origin, status",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RelationshipStat { kind: r.get(0)?, origin: r.get(1)?, status: r.get(2)?, links: r.get(3)? })
+        })?;
+        Ok(rows.collect::<duckdb::Result<_>>()?)
+    }
+
+    /// AI calls, tokens and cost per day. Cost is `None` for days with any
+    /// unpriced call.
+    pub fn daily_cost(&self, window: Window) -> Result<Vec<CostRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(epoch(date_trunc('day', make_timestamp((created_at + ?1) * 1000000))) AS BIGINT) - ?1 AS day,
+                    count(*), sum(input_tokens + cached_input_tokens + output_tokens + reasoning_tokens),
+                    CASE WHEN count(*) = count(cost_microunits) THEN sum(cost_microunits) END
+             FROM usage_ledger WHERE created_at >= ?2 AND created_at < ?3
+             GROUP BY ALL ORDER BY day",
+        )?;
+        let rows = stmt.query_map(params![window.utc_offset_secs, window.from, window.to], |r| {
+            Ok(CostRow { day_start: r.get(0)?, calls: r.get(1)?, tokens: r.get(2)?, cost_microunits: r.get(3)? })
+        })?;
         Ok(rows.collect::<duckdb::Result<_>>()?)
     }
 

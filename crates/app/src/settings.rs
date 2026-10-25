@@ -51,6 +51,7 @@ pub enum Msg {
 
 pub struct State {
     db: Db,
+    db_path: std::path::PathBuf,
     pub values: Values,
     retention: String,
     refresh: String,
@@ -59,10 +60,11 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Db, db_path: std::path::PathBuf) -> Self {
         let v = Values::default();
         Self {
             db,
+            db_path,
             values: v,
             retention: String::new(),
             refresh: v.refresh_minutes.to_string(),
@@ -185,6 +187,7 @@ impl State {
             text("Appearance").size(16).font(bold),
             checkbox(self.dark).label("Dark theme").on_toggle(Msg::Dark),
             button(text("Save")).on_press(Msg::Save),
+            text(format!("Database: {}", self.db_path.display())).size(11),
         ]
         .spacing(14)
         .padding(24)
@@ -219,7 +222,7 @@ mod tests {
     #[test]
     fn validates_form() {
         let db = Db::new(juttusihti_core::store::Store::open_in_memory().unwrap());
-        let mut st = State::new(db);
+        let mut st = State::new(db, std::path::PathBuf::from("test.db"));
         st.retention = "3".into();
         assert!(st.parse().is_err());
         st.retention = "30".into();
