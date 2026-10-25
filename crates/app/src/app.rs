@@ -48,6 +48,7 @@ pub enum Screen {
     Reports,
     Research,
     Labels,
+    Review,
     Providers,
     Settings,
 }
@@ -133,6 +134,8 @@ pub enum Message {
     ShowScreen(Screen),
     Research(crate::research::Msg),
     Labels(crate::labels::Msg),
+    Review(crate::review::Msg),
+    ToggleHideDismissed,
     Providers(crate::providers::Msg),
     Settings(crate::settings::Msg),
     RetentionApplied(Result<usize, String>),
@@ -177,6 +180,8 @@ pub struct App {
     reports: Option<Reports>,
     research: crate::research::State,
     labels: crate::labels::State,
+    review: crate::review::State,
+    hide_dismissed: bool,
     providers: crate::providers::State,
     settings: crate::settings::State,
 }
@@ -191,6 +196,8 @@ impl App {
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
             labels: crate::labels::State::new(db.clone()),
+            review: crate::review::State::new(db.clone()),
+            hide_dismissed: false,
             providers: crate::providers::State::new(),
             settings: crate::settings::State::new(db.clone()),
             db,
@@ -267,6 +274,7 @@ impl App {
             view: filter.view,
             feed_ids: filter.feed_id.into_iter().collect(),
             folder_ids: filter.folder_id.into_iter().collect(),
+            hide_dismissed: self.hide_dismissed,
             ..Default::default()
         };
         Task::perform(
@@ -616,6 +624,7 @@ impl App {
                     Screen::Reports => self.load_reports(),
                     Screen::Research => self.research.load().map(Message::Research),
                     Screen::Labels => self.labels.load().map(Message::Labels),
+                    Screen::Review => self.review.load().map(Message::Review),
                     Screen::Providers => self.providers.load().map(Message::Providers),
                     Screen::Settings => self.settings.load().map(Message::Settings),
                     Screen::Reader => Task::none(),
@@ -625,8 +634,22 @@ impl App {
                 self.reports = Some(r);
                 Task::none()
             }
+            Message::Research(crate::research::Msg::ReviewSession(id)) => {
+                self.screen = Screen::Review;
+                self.review.open(id).map(Message::Review)
+            }
             Message::Research(msg) => self.research.update(msg).map(Message::Research),
             Message::Labels(msg) => self.labels.update(msg).map(Message::Labels),
+            Message::Review(crate::review::Msg::OpenArticle(id)) => {
+                self.screen = Screen::Reader;
+                self.update(Message::Open(id))
+            }
+            Message::Review(msg) => self.review.update(msg).map(Message::Review),
+            Message::ToggleHideDismissed => {
+                self.hide_dismissed = !self.hide_dismissed;
+                self.page = Page::first(PAGE_SIZE);
+                self.load_list()
+            }
             Message::Providers(msg) => self.providers.update(msg).map(Message::Providers),
             Message::Settings(msg) => {
                 // Apply retention once settings are known at startup, and
@@ -791,6 +814,7 @@ impl App {
             Screen::Reports => self.view_reports(),
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Labels => self.labels.view().map(Message::Labels),
+            Screen::Review => self.review.view().map(Message::Review),
             Screen::Providers => self.providers.view().map(Message::Providers),
             Screen::Settings => self.settings.view().map(Message::Settings),
         };
@@ -868,6 +892,7 @@ impl App {
                 .padding([6, 10])
                 .style(if self.screen == Screen::Research { button::primary } else { button::text })
                 .on_press(Message::ShowScreen(Screen::Research)),
+            self.screen_button("Review", Screen::Review),
             self.screen_button("Labels", Screen::Labels),
             self.screen_button("AI Providers", Screen::Providers),
             self.screen_button("Settings", Screen::Settings),
@@ -968,6 +993,11 @@ impl App {
             header = header.push(text(format!("Query: {interp}")).size(12));
         }
         header = header
+            .push(
+                button(text(if self.hide_dismissed { "Show dismissed" } else { "Hide dismissed" }).size(12))
+                    .style(button::text)
+                    .on_press(Message::ToggleHideDismissed),
+            )
             .push(button(text("Mark all read").size(12)).style(button::text).on_press(Message::MarkAllRead))
             .push(
                 button(text("‹").size(14))

@@ -414,6 +414,7 @@ impl Runner {
             "relevance": item.relevance.as_ref().map(|(c, r)| serde_json::json!({"class": c.as_str(), "reason": r})),
         });
         let suggestion = self.suggestion(ctx, "extraction", payload.clone(), None, None);
+        let ctx_session = ctx.session;
         let stored = self.db(|s| {
             let sid = s.record_suggestion(&suggestion)?;
             for name in &item.labels {
@@ -446,6 +447,9 @@ impl Runner {
                         Origin::Ai,
                     )?;
                 }
+            }
+            if let Some((class, reason)) = &item.relevance {
+                s.record_relevance(rec.id, Some(ctx_session), class.as_str(), Some(reason), Origin::Ai, Some(sid))?;
             }
             for t in tasks {
                 let key = article_cache_key(&rec.content_hash, config.provider, &config.model, *t, config.depth);

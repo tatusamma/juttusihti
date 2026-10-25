@@ -14,6 +14,7 @@ pub mod normalize;
 pub mod opml_io;
 pub mod pricing;
 pub mod research;
+pub mod review;
 pub mod search;
 pub mod store;
 

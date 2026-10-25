@@ -420,6 +420,10 @@ pub struct SearchQuery {
     /// undated articles fall back to their fetch time for date ranges.
     #[serde(default)]
     pub require_published_date: bool,
+    /// Hide articles the user confirmed as unrelated, duplicate, low
+    /// information or clickbait. Turning this off reveals them again.
+    #[serde(default)]
+    pub hide_dismissed: bool,
 }
 
 /// Search results plus the interpreted query for display.
@@ -451,6 +455,13 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     }
     if q.require_published_date {
         sql.push_str(" AND a.published_at IS NOT NULL");
+    }
+    if q.hide_dismissed {
+        sql.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM article_relevance rv WHERE rv.article_id = a.id
+               AND rv.status = 'confirmed' AND rv.class IN {})",
+            crate::review::DISMISSED_CLASSES
+        ));
     }
     let in_list = |sql: &mut String, params: &mut Vec<Value>, col: &str, ids: &[i64]| {
         if !ids.is_empty() {

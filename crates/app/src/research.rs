@@ -61,6 +61,8 @@ pub enum Msg {
     Run(RunEvent),
     PauseRun,
     CancelRun,
+    /// Handled by the app: open the Review screen for a session.
+    ReviewSession(i64),
 }
 
 /// A saved session as shown in the run panel.
@@ -518,6 +520,7 @@ impl State {
                     r.control.cancel();
                 }
             }
+            Msg::ReviewSession(_) => {}
             Msg::Run(RunEvent::Progress(p)) => {
                 if let Some(r) = self.run.as_mut() {
                     match p {
@@ -938,6 +941,10 @@ impl State {
                 text("Limits are enforced by Juttusihti before each request; they are estimates, not provider billing caps.")
                     .size(11),
             );
+        }
+        if !running_here && d.spent.calls > 0 {
+            col = col
+                .push(button(text("Review suggestions")).style(button::secondary).on_press(Msg::ReviewSession(d.id)));
         }
         let log = self.run.as_ref().filter(|r| r.session == d.id).map(|r| &r.log).unwrap_or(&self.last_log);
         for line in log.iter().rev().take(12) {

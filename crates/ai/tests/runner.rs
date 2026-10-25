@@ -325,6 +325,10 @@ async fn full_run_on_every_provider() {
         let summaries: i64 =
             s.conn().query_row("SELECT count(*) FROM ai_suggestions WHERE kind = 'summary'", [], |r| r.get(0)).unwrap();
         assert_eq!(summaries, 1);
+        let counts = s.review_counts(sid).unwrap();
+        assert_eq!(counts.relevance, 5, "{provider:?}: one relevance suggestion per distinct article");
+        // 3 pairs among the similar "Uutinen N kertoo säästä" headlines + the government pair.
+        assert!(counts.entities > 0 && counts.relationships == 4 && counts.has_summary, "{provider:?} {counts:?}");
     }
 }
 

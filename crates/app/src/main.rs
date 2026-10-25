@@ -6,6 +6,7 @@ mod format;
 mod labels;
 mod providers;
 mod research;
+mod review;
 mod secrets;
 mod settings;
 
