@@ -268,3 +268,82 @@ impl Store {
         Ok(out)
     }
 }
+
+/// A stored location with its provenance, for the map and places list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocationRow {
+    pub id: i64,
+    pub article_id: ArticleId,
+    pub article_title: String,
+    pub place_name: String,
+    pub country: Option<String>,
+    /// `(latitude, longitude)` when known.
+    pub coordinates: Option<(f64, f64)>,
+    pub role: crate::LocationRole,
+    pub evidence: Option<String>,
+    pub coordinate_source: Option<String>,
+    pub ambiguous: bool,
+    pub origin: Origin,
+    pub status: Status,
+}
+
+impl Store {
+    /// Locations, optionally limited to one session's articles. Rejected
+    /// locations are left out.
+    pub fn locations(&self, session: Option<i64>, limit: u32) -> Result<Vec<LocationRow>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT l.id, a.id, a.title, l.place_name, l.country, l.latitude, l.longitude, l.role, l.evidence,
+                    l.coordinate_source, l.ambiguous, l.origin, l.status
+             FROM article_locations l JOIN articles a ON a.id = l.article_id
+             WHERE l.status <> 'rejected'
+               AND (?1 IS NULL OR l.article_id IN (SELECT article_id FROM analysis_session_articles WHERE session_id = ?1))
+             ORDER BY l.latitude IS NULL, l.place_name COLLATE NOCASE, a.effective_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![session, limit], |r| {
+            let (lat, lon): (Option<f64>, Option<f64>) = (r.get(5)?, r.get(6)?);
+            Ok(LocationRow {
+                id: r.get(0)?,
+                article_id: r.get(1)?,
+                article_title: r.get(2)?,
+                place_name: r.get(3)?,
+                country: r.get(4)?,
+                coordinates: lat.zip(lon),
+                role: r.get(7)?,
+                evidence: r.get(8)?,
+                coordinate_source: r.get(9)?,
+                ambiguous: r.get(10)?,
+                origin: r.get(11)?,
+                status: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sets (or clears) coordinates placed by the user. Placing a location
+    /// is a user verification, so it also confirms it and clears the
+    /// ambiguity flag; clearing coordinates leaves the status unchanged.
+    pub fn set_location_coordinates(&self, id: i64, coordinates: Option<(f64, f64)>) -> Result<()> {
+        let n = match coordinates {
+            Some((lat, lon)) => {
+                if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) || !lat.is_finite() || !lon.is_finite() {
+                    return Err(Error::Invalid("coordinates out of range".into()));
+                }
+                self.conn().execute(
+                    "UPDATE article_locations SET latitude = ?2, longitude = ?3, coordinate_source = 'user',
+                            status = 'confirmed', ambiguous = 0 WHERE id = ?1",
+                    params![id, lat, lon],
+                )?
+            }
+            None => self.conn().execute(
+                "UPDATE article_locations SET latitude = NULL, longitude = NULL, coordinate_source = NULL WHERE id = ?1",
+                [id],
+            )?,
+        };
+        if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    }
+
+    pub fn decide_location(&self, id: i64, status: Status) -> Result<()> {
+        let n = self.conn().execute("UPDATE article_locations SET status = ?2 WHERE id = ?1", params![id, status])?;
+        if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    }
+}

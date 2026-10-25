@@ -144,14 +144,28 @@ tokenizer, or AI-assisted query expansion.
   - 7/30/90/365-day windows with day/week/month buckets, and a cancel button.
   - CSV export with formula-injection guarding.
   - Not done: benchmarks at 10k/100k/1M articles.
-- **M7 Visual research**: relationship map and timeline done; geographic map not started.
+- **M7 Visual research**: done (relationship map, timeline, geographic map).
   - Relationship map: Canvas graph capped at 150 nodes, with a hop limit, filters,
     zoom/pan, selection and links drawn solid when confirmed and dashed for AI suggestions.
   - Timeline: source lanes, story threads, events with known dates only, a volume histogram,
     zoom, pan and filters.
-  - Geographic map: locations are already stored with role, evidence and coordinate
-    provenance, and AI place names never get coordinates. The basemap still needs a decision:
-    which tile provider, or offline map data (see OSM tile policy).
+  - Geographic map: OpenStreetMap raster tiles, following the
+    [tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
+    - Tiles stay off until the user enables them, with a notice that the viewing area is
+      sent to the tile server. Without tiles, a coordinate grid is shown and nothing is sent.
+    - Only tiles in the current viewport are requested, after a pan or zoom ends. There is no
+      prefetching and no offline download. At most 2 requests run at once, each with a
+      distinct User-Agent.
+    - Tiles are cached on disk according to `Cache-Control`/`Expires`, kept 7 days when the
+      server sends no caching headers, and revalidated with `If-None-Match`/`If-Modified-Since`.
+      `no-cache` is never sent, and `no-store` is honoured.
+    - "© OpenStreetMap contributors" is drawn on the map, with links to the copyright page and
+      "Report a map issue".
+    - The tile URL is configurable in Settings (https only), and the cache can be cleared there.
+    - Places named by AI have no coordinates. The user checks the evidence and clicks
+      "Place on map", which records `coordinate_source = user` and confirms the place.
+      Ambiguous places are flagged.
+    - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
 - **M8 Distribution**: not started (installers, Linux verification, security review,
   benchmarks).
 

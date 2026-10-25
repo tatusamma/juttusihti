@@ -5,6 +5,8 @@
 //! Parsing and storage stay in `juttusihti-core`; [`apply`] glues a fetch
 //! outcome onto the store.
 
+pub mod tiles;
+
 use std::time::Duration;
 
 use juttusihti_core::discovery::{self, DiscoveredFeed};

@@ -47,6 +47,11 @@ pub enum Msg {
     Save,
     Saved(Result<(Values, usize), String>),
     ThemeSaved(Result<(), String>),
+    MapLoaded(Option<String>, u64),
+    TileUrl(String),
+    SaveTileUrl,
+    ClearTiles,
+    MapDone(Result<String, String>),
 }
 
 pub struct State {
@@ -56,6 +61,8 @@ pub struct State {
     retention: String,
     refresh: String,
     dark: bool,
+    tile_url: String,
+    tile_cache_bytes: u64,
     message: Option<Result<String, String>>,
 }
 
@@ -69,13 +76,30 @@ impl State {
             retention: String::new(),
             refresh: v.refresh_minutes.to_string(),
             dark: v.dark,
+            tile_url: juttusihti_fetch::tiles::OSM_TILE_URL.into(),
+            tile_cache_bytes: 0,
             message: None,
         }
     }
 
     pub fn load(&self) -> Cmd<Msg> {
         let db = self.db.clone();
-        Cmd::perform(async move { db.call(|s| read(s)).await }, Msg::Loaded)
+        let values = Cmd::perform(async move { db.call(|s| read(s)).await }, Msg::Loaded);
+        let (db, tiles) = (self.db.clone(), self.tile_cache());
+        let map = Cmd::perform(
+            async move {
+                let url = db.call(|s| s.setting(crate::map_view::KEY_TILE_URL)).await.ok().flatten();
+                let size = tokio::task::spawn_blocking(move || tiles.size()).await.unwrap_or(0);
+                (url, size)
+            },
+            |(url, size)| Msg::MapLoaded(url, size),
+        );
+        Cmd::batch([values, map])
+    }
+
+    fn tile_cache(&self) -> juttusihti_fetch::tiles::TileCache {
+        let dir = self.db_path.parent().map(|p| p.join("tiles")).unwrap_or_else(|| "tiles".into());
+        juttusihti_fetch::tiles::TileCache::new(dir)
     }
 
     fn sync_form(&mut self) {
@@ -158,6 +182,44 @@ impl State {
                 }));
             }
             Msg::Saved(Err(e)) => self.message = Some(Err(e)),
+            Msg::MapLoaded(url, size) => {
+                if let Some(u) = url {
+                    self.tile_url = u;
+                }
+                self.tile_cache_bytes = size;
+            }
+            Msg::TileUrl(u) => self.tile_url = u,
+            Msg::SaveTileUrl => {
+                let url = self.tile_url.trim().to_string();
+                if let Err(e) = juttusihti_fetch::tiles::validate_template(&url) {
+                    self.message = Some(Err(e.to_string()));
+                    return Cmd::none();
+                }
+                let db = self.db.clone();
+                return Cmd::perform(
+                    async move {
+                        db.call(move |s| s.set_setting(crate::map_view::KEY_TILE_URL, &url)).await?;
+                        Ok("Saved the tile server. Reopen the map to use it.".to_string())
+                    },
+                    Msg::MapDone,
+                );
+            }
+            Msg::ClearTiles => {
+                let tiles = self.tile_cache();
+                return Cmd::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || tiles.clear().map_err(|e| e.to_string()))
+                            .await
+                            .map_err(|e| e.to_string())??;
+                        Ok("Cleared the map tile cache.".to_string())
+                    },
+                    Msg::MapDone,
+                );
+            }
+            Msg::MapDone(r) => {
+                self.message = Some(r);
+                return self.load();
+            }
         }
         Cmd::none()
     }
@@ -187,6 +249,19 @@ impl State {
             text("Appearance").size(16).font(bold),
             checkbox(self.dark).label("Dark theme").on_toggle(Msg::Dark),
             button(text("Save")).on_press(Msg::Save),
+            text("Map").size(16).font(bold),
+            row![
+                text_input(juttusihti_fetch::tiles::OSM_TILE_URL, &self.tile_url).on_input(Msg::TileUrl).on_submit(Msg::SaveTileUrl),
+                button(text("Save")).style(button::secondary).on_press(Msg::SaveTileUrl),
+            ]
+            .spacing(8),
+            text("Tile server URL (https, with {z}/{x}/{y}). Respect the provider's usage policy.").size(12),
+            row![
+                text(format!("Tile cache: {:.1} MB", self.tile_cache_bytes as f64 / 1_048_576.0)).size(12),
+                button(text("Clear map tile cache").size(12)).style(button::secondary).on_press(Msg::ClearTiles),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
             text(format!("Database: {}", self.db_path.display())).size(11),
         ]
         .spacing(14)

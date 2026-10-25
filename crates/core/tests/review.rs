@@ -109,3 +109,40 @@ fn summary_and_titles() {
     let titles = s.article_titles(&[ids[0], 999]).unwrap();
     assert_eq!(titles.len(), 1);
 }
+
+#[test]
+fn locations_carry_provenance_and_user_placement() {
+    let (s, ids, s1, s2) = seeded();
+    let loc = |name: &str, role| juttusihti_core::research::NewLocation {
+        place_name: name.into(),
+        country: None,
+        coordinates: None,
+        role,
+        evidence: Some(name.into()),
+        confidence: None,
+        coordinate_source: None,
+        ambiguous: name == "Springfield",
+    };
+    let hki = s.add_location(ids[0], &loc("Helsinki", LocationRole::Event), Origin::Ai).unwrap();
+    let spr = s.add_location(ids[1], &loc("Springfield", LocationRole::Mentioned), Origin::Ai).unwrap();
+    let rows = s.locations(Some(s1), 100).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|r| r.coordinates.is_none() && r.status == Status::Suggested),
+        "AI places have no coordinates"
+    );
+    assert!(rows.iter().find(|r| r.id == spr).unwrap().ambiguous);
+
+    s.set_location_coordinates(hki, Some((60.17, 24.94))).unwrap();
+    let h = s.locations(None, 100).unwrap().into_iter().find(|r| r.id == hki).unwrap();
+    assert_eq!(h.coordinates, Some((60.17, 24.94)));
+    assert_eq!((h.coordinate_source.as_deref(), h.status), (Some("user"), Status::Confirmed));
+    assert!(s.set_location_coordinates(hki, Some((91.0, 0.0))).is_err());
+    assert!(s.set_location_coordinates(hki, Some((f64::NAN, 0.0))).is_err());
+
+    s.decide_location(spr, Status::Rejected).unwrap();
+    assert_eq!(s.locations(None, 100).unwrap().len(), 1, "rejected locations are hidden");
+    s.set_location_coordinates(hki, None).unwrap();
+    assert_eq!(s.locations(None, 100).unwrap()[0].coordinates, None);
+    let _ = s2;
+}
