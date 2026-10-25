@@ -1,0 +1,17 @@
+[package]
+name = "juttusihti-analytics"
+description = "DuckDB analytical reports over consistent SQLite snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+duckdb.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+juttusihti-core = { path = "../core" }
+tempfile.workspace = true

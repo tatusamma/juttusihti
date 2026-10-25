@@ -1,0 +1,20 @@
+[package]
+name = "juttusihti"
+description = "Juttusihti: local-first RSS reader and news research desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+juttusihti-core = { path = "../core" }
+juttusihti-fetch = { path = "../fetch" }
+juttusihti-analytics = { path = "../analytics" }
+iced = { version = "0.14", features = ["tokio", "canvas"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+chrono.workspace = true
+directories = "6"
+open = "5"
+rfd = "0.17"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

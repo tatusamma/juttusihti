@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/fetch", "crates/analytics", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tero-k/juttusihti"
+
+[workspace.dependencies]
+rusqlite = { version = "0.41", features = ["bundled", "chrono", "serde_json"] }
+duckdb = { version = "1.20000", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tempfile = "3"
+
+# Dependencies (notably bundled DuckDB C++) without debug info: keeps the
+# debug target directory several GB smaller.
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

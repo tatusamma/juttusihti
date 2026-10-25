@@ -1,0 +1,17 @@
+[package]
+name = "juttusihti-fetch"
+description = "HTTP feed fetching with conditional requests, timeouts and bounded retries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+juttusihti-core = { path = "../core" }
+reqwest = { version = "0.13", default-features = false, features = ["default-tls", "charset", "http2", "system-proxy", "gzip", "brotli", "deflate"] }
+tokio = { version = "1", features = ["time"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }

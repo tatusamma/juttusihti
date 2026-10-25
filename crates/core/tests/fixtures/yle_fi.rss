@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Uutiset – Esimerkki</title>
+    <link>https://example.fi/</link>
+    <description>Suomenkielinen testisyöte</description>
+    <item>
+      <title>Hallitus esittää muutoksia työttömyysturvaan</title>
+      <link>https://example.fi/uutiset/1?utm_source=rss</link>
+      <guid isPermaLink="false">fi-1</guid>
+      <pubDate>Mon, 05 Oct 2026 08:30:00 +0300</pubDate>
+      <description><![CDATA[<p>Esitys koskee <b>ansiosidonnaista</b> päivärahaa.</p>]]></description>
+    </item>
+    <item>
+      <title>Sää: Lumisade jatkuu Pohjois-Suomessa</title>
+      <link>https://example.fi/uutiset/2</link>
+      <guid isPermaLink="false">fi-2</guid>
+      <pubDate>Tue, 06 Oct 2026 12:00:00 +0300</pubDate>
+      <description>Ilmatieteen laitos varoittaa liukkaista keleistä Lapissa ja Oulussa.</description>
+    </item>
+    <item>
+      <link>https://example.fi/uutiset/3</link>
+      <guid isPermaLink="false">fi-3</guid>
+      <description>Pakkanen kiristyy viikonloppuna koko maassa, ja lämpötila voi laskea Lapissa alle kolmenkymmenen asteen.</description>
+    </item>
+  </channel>
+</rss>
