@@ -132,8 +132,28 @@ tokenizer, or AI-assisted query expansion.
     yet.** The Gemini `responseJsonSchema` field in particular still needs live confirmation.
   - Linux builds of the secret store need `libdbus-1-dev` (Debian/Ubuntu) or `dbus-devel`
     (Fedora).
-- **M6–M8**: not started. A review UI for AI suggestions beyond labels (entities,
-  relationships, relevance, summaries) is part of the remaining work.
+- **Review of AI suggestions**: done. The Review screen covers entities, relationships (which
+  can be retyped), relevance and the summary, with cited articles. You can confirm or reject
+  items one at a time or in bulk. Relevance classifications live in their own table, so
+  hiding is reversible: the reader's "Hide dismissed" filter acts only on classes you have
+  confirmed.
+- **M6 DuckDB**: done.
+  - Reports: volume per source, topic evolution, labels, labels by source, entity
+    co-occurrence, relevance/clickbait trends, story-link statistics, AI usage by model and
+    cost per day (unknown when any call is unpriced).
+  - 7/30/90/365-day windows with day/week/month buckets, and a cancel button.
+  - CSV export with formula-injection guarding.
+  - Not done: benchmarks at 10k/100k/1M articles.
+- **M7 Visual research**: relationship map and timeline done; geographic map not started.
+  - Relationship map: Canvas graph capped at 150 nodes, with a hop limit, filters,
+    zoom/pan, selection and links drawn solid when confirmed and dashed for AI suggestions.
+  - Timeline: source lanes, story threads, events with known dates only, a volume histogram,
+    zoom, pan and filters.
+  - Geographic map: locations are already stored with role, evidence and coordinate
+    provenance, and AI place names never get coordinates. The basemap still needs a decision:
+    which tile provider, or offline map data (see OSM tile policy).
+- **M8 Distribution**: not started (installers, Linux verification, security review,
+  benchmarks).
 
 ## Invariants enforced in code and tests
 
