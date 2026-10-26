@@ -28,7 +28,29 @@ NASM are not needed. A first build of bundled DuckDB takes several minutes. Debu
 turned off for dependencies (`[profile.dev.package."*"]`): with it on, the debug `target/`
 grew past 16 GB.
 
-Logging: `JUTTUSIHTI_LOG=debug`.
+Logging: `JUTTUSIHTI_LOG=debug`. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
+Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
+
+Linux build dependencies:
+- Debian/Ubuntu: `libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev
+  libxi-dev libxrandr-dev libfontconfig1-dev libfreetype-dev`
+- Fedora: `dbus-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXi-devel
+  libXrandr-devel fontconfig-devel freetype-devel`
+
+### Packages
+
+```sh
+cargo install cargo-packager --locked
+cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
+APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
+```
+
+- **Build Linux packages on Ubuntu 22.04** (glibc 2.35), for example in a container. Built on
+  Fedora 44 instead, the binary needs glibc 2.43 and will not run on Ubuntu 24.04 (glibc 2.39).
+- **`name` is set in `Packager.toml` on purpose.** Without it, cargo-packager 0.11.8 tries to
+  change directory into the config file.
+- **CI:** `.github/workflows/ci.yml` runs fmt, clippy (`-D warnings`), tests and `cargo audit`
+  on Windows and Ubuntu 22.04. Tags `v*` also build the packages.
 
 ## Milestone 0 findings (verified 2026-10-25, Windows 11 x64, rustc 1.99.1, MSVC 14.44)
 
@@ -166,8 +188,19 @@ tokenizer, or AI-assisted query expansion.
       "Place on map", which records `coordinate_source = user` and confirms the place.
       Ambiguous places are flagged.
     - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
-- **M8 Distribution**: not started (installers, Linux verification, security review,
-  benchmarks).
+- **M8 Distribution**: done, except checks on real Linux desktops.
+  - Benchmarks at 10k/100k/1M and the tuning they led to: BENCHMARKS.md.
+  - Security review and `cargo audit`: SECURITY.md (no vulnerabilities; one unsound transitive
+    crate through Iced, documented).
+  - Linux (Fedora 44 under WSL): all tests and clippy pass. The release app runs on Wayland and
+    X11 with the GPU and CPU renderers.
+  - Windows NSIS installer: verified with a silent install, launch, and an uninstall that leaves
+    nothing behind.
+  - `.deb` and AppImage built on Ubuntu 22.04: the `.deb` installs with apt on a clean Ubuntu
+    24.04 with all libraries resolved, and the AppImage runs on Fedora 44.
+  - Not verified: native GNOME/KDE sessions on real hardware (WSLg's GPU passthrough made wgpu
+    fall back), the OS secret store on Linux desktops, code signing (no certificate), and
+    rendering by eye (the test machine's screen was locked throughout).
 
 ## Invariants enforced in code and tests
 
