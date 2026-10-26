@@ -291,7 +291,9 @@ pub fn estimate(
     let scenarios: BTreeMap<Scenario, ScenarioTotals> =
         [Scenario::Optimistic, Scenario::Expected, Scenario::Conservative]
             .into_iter()
-            .map(|s| (s, scenario_totals(&requests, s, price, config.use_batch, caching_supported)))
+            // Runs are sent as normal requests and charged at standard prices
+            // (the runner never uses provider batch APIs), so never discount here.
+            .map(|s| (s, scenario_totals(&requests, s, price, false, caching_supported)))
             .collect();
 
     let mut stages: Vec<StageTotals> = Vec::new();
@@ -349,8 +351,8 @@ pub fn estimate(
     if s.truncated > 0 {
         warnings.push(format!("{} long articles are shortened before analysis.", s.truncated));
     }
-    if config.use_batch && price.is_some_and(|p| p.batch_permille.is_none()) {
-        warnings.push("Batch pricing is not listed for this model; cost is unknown with batch enabled.".into());
+    if config.use_batch {
+        warnings.push("Batch processing is not supported yet; this estimate and the run use standard prices.".into());
     }
     let expected_cost = scenarios[&Scenario::Expected].cost;
     let conservative = &scenarios[&Scenario::Conservative];

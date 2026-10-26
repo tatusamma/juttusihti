@@ -116,6 +116,10 @@ pub struct AnalysisConfig {
     pub limits: budget::Limits,
     pub max_articles: u32,
     pub reuse_cached: bool,
+    /// Provider batch APIs are not supported yet: runs always use normal
+    /// requests at standard prices. Kept so sessions saved with the flag
+    /// still load; it has no effect on cost.
+    #[serde(default)]
     pub use_batch: bool,
     /// Investigation topic for relevance filtering.
     pub relevance_criteria: Option<String>,

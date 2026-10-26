@@ -47,7 +47,6 @@ pub enum Msg {
     MaxArticles(String),
     MaxTokens(String),
     MaxCost(String),
-    Batch(bool),
     ReuseCache(bool),
     AcceptUnknownCost(bool),
     Preview,
@@ -109,7 +108,6 @@ pub struct State {
     max_articles: String,
     max_tokens: String,
     max_cost: String,
-    batch: bool,
     reuse_cache: bool,
     accept_unknown_cost: bool,
     busy: bool,
@@ -168,7 +166,6 @@ impl State {
             max_articles: "500".into(),
             max_tokens: "2000000".into(),
             max_cost: "1.00".into(),
-            batch: false,
             reuse_cache: true,
             accept_unknown_cost: false,
             busy: false,
@@ -340,7 +337,7 @@ impl State {
             },
             max_articles: max_articles as u32,
             reuse_cached: self.reuse_cache,
-            use_batch: self.batch,
+            use_batch: false,
             relevance_criteria: (self.tasks.contains(&Task::Relevance) && !self.criteria.trim().is_empty())
                 .then(|| self.criteria.trim().to_string()),
         })
@@ -429,10 +426,6 @@ impl State {
             }
             Msg::MaxCost(s) => {
                 self.max_cost = s;
-                self.invalidate();
-            }
-            Msg::Batch(on) => {
-                self.batch = on;
                 self.invalidate();
             }
             Msg::ReuseCache(on) => {
@@ -674,7 +667,6 @@ impl State {
             ]
             .spacing(16),
             checkbox(self.reuse_cache).label("Reuse earlier compatible results").on_toggle(Msg::ReuseCache),
-            checkbox(self.batch).label("Use batch processing (cheaper, slower)").on_toggle(Msg::Batch),
             checkbox(self.accept_unknown_cost)
                 .label("I accept running with unknown pricing")
                 .on_toggle(Msg::AcceptUnknownCost),

@@ -173,12 +173,14 @@ fn estimate_has_ordered_scenarios_and_known_cost() {
     assert!(e.worst_case_tokens >= con.usage.total());
     assert!(e.price_source.as_deref().unwrap().contains("platform.claude.com"));
 
-    // Batch halves the cost.
+    // Runs are sent as normal requests and charged at standard prices, so a
+    // (legacy) batch flag must not discount the estimate.
     let mut batch = cfg.clone();
     batch.use_batch = true;
     let b = estimate(&batch, &scope, 25, &Catalog::builtin(), today());
-    let (full, half) = (e.expected().cost.unwrap(), b.expected().cost.unwrap());
-    assert!(half * 2 >= full && half * 2 <= full + 2, "{full} vs {half}");
+    assert_eq!(b.expected().cost, e.expected().cost, "estimate must match what a run is charged");
+    assert_eq!(b.conservative().cost, e.conservative().cost);
+    assert!(b.warnings.iter().any(|w| w.contains("Batch processing is not supported")), "{:?}", b.warnings);
 }
 
 #[test]

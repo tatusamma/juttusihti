@@ -108,7 +108,8 @@ tokenizer, or AI-assisted query expansion.
 - **M3 Research interface**: done. The New Analysis screen covers: inclusive local-date range
   (stored as half-open UTC), quick ranges, feeds/folders/labels/query scope, an option to
   exclude undated articles, provider and model, content depth, tasks, relevance topic, limits
-  (articles, tokens, USD), batch and cache reuse, and accepting unknown pricing. It previews
+  (articles, tokens, USD), cache reuse, and accepting unknown pricing. Provider batch APIs are
+  not supported yet: runs and estimates both use standard prices. It previews
   locally (matched, distinct, cached, to process, candidate pairs, requests per stage) and saves
   sessions as `awaiting_approval` with their article snapshot and estimate. There is a session
   list.
