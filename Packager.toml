@@ -1,0 +1,45 @@
+# cargo-packager configuration: Windows NSIS installer, Linux .deb and AppImage.
+#   cargo install cargo-packager --locked
+#   cargo packager --release -f nsis              (Windows)
+#   cargo packager --release -f deb,appimage      (Linux)
+# Keep `version` in sync with the workspace version.
+# `name` must be set: cargo-packager 0.11.8 otherwise tries to chdir into this file.
+name = "juttusihti"
+productName = "Juttusihti"
+version = "0.1.0"
+# Same identifier as the OS secret-store service name used for API keys.
+identifier = "fi.juttusihti.Juttusihti"
+description = "Local-first RSS reader and news research desktop app"
+longDescription = "Juttusihti reads RSS, Atom and JSON feeds offline with fast full-text search, and offers optional, user-approved AI analysis (OpenAI, Anthropic, Gemini) with cost estimates and budgets, DuckDB reports, relationship maps, timelines and maps."
+homepage = "https://github.com/tero-k/juttusihti"
+authors = ["tero-k"]
+publisher = "Juttusihti"
+category = "News"
+beforePackagingCommand = "cargo build --release -p juttusihti"
+binariesDir = "target/release"
+outDir = "target/packages"
+icons = ["packaging/icons/juttusihti-*.png"]
+
+[[binaries]]
+path = "juttusihti"
+main = true
+
+[linux]
+generateDesktopEntry = true
+
+[nsis]
+# No administrator rights needed; installs per user.
+installMode = "currentUser"
+
+[deb]
+section = "web"
+# Runtime libraries: D-Bus (secret store), keyboard, Wayland/X11, fonts, GPU drivers.
+depends = [
+  "libdbus-1-3",
+  "libxkbcommon0",
+  "libxkbcommon-x11-0",
+  "libwayland-client0",
+  "libx11-6",
+  "libfontconfig1",
+  "libvulkan1 | libegl1",
+]
