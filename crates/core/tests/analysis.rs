@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use juttusihti_core::analysis::{AnalysisConfig, Depth, Task, cache_key};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::{Scenario, Stage, estimate};
-use juttusihti_core::pricing::{Catalog, Provider};
+use juttusihti_core::pricing::{Billing, Catalog, Provider};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::Store;
 use juttusihti_core::*;
@@ -91,6 +91,7 @@ fn config(tasks: &[Task]) -> AnalysisConfig {
         max_articles: 1_000,
         reuse_cached: true,
         use_batch: false,
+        billing: Default::default(),
         relevance_criteria: None,
     }
 }
@@ -194,6 +195,36 @@ fn unknown_model_price_is_unknown_and_warned() {
     assert!(!e.price_known);
     assert_eq!(e.expected().cost, None);
     assert!(e.warnings.iter().any(|w| w.contains("No price is known")));
+}
+
+#[test]
+fn chatgpt_plan_has_zero_api_cost_and_a_warning() {
+    let s = seeded();
+    let mut cfg = config(&[Task::Labels]);
+    cfg.provider = Provider::Openai;
+    cfg.model = "model-only-on-the-plan".into();
+    cfg.billing = Billing::ChatGptPlan;
+    let scope = s.analysis_scope(&cfg).unwrap();
+    let e = estimate(&cfg, &scope, 0, &Catalog::builtin(), today());
+    assert!(e.price_known, "plan billing is a known zero, not an unknown price");
+    assert_eq!(e.conservative().cost, Some(0));
+    assert!(e.expected().usage.total() > 0, "tokens are still estimated");
+    assert!(e.price_source.as_deref().unwrap().contains("ChatGPT plan"));
+    assert!(e.warnings.iter().any(|w| w.contains("ChatGPT plan allowance")), "{:?}", e.warnings);
+
+    // Only OpenAI can bill a ChatGPT plan.
+    cfg.provider = Provider::Anthropic;
+    let e = estimate(&cfg, &scope, 0, &Catalog::builtin(), today());
+    assert!(!e.price_known);
+    assert!(e.warnings.iter().any(|w| w.contains("cannot be billed to a ChatGPT plan")), "{:?}", e.warnings);
+}
+
+#[test]
+fn sessions_saved_before_billing_existed_load_as_api_key() {
+    let mut v = serde_json::to_value(config(&[Task::Labels])).unwrap();
+    v.as_object_mut().unwrap().remove("billing");
+    let back: AnalysisConfig = serde_json::from_value(v).unwrap();
+    assert_eq!(back.billing, Billing::ApiKey);
 }
 
 #[test]

@@ -12,7 +12,7 @@ use juttusihti_ai::{Approval, Control, Progress, RunSummary};
 use juttusihti_core::analysis::{AnalysisConfig, Depth, SessionSummary, Task};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::{Estimate, Scenario};
-use juttusihti_core::pricing::{Catalog, Provider, format_usd, usd_to_micros};
+use juttusihti_core::pricing::{Billing, Catalog, Micros, Provider, format_usd, usd_to_micros};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::{Feed, Folder, Label, SessionStatus};
 
@@ -39,6 +39,9 @@ pub enum Msg {
     ToggleLabel(i64, bool),
     RequireDate(bool),
     Provider(Provider),
+    Billing(Billing),
+    LoadPlanModels,
+    PlanModels(Result<Vec<String>, String>),
     ModelPicked(String),
     Model(String),
     Depth(Depth),
@@ -87,6 +90,7 @@ struct ActiveRun {
     log: Vec<String>,
     tokens: u64,
     cost: Option<u64>,
+    billing: Billing,
 }
 
 pub struct State {
@@ -101,6 +105,9 @@ pub struct State {
     labels: BTreeSet<i64>,
     require_date: bool,
     provider: Provider,
+    billing: Billing,
+    /// Models the signed-in ChatGPT plan offers, once loaded.
+    plan_models: Option<Vec<String>>,
     model: String,
     depth: Depth,
     tasks: BTreeSet<Task>,
@@ -159,6 +166,8 @@ impl State {
             labels: BTreeSet::new(),
             require_date: false,
             provider,
+            billing: Billing::ApiKey,
+            plan_models: None,
             model,
             depth: Depth::HeadlinesAndDescriptions,
             tasks: [Task::Labels, Task::Related].into_iter().collect(),
@@ -207,37 +216,37 @@ impl State {
         if !self.consent || self.run.is_some() {
             return Cmd::none();
         }
-        let (id, provider) = (detail.id, detail.config.provider);
+        let (id, provider, billing) = (detail.id, detail.config.provider, detail.config.billing);
         let control = Control::default();
-        self.run = Some(ActiveRun { session: id, control: control.clone(), log: Vec::new(), tokens: 0, cost: Some(0) });
+        self.run = Some(ActiveRun {
+            session: id,
+            control: control.clone(),
+            log: Vec::new(),
+            tokens: 0,
+            cost: Some(0),
+            billing,
+        });
         let shared = self.db.shared();
         let catalog = self.catalog.clone();
         let stream = iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
             use iced::futures::SinkExt;
-            let key = tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await;
-            let key = match key {
-                Ok(Ok(Some(k))) => k,
-                Ok(Ok(None)) => {
-                    let _ = out
-                        .send(RunEvent::Finished(Err(format!(
-                            "No API key for {provider}. Add one under AI Providers."
-                        ))))
-                        .await;
-                    return;
-                }
-                Ok(Err(e)) => {
+            let endpoint = match billing {
+                Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
+                Billing::ApiKey => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
+                    Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
+                    Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI Providers.")),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(e.to_string()),
+                },
+            };
+            let endpoint = match endpoint {
+                Ok(e) => e,
+                Err(e) => {
                     let _ = out.send(RunEvent::Finished(Err(e))).await;
                     return;
                 }
-                Err(e) => {
-                    let _ = out.send(RunEvent::Finished(Err(e.to_string()))).await;
-                    return;
-                }
             };
-            let client = match juttusihti_ai::Client::new(
-                juttusihti_ai::Endpoint::official(provider, key),
-                juttusihti_ai::RetryPolicy::default(),
-            ) {
+            let client = match juttusihti_ai::Client::new(endpoint, juttusihti_ai::RetryPolicy::default()) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = out.send(RunEvent::Finished(Err(e.to_string()))).await;
@@ -326,6 +335,7 @@ impl State {
             },
             range_label: format!("{} – {}{tz}", show_date(from), show_date(to)),
             provider: self.provider,
+            billing: if self.provider == Provider::Openai { self.billing } else { Billing::ApiKey },
             model: self.model.trim().to_string(),
             depth: self.depth,
             tasks: self.tasks.clone(),
@@ -393,8 +403,36 @@ impl State {
             }
             Msg::Provider(p) => {
                 self.provider = p;
+                if p != Provider::Openai {
+                    self.billing = Billing::ApiKey;
+                }
                 self.model = self.catalog.models(p).into_iter().next().unwrap_or_default();
                 self.invalidate();
+            }
+            Msg::Billing(b) => {
+                self.billing = b;
+                self.invalidate();
+            }
+            Msg::LoadPlanModels => {
+                self.busy = true;
+                self.error = None;
+                return Cmd::perform(crate::plan::models(), Msg::PlanModels);
+            }
+            Msg::PlanModels(r) => {
+                self.busy = false;
+                match r {
+                    Ok(models) if models.is_empty() => {
+                        self.error = Some("Your ChatGPT plan offered no models for Juttusihti.".into())
+                    }
+                    Ok(models) => {
+                        if !models.contains(&self.model) {
+                            self.model = models[0].clone();
+                            self.invalidate();
+                        }
+                        self.plan_models = Some(models);
+                    }
+                    Err(e) => self.error = Some(e),
+                }
             }
             Msg::ModelPicked(m) | Msg::Model(m) => {
                 self.model = m;
@@ -539,7 +577,7 @@ impl State {
                             s.final_status.map(|st| st.as_str()).unwrap_or("?"),
                             s.calls,
                             thousands(s.usage.total()),
-                            s.cost.map(format_usd).unwrap_or_else(|| "cost unknown".into())
+                            cost_text(Some(r.billing), s.cost)
                         )),
                         Err(e) => r.log.push(format!("Stopped: {e}")),
                     }
@@ -622,19 +660,48 @@ impl State {
             text_input("Optional search query (same syntax as the search box)", &self.query).on_input(Msg::Query),
         );
 
-        let models = self.catalog.models(self.provider);
+        let on_plan = self.provider == Provider::Openai && self.billing == Billing::ChatGptPlan;
+        let models = match (&self.plan_models, on_plan) {
+            (Some(m), true) => m.clone(),
+            _ => self.catalog.models(self.provider),
+        };
         let selected_model = models.iter().find(|m| **m == self.model).cloned();
-        let provider = column![
+        let mut provider = column![
             heading("AI provider and model"),
             row![
                 pick_list(&Provider::ALL[..], Some(self.provider), Msg::Provider),
-                pick_list(models, selected_model, Msg::ModelPicked).placeholder("Known models"),
+                pick_list(models, selected_model, Msg::ModelPicked).placeholder(if on_plan {
+                    "Plan models"
+                } else {
+                    "Known models"
+                }),
                 text_input("or any model id", &self.model).on_input(Msg::Model).width(220),
             ]
             .spacing(8)
             .align_y(iced::Center),
         ]
         .spacing(8);
+        if self.provider == Provider::Openai {
+            provider = provider.push(
+                row![
+                    radio("API key (billed per token)", Billing::ApiKey, Some(self.billing), Msg::Billing),
+                    radio("My ChatGPT plan", Billing::ChatGptPlan, Some(self.billing), Msg::Billing),
+                ]
+                .spacing(16),
+            );
+        }
+        if on_plan {
+            provider = provider.push(
+                row![
+                    button(text("Load my plan's models").size(12))
+                        .style(button::secondary)
+                        .on_press_maybe((!self.busy).then_some(Msg::LoadPlanModels)),
+                    text("Asks OpenAI which models your plan offers. No articles are sent.").size(12),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+        }
 
         let mut depth = column![heading("Content to analyze")].spacing(4);
         for d in Depth::ALL {
@@ -705,9 +772,10 @@ impl State {
         }
         if let Some(id) = self.saved {
             form = form.push(
-                container(text(format!(
-                    "Saved as session #{id}, awaiting approval. Running it needs a configured AI provider, which is not implemented yet."
-                )).size(13))
+                container(
+                    text(format!("Saved as session #{id}, awaiting approval. Select it under Sessions to start it."))
+                        .size(13),
+                )
                 .padding(8)
                 .style(container::success),
             );
@@ -742,7 +810,8 @@ impl State {
         };
         let mut col = column![
             text("Pre-analysis estimate").size(18).font(bold),
-            text(format!("{} · {} · {}", config.range_label, config.provider, config.model)).size(12),
+            text(format!("{} · {} · {} · {}", config.range_label, config.provider, config.model, config.billing))
+                .size(12),
             stat("Articles matched", s.matched.to_string()),
             stat("Included (max limit)", s.selected.to_string()),
             stat("Distinct after dedup", format!("{} ({} duplicates found locally)", s.distinct, s.local_duplicates)),
@@ -774,7 +843,7 @@ impl State {
             (Scenario::Conservative, "Conservative"),
         ] {
             let t = &e.scenarios[&sc];
-            let cost = t.cost.map(format_usd).unwrap_or_else(|| "unknown".into());
+            let cost = cost_text(Some(config.billing), t.cost);
             col = col.push(
                 row![
                     text(name).size(13).width(110),
@@ -854,7 +923,7 @@ impl State {
         let c = &d.config;
         let mut col = column![
             text(format!("Session #{} — {}", d.id, d.status.as_str())).size(16).font(bold),
-            text(format!("{} · {} · {}", c.range_label, c.provider, c.model)).size(12),
+            text(format!("{} · {} · {} · {}", c.range_label, c.provider, c.model, c.billing)).size(12),
             text(format!(
                 "Content sent: {}. Tasks: {}.",
                 c.depth,
@@ -869,8 +938,8 @@ impl State {
                     "Estimate: {} articles, {} requests, expected {} (conservative {}).",
                     e.stats.to_process,
                     e.requests,
-                    e.expected().cost.map(format_usd).unwrap_or_else(|| "unknown".into()),
-                    e.conservative().cost.map(format_usd).unwrap_or_else(|| "unknown".into())
+                    cost_text(Some(c.billing), e.expected().cost),
+                    cost_text(Some(c.billing), e.conservative().cost)
                 ))
                 .size(12),
             );
@@ -881,7 +950,7 @@ impl State {
                     "Already used: {} calls, {} tokens, {}{}.",
                     d.spent.calls,
                     thousands(d.spent.tokens),
-                    format_usd(d.spent.cost),
+                    cost_text(Some(c.billing), Some(d.spent.cost)),
                     if d.spent.cost_unknown { " + unknown" } else { "" }
                 ))
                 .size(12),
@@ -896,13 +965,9 @@ impl State {
         if running_here {
             let r = self.run.as_ref().expect("checked");
             col = col.push(
-                text(format!(
-                    "Running… {} tokens so far, {}",
-                    thousands(r.tokens),
-                    r.cost.map(format_usd).unwrap_or_else(|| "cost unknown".into())
-                ))
-                .size(13)
-                .font(bold),
+                text(format!("Running… {} tokens so far, {}", thousands(r.tokens), cost_text(Some(c.billing), r.cost)))
+                    .size(13)
+                    .font(bold),
             );
             col = col.push(
                 row![
@@ -919,9 +984,10 @@ impl State {
             col = col.push(
                 checkbox(self.consent)
                     .label(format!(
-                        "I agree to send the content of these articles ({}) to {}.",
+                        "I agree to send the content of these articles ({}) to {}{}.",
                         c.depth.label().to_lowercase(),
-                        c.provider
+                        c.provider,
+                        if c.billing == Billing::ChatGptPlan { ", using my ChatGPT plan" } else { "" }
                     ))
                     .on_toggle(Msg::Consent),
             );
@@ -943,6 +1009,15 @@ impl State {
             col = col.push(text(line).size(11));
         }
         col.into()
+    }
+}
+
+/// Dollar cost, or the plan for runs charged to a ChatGPT plan.
+fn cost_text(billing: Option<Billing>, cost: Option<Micros>) -> String {
+    match (billing, cost) {
+        (Some(Billing::ChatGptPlan), _) => "on your ChatGPT plan".into(),
+        (_, Some(c)) => format_usd(c),
+        (_, None) => "cost unknown".into(),
     }
 }
 

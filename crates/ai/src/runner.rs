@@ -22,7 +22,7 @@ use juttusihti_core::analysis::{
 };
 use juttusihti_core::budget::{Guard, Refusal};
 use juttusihti_core::normalize::sha256_hex;
-use juttusihti_core::pricing::{Catalog, Micros, Price, Usage};
+use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Usage};
 use juttusihti_core::research::{NewLocation, NewSuggestion};
 use juttusihti_core::store::Store;
 use juttusihti_core::{EntityKind, Origin, SessionStatus};
@@ -105,6 +105,8 @@ pub enum RunError {
     BadSession(String),
     #[error("provider {provider:?} does not match session provider {session:?}")]
     ProviderMismatch { provider: juttusihti_core::pricing::Provider, session: juttusihti_core::pricing::Provider },
+    #[error("the session is billed to {session}, but the client uses {client}")]
+    BillingMismatch { client: juttusihti_core::pricing::Billing, session: juttusihti_core::pricing::Billing },
 }
 
 enum Stop {
@@ -165,7 +167,11 @@ impl Runner {
         if config.provider != self.client.provider() {
             return Err(RunError::ProviderMismatch { provider: self.client.provider(), session: config.provider });
         }
-        let price = self.catalog.lookup(config.provider, &config.model, Utc::now().date_naive()).cloned();
+        // The estimate was approved for one way of paying; never switch it.
+        if config.billing != self.client.billing() {
+            return Err(RunError::BillingMismatch { client: self.client.billing(), session: config.billing });
+        }
+        let price = self.catalog.price_for(config.provider, &config.model, config.billing, Utc::now().date_naive());
         let spent = self.db(|s| s.session_usage(session))?;
         let guard = Guard::new(config.limits, spent);
         self.control.reset();
@@ -277,10 +283,19 @@ impl Runner {
                 } else {
                     ctx.guard.release(reservation);
                 }
-                Err(Stop::Failed(match e {
-                    AiError::Status { status: 401 | 403, .. } => "The provider rejected the API key.".into(),
-                    other => other.to_string(),
-                }))
+                match e {
+                    // Resumable later; the plan resets on OpenAI's schedule.
+                    AiError::PlanLimit(m) => Err(Stop::Paused(format!(
+                        "ChatGPT plan usage limit reached ({m}). Check ChatGPT settings → Usage, then resume."
+                    ))),
+                    AiError::Status { status: 401 | 403, .. } if ctx.config.billing == Billing::ChatGptPlan => Err(
+                        Stop::Failed("OpenAI rejected the ChatGPT sign-in; sign in again under AI Providers.".into()),
+                    ),
+                    AiError::Status { status: 401 | 403, .. } => {
+                        Err(Stop::Failed("The provider rejected the API key.".into()))
+                    }
+                    other => Err(Stop::Failed(other.to_string())),
+                }
             }
         }
     }

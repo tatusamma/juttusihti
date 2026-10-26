@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::budget;
 use crate::normalize::{normalize_text, sha256_hex};
-use crate::pricing::Provider;
+use crate::pricing::{Billing, Provider};
 use crate::search::{SearchQuery, build_where};
 use crate::store::Store;
 use crate::{ArticleId, Result};
@@ -110,6 +110,9 @@ pub struct AnalysisConfig {
     /// What the user entered, e.g. "1.10.2026 – 25.10.2026 (Europe/Helsinki)".
     pub range_label: String,
     pub provider: Provider,
+    /// API key or ChatGPT plan; older sessions are API-key runs.
+    #[serde(default)]
+    pub billing: Billing,
     pub model: String,
     pub depth: Depth,
     pub tasks: BTreeSet<Task>,

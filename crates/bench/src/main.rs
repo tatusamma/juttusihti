@@ -300,6 +300,7 @@ fn main() {
         max_articles: 1_000,
         reuse_cached: true,
         use_batch: false,
+        billing: Default::default(),
         relevance_criteria: None,
     };
     let mut scope = None;

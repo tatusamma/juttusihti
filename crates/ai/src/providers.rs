@@ -5,19 +5,23 @@
 //! - OpenAI Responses API with `text.format` JSON schema; `store: false` so
 //!   article text is not retained as a stored response.
 //! - Gemini `generateContent` with `responseMimeType` + `responseJsonSchema`.
+//! - OpenAI on a ChatGPT plan: the same Responses API, but streaming is
+//!   required, `max_output_tokens` is rejected and system text goes in
+//!   `instructions`. The stream is read to its terminal event, whose
+//!   `response` object is parsed like a normal reply.
 
 use juttusihti_core::pricing::{Provider, Usage};
 use serde_json::{Value, json};
 
-use crate::{AiError, Endpoint, Outcome, Reply, Request};
+use crate::{AiError, Auth, Endpoint, Outcome, Reply, Request};
 
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 
-pub fn auth_headers(e: &Endpoint) -> Vec<(&'static str, String)> {
-    match e.provider {
-        Provider::Anthropic => vec![("x-api-key", e.api_key.clone()), ("anthropic-version", ANTHROPIC_VERSION.into())],
-        Provider::Openai => vec![("authorization", format!("Bearer {}", e.api_key))],
-        Provider::Gemini => vec![("x-goog-api-key", e.api_key.clone())],
+pub fn auth_headers(provider: Provider, token: &str) -> Vec<(&'static str, String)> {
+    match provider {
+        Provider::Anthropic => vec![("x-api-key", token.into()), ("anthropic-version", ANTHROPIC_VERSION.into())],
+        Provider::Openai => vec![("authorization", format!("Bearer {token}"))],
+        Provider::Gemini => vec![("x-goog-api-key", token.into())],
     }
 }
 
@@ -64,6 +68,17 @@ pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
             body["max_tokens"] = json!(req.max_output_tokens);
             (format!("{}/v1/messages", base(e)), body)
         }
+        Provider::Openai if matches!(e.auth, Auth::ChatGpt(_)) => (
+            format!("{}/v1/responses", base(e)),
+            json!({
+                "model": req.model,
+                "instructions": req.system,
+                "input": [{"role": "user", "content": req.user}],
+                "text": openai_format(req),
+                "store": false,
+                "stream": true,
+            }),
+        ),
         Provider::Openai => (
             format!("{}/v1/responses", base(e)),
             json!({
@@ -108,6 +123,59 @@ pub fn error_message(body: &[u8]) -> String {
         Err(_) => String::from_utf8_lossy(body).into_owned(),
     };
     text.chars().take(500).collect()
+}
+
+const PLAN_LIMIT_CODES: [&str; 1] = ["subscription_sharing_usage_limit_exceeded"];
+
+/// Whether an error body says the ChatGPT plan allowance is used up.
+pub fn is_plan_limit(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v["error"]["code"].as_str().map(|c| PLAN_LIMIT_CODES.contains(&c)))
+        .unwrap_or(false)
+}
+
+/// Reads a Responses API event stream (server-sent events) and returns the
+/// final `response` object. Only `response.completed` or
+/// `response.incomplete` count as an answer; a stream that ends without
+/// one has an unknown outcome.
+pub fn final_response_from_stream(bytes: &[u8]) -> Result<Value, AiError> {
+    let text = String::from_utf8_lossy(bytes);
+    let handle = |data: &str| -> Option<Result<Value, AiError>> {
+        let v: Value = serde_json::from_str(data).ok()?;
+        match v["type"].as_str()? {
+            "response.completed" | "response.incomplete" => Some(Ok(v["response"].clone())),
+            kind @ ("response.failed" | "error") => {
+                let err = if kind == "error" { &v["error"] } else { &v["response"]["error"] };
+                let err = if err.is_null() { &v } else { err };
+                let code = err["code"].as_str().unwrap_or_default();
+                let message: String = err["message"].as_str().unwrap_or(code).chars().take(500).collect();
+                Some(Err(if PLAN_LIMIT_CODES.contains(&code) {
+                    AiError::PlanLimit(message)
+                } else {
+                    AiError::Malformed(format!("response failed ({code}): {message}"))
+                }))
+            }
+            _ => None,
+        }
+    };
+    let mut data = String::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !data.is_empty()
+                && let Some(r) = handle(&data)
+            {
+                return r;
+            }
+            data.clear();
+        } else if let Some(d) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(d.strip_prefix(' ').unwrap_or(d));
+        }
+    }
+    Err(AiError::Unknown("the response stream ended before the answer was complete".into()))
 }
 
 fn u(v: &Value) -> u64 {
@@ -246,7 +314,7 @@ mod tests {
     }
 
     fn ep(p: Provider) -> Endpoint {
-        Endpoint { provider: p, base_url: "http://x/".into(), api_key: "k".into() }
+        Endpoint { provider: p, base_url: "http://x/".into(), auth: Auth::ApiKey("k".into()) }
     }
 
     #[test]
@@ -269,6 +337,33 @@ mod tests {
         let (url, b) = count_tokens(&ep(Provider::Gemini), &req());
         assert_eq!(url, "http://x/v1beta/models/m-1:countTokens");
         assert_eq!(b["generateContentRequest"]["model"], "models/m-1");
+    }
+
+    #[test]
+    fn reads_the_final_response_from_a_stream() {
+        let completed = json!({"type": "response.completed", "response": {"status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "{\"a\":1}"}]}],
+            "usage": {"input_tokens": 9, "output_tokens": 3}}});
+        let sse = format!(
+            "event: response.created\ndata: {}\n\nevent: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            json!({"type": "response.created", "response": {"status": "in_progress"}}),
+            json!({"type": "response.output_text.delta", "delta": "{\"a\""}),
+            completed
+        );
+        let v = final_response_from_stream(sse.as_bytes()).unwrap();
+        let r = parse_completion(Provider::Openai, &v).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 1})));
+        assert_eq!(r.usage.total(), 12);
+
+        let limit = format!(
+            "data: {}\n\n",
+            json!({"type": "response.failed", "response": {"error": {"code": "subscription_sharing_usage_limit_exceeded", "message": "limit"}}})
+        );
+        assert!(matches!(final_response_from_stream(limit.as_bytes()), Err(AiError::PlanLimit(_))));
+        let cut = format!("data: {}\n\n", json!({"type": "response.output_text.delta", "delta": "x"}));
+        assert!(matches!(final_response_from_stream(cut.as_bytes()), Err(AiError::Unknown(_))));
+        assert!(is_plan_limit(br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"m"}}"#));
+        assert!(!is_plan_limit(br#"{"error":{"code":"rate_limit_exceeded"}}"#));
     }
 
     #[test]

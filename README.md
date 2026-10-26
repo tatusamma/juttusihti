@@ -149,7 +149,19 @@ tokenizer, or AI-assisted query expansion.
     - Entities must occur in the article, and evidence quotes must appear in the text.
     - Summary points need valid citations.
   - API keys live in the OS secret store (Windows Credential Manager, or the Secret Service on
-    GNOME/KDE), set on the AI Providers screen.
+    GNOME/KDE), set on the AI Providers screen. The screen also explains, step by step, how to
+    create a Claude key (Claude Console) and a Gemini key (Google AI Studio), including Gemini's
+    free-tier data use.
+  - OpenAI runs can instead be charged to a ChatGPT Plus/Pro plan with Sign in with ChatGPT
+    (OpenAI's flow for open-source local apps: browser sign-in, PKCE, loopback redirect on
+    127.0.0.1, no client secret). Only the rotating refresh token is stored, in the secret
+    store; access tokens stay in memory. On a plan, requests stream and cannot cap output
+    length, token counting is unavailable, and estimates show "on your ChatGPT plan" (a known
+    zero API cost) instead of dollars. Reaching the plan's limit pauses the run. Tested
+    against a local fake of OpenAI's endpoints only; **not tried against the real service
+    yet**, and structured JSON output on a plan is not documented by OpenAI.
+  - Claude and Gemini have no such option: Anthropic's terms forbid third-party apps from
+    using Claude subscription sign-in, and Google's sign-in would still bill a Cloud project.
   - Starting a run requires a consent checkbox naming the provider and the content depth.
   - Live API tests are opt-in and ignored by default (`crates/ai/tests/live.rs`). **Not run
     yet.** The Gemini `responseJsonSchema` field in particular still needs live confirmation.

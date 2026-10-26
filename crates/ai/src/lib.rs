@@ -7,13 +7,15 @@
 //! is untrusted: [`prompts`] validates every response before anything is
 //! stored, and nothing in a response is ever executed.
 
+pub mod chatgpt;
 pub mod prompts;
 mod providers;
 pub mod runner;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use juttusihti_core::pricing::{Provider, Usage};
+use juttusihti_core::pricing::{Billing, Provider, Usage};
 use reqwest::StatusCode;
 use serde_json::Value;
 
@@ -22,12 +24,20 @@ pub use runner::{Approval, Control, Progress, RunError, RunSummary, Runner};
 /// Upper bound for a provider response body.
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Where and how to reach a provider. The key is never logged.
+/// How requests are authorized.
+#[derive(Clone)]
+pub enum Auth {
+    ApiKey(String),
+    /// Sign in with ChatGPT: OpenAI requests charged to the user's plan.
+    ChatGpt(Arc<chatgpt::Session>),
+}
+
+/// Where and how to reach a provider. Credentials are never logged.
 #[derive(Clone)]
 pub struct Endpoint {
     pub provider: Provider,
     pub base_url: String,
-    pub api_key: String,
+    pub auth: Auth,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -35,20 +45,36 @@ impl std::fmt::Debug for Endpoint {
         f.debug_struct("Endpoint")
             .field("provider", &self.provider)
             .field("base_url", &self.base_url)
-            .field("api_key", &"<redacted>")
-            .finish()
+            .field("billing", &self.billing())
+            .finish_non_exhaustive()
+    }
+}
+
+fn official_base(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "https://api.anthropic.com",
+        Provider::Openai => "https://api.openai.com",
+        Provider::Gemini => "https://generativelanguage.googleapis.com",
     }
 }
 
 impl Endpoint {
-    /// The provider's public API base URL.
+    /// The provider's public API with an API key.
     pub fn official(provider: Provider, api_key: String) -> Self {
-        let base_url = match provider {
-            Provider::Anthropic => "https://api.anthropic.com",
-            Provider::Openai => "https://api.openai.com",
-            Provider::Gemini => "https://generativelanguage.googleapis.com",
-        };
-        Self { provider, base_url: base_url.into(), api_key }
+        Self { provider, base_url: official_base(provider).into(), auth: Auth::ApiKey(api_key) }
+    }
+
+    /// OpenAI's public API, charged to the signed-in ChatGPT plan.
+    pub fn chatgpt(session: Arc<chatgpt::Session>) -> Self {
+        let base_url = session.api_base().trim_end_matches('/').trim_end_matches("/v1").to_string();
+        Self { provider: Provider::Openai, base_url, auth: Auth::ChatGpt(session) }
+    }
+
+    pub fn billing(&self) -> Billing {
+        match self.auth {
+            Auth::ApiKey(_) => Billing::ApiKey,
+            Auth::ChatGpt(_) => Billing::ChatGptPlan,
+        }
     }
 }
 
@@ -101,6 +127,15 @@ pub enum AiError {
     TooLarge,
     #[error("invalid model id")]
     InvalidModel,
+    /// Credentials could not be obtained (ChatGPT sign-in); nothing was sent.
+    #[error("{0}")]
+    Auth(#[from] chatgpt::AuthError),
+    /// The ChatGPT plan (or this app's weekly cap) is used up for now.
+    #[error("ChatGPT plan usage limit reached: {0}")]
+    PlanLimit(String),
+    /// The feature is not available with this kind of credential.
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 impl AiError {
@@ -112,6 +147,7 @@ impl AiError {
     fn retryable(&self) -> bool {
         match self {
             AiError::NotSent(_) => true,
+            AiError::Auth(chatgpt::AuthError::Network(_)) => true,
             AiError::Status { status, .. } => matches!(status, 408 | 409 | 429 | 500 | 502 | 503 | 504 | 529),
             _ => false,
         }
@@ -145,7 +181,7 @@ pub struct Client {
 }
 
 /// Model ids go into URL paths (Gemini); allow only safe characters.
-fn valid_model(model: &str) -> bool {
+pub(crate) fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 128
         && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
@@ -167,6 +203,10 @@ impl Client {
         self.endpoint.provider
     }
 
+    pub fn billing(&self) -> Billing {
+        self.endpoint.billing()
+    }
+
     /// Sends a structured-output request, retrying transient failures.
     pub async fn complete(&self, req: &Request) -> Result<Reply, AiError> {
         if !valid_model(&req.model) {
@@ -184,6 +224,9 @@ impl Client {
         if !valid_model(&req.model) {
             return Err(AiError::InvalidModel);
         }
+        if self.billing() == Billing::ChatGptPlan {
+            return Err(AiError::Unsupported("token counting is not available with a ChatGPT plan"));
+        }
         let (url, body) = providers::count_tokens(&self.endpoint, req);
         let json = self.post_with_retries(&url, &body).await?;
         providers::parse_count(self.endpoint.provider, &json)
@@ -191,10 +234,21 @@ impl Client {
 
     async fn post_with_retries(&self, url: &str, body: &Value) -> Result<Value, AiError> {
         let mut attempt = 0;
+        let mut reauthorized = false;
         loop {
             attempt += 1;
             match self.post_once(url, body).await {
                 Ok(v) => return Ok(v),
+                // A plan access token can be revoked or expire early: refresh once.
+                Err((AiError::Status { status: 401, .. }, _))
+                    if !reauthorized && matches!(self.endpoint.auth, Auth::ChatGpt(_)) =>
+                {
+                    if let Auth::ChatGpt(s) = &self.endpoint.auth {
+                        s.expire_access_token().await;
+                    }
+                    reauthorized = true;
+                    attempt -= 1;
+                }
                 Err((e, retry_after)) if e.retryable() && attempt < self.policy.max_attempts => {
                     let backoff = self.policy.initial_backoff * 2u32.pow(attempt - 1);
                     let wait = retry_after.unwrap_or(backoff).min(self.policy.max_backoff);
@@ -207,8 +261,12 @@ impl Client {
     }
 
     async fn post_once(&self, url: &str, body: &Value) -> Result<Value, (AiError, Option<Duration>)> {
+        let token = match &self.endpoint.auth {
+            Auth::ApiKey(k) => k.clone(),
+            Auth::ChatGpt(s) => s.access_token().await.map_err(|e| (AiError::Auth(e), None))?,
+        };
         let mut req = self.http.post(url).header(reqwest::header::CONTENT_TYPE, "application/json");
-        for (k, v) in providers::auth_headers(&self.endpoint) {
+        for (k, v) in providers::auth_headers(self.endpoint.provider, &token) {
             req = req.header(k, v);
         }
         let mut resp = req.body(body.to_string()).send().await.map_err(|e| {
@@ -234,10 +292,16 @@ impl Client {
             bytes.extend_from_slice(&chunk);
         }
         if status != StatusCode::OK {
+            if providers::is_plan_limit(&bytes) {
+                return Err((AiError::PlanLimit(providers::error_message(&bytes)), None));
+            }
             return Err((
                 AiError::Status { status: status.as_u16(), message: providers::error_message(&bytes) },
                 retry_after,
             ));
+        }
+        if body["stream"] == true {
+            return providers::final_response_from_stream(&bytes).map_err(|e| (e, None));
         }
         serde_json::from_slice(&bytes).map_err(|e| (AiError::Malformed(e.to_string()), None))
     }

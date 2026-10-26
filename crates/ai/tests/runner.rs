@@ -1,17 +1,19 @@
 //! End-to-end runs against a scripted local server that imitates the
-//! OpenAI, Anthropic and Gemini wire formats. No real provider is contacted
-//! and nothing here costs money.
+//! OpenAI, Anthropic and Gemini wire formats, and OpenAI's Sign in with
+//! ChatGPT endpoints. No real provider is contacted and nothing here costs
+//! money.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use juttusihti_ai::{Approval, Client, Control, Endpoint, Progress, RetryPolicy, RunError, Runner};
+use juttusihti_ai::chatgpt::{AuthError, PendingSignIn, Registration, Servers, Session};
+use juttusihti_ai::{AiError, Approval, Auth, Client, Control, Endpoint, Progress, RetryPolicy, RunError, Runner};
 use juttusihti_core::analysis::{AnalysisConfig, Depth, Task};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::estimate;
-use juttusihti_core::pricing::{Catalog, Provider};
+use juttusihti_core::pricing::{Billing, Catalog, Provider};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::Store;
 use juttusihti_core::{NewArticle, NewFeed, SessionStatus, Status};
@@ -26,6 +28,8 @@ struct Recorded {
     path: String,
     headers: String,
     body: Value,
+    /// The body as text (form-encoded OAuth requests are not JSON).
+    raw: String,
 }
 
 #[derive(Clone)]
@@ -93,14 +97,23 @@ async fn mock(handler: Handler) -> Mock {
             let (log, handler, counter) = (log.clone(), handler.clone(), counter.clone());
             tokio::spawn(async move {
                 let Some((path, headers, body)) = read_request(&mut sock).await else { return };
-                let rec = Recorded { path, headers, body: serde_json::from_slice(&body).unwrap_or(Value::Null) };
+                let rec = Recorded {
+                    path,
+                    headers,
+                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+                    raw: String::from_utf8_lossy(&body).into_owned(),
+                };
                 let n = counter.fetch_add(1, Ordering::SeqCst);
                 log.lock().unwrap().push(rec.clone());
                 let reply = handler(&rec, n);
                 tokio::time::sleep(reply.delay).await;
-                let body = reply.body.to_string();
+                // A string body is sent as is: a server-sent event stream.
+                let (body, kind) = match &reply.body {
+                    Value::String(sse) => (sse.clone(), "text/event-stream"),
+                    other => (other.to_string(), "application/json"),
+                };
                 let head = format!(
-                    "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     reply.status,
                     body.len()
                 );
@@ -118,7 +131,9 @@ async fn mock(handler: Handler) -> Mock {
 fn user_text(provider: Provider, body: &Value) -> String {
     match provider {
         Provider::Anthropic => body["messages"][0]["content"].as_str(),
-        Provider::Openai => body["input"][1]["content"].as_str(),
+        // The last input item: after the system message with an API key,
+        // the only item on a ChatGPT plan (system text is in `instructions`).
+        Provider::Openai => body["input"].as_array().and_then(|a| a.last()).and_then(|m| m["content"].as_str()),
         Provider::Gemini => body["contents"][0]["parts"][0]["text"].as_str(),
     }
     .unwrap_or_default()
@@ -250,6 +265,7 @@ fn config(provider: Provider, tasks: &[Task]) -> AnalysisConfig {
         max_articles: 1_000,
         reuse_cached: true,
         use_batch: false,
+        billing: Default::default(),
         relevance_criteria: Some("työttömyysturva".into()),
     }
 }
@@ -271,7 +287,8 @@ fn fast() -> RetryPolicy {
 }
 
 fn runner(db: &Arc<Mutex<Store>>, provider: Provider, base: &str, control: Control) -> Runner {
-    let client = Client::new(Endpoint { provider, base_url: base.into(), api_key: API_KEY.into() }, fast()).unwrap();
+    let client =
+        Client::new(Endpoint { provider, base_url: base.into(), auth: Auth::ApiKey(API_KEY.into()) }, fast()).unwrap();
     Runner::new(db.clone(), client, Catalog::builtin(), control)
 }
 
@@ -582,7 +599,8 @@ async fn provider_token_counting() {
         }))
         .await;
         let client =
-            Client::new(Endpoint { provider, base_url: m.base.clone(), api_key: API_KEY.into() }, fast()).unwrap();
+            Client::new(Endpoint { provider, base_url: m.base.clone(), auth: Auth::ApiKey(API_KEY.into()) }, fast())
+                .unwrap();
         let req = juttusihti_ai::Request {
             model: model_for(provider).into(),
             system: "s".into(),
@@ -593,4 +611,258 @@ async fn provider_token_counting() {
         };
         assert_eq!(client.count_tokens(&req).await.unwrap(), 321, "{provider:?}");
     }
+}
+
+// ---- ChatGPT plan ---------------------------------------------------------------------
+
+const PLAN_SCOPES: &str = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+
+fn servers(m: &Mock) -> Servers {
+    Servers { auth_base: m.base.clone(), api_base: format!("{}/v1", m.base) }
+}
+
+type Saved = Arc<Mutex<Vec<Option<String>>>>;
+
+fn persist(saved: &Saved) -> juttusihti_ai::chatgpt::Persist {
+    let saved = saved.clone();
+    Arc::new(move |t: Option<&str>| {
+        saved.lock().unwrap().push(t.map(str::to_string));
+        Ok(())
+    })
+}
+
+fn form_of(raw: &str) -> std::collections::HashMap<String, String> {
+    url::form_urlencoded::parse(raw.as_bytes()).into_owned().collect()
+}
+
+fn sse_completed(response: &Value) -> Value {
+    Value::String(format!(
+        "event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        json!({"type": "response.created", "response": {"status": "in_progress"}}),
+        json!({"type": "response.completed", "response": response})
+    ))
+}
+
+/// Token endpoint that rotates refresh tokens r1 → r2 and rejects reuse.
+fn refresh_reply(r: &Recorded) -> MockReply {
+    let f = form_of(&r.raw);
+    match f.get("refresh_token").map(String::as_str) {
+        Some("r1") => ok(json!({"access_token": "plan-access", "refresh_token": "r2", "expires_in": 3600,
+                                "scope": PLAN_SCOPES, "token_type": "Bearer"})),
+        _ => MockReply { status: 400, body: json!({"error": "invalid_grant"}), delay: Duration::ZERO },
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_plan_run_streams_and_has_no_api_cost() {
+    let db = seed(3);
+    let mut cfg = config(Provider::Openai, &[Task::Labels, Task::Entities, Task::Related, Task::Summary]);
+    cfg.billing = Billing::ChatGptPlan;
+    cfg.model = "gpt-plan-only".into(); // not in the price catalog: still a known zero
+    let sid = session(&db, &cfg);
+    let good = good_model(Provider::Openai);
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        if r.path == "/api/accounts/oauth/token" {
+            return refresh_reply(r);
+        }
+        ok(sse_completed(&good(r, n).body))
+    }))
+    .await;
+    let saved: Saved = Default::default();
+    let session = Session::resume(servers(&m), "oaiapp_test".into(), "r1".into(), persist(&saved)).unwrap();
+    let client = Client::new(Endpoint::chatgpt(Arc::new(session)), fast()).unwrap();
+    let summary = Runner::new(db.clone(), client, Catalog::builtin(), Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Completed));
+    assert_eq!(summary.cost, Some(0), "charged to the plan, not unknown");
+    assert!(summary.usage.total() > 0, "tokens are still counted");
+    assert_eq!(*saved.lock().unwrap(), vec![Some("r2".to_string())], "rotated refresh token is persisted");
+
+    let reqs = m.requests();
+    let token: Vec<_> = reqs.iter().filter(|r| r.path == "/api/accounts/oauth/token").collect();
+    assert_eq!(token.len(), 1, "one refresh serves the whole run");
+    let f = form_of(&token[0].raw);
+    assert_eq!(f["grant_type"], "refresh_token");
+    assert_eq!(f["client_id"], "oaiapp_test");
+    assert_eq!(f["resource"], "https://api.openai.com/v1");
+    assert!(!f.contains_key("scope"), "omitting scope keeps the grant");
+    let api: Vec<_> = reqs.iter().filter(|r| r.path == "/v1/responses").collect();
+    assert_eq!(api.len(), 3, "extraction, related, summary");
+    for r in api {
+        assert!(r.headers.to_ascii_lowercase().contains("authorization: bearer plan-access"));
+        assert_eq!(r.body["stream"], true);
+        assert_eq!(r.body["store"], false);
+        assert!(r.body.get("max_output_tokens").is_none(), "rejected on a plan");
+        assert!(r.body["instructions"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(r.body["input"].as_array().unwrap().len(), 1, "no system items in input");
+    }
+    assert!(ledger_rows(&db).iter().all(|(_, cost)| *cost == Some(0)));
+}
+
+#[tokio::test]
+async fn chatgpt_plan_limit_pauses_without_retrying() {
+    let db = seed(2);
+    let mut cfg = config(Provider::Openai, &[Task::Labels]);
+    cfg.billing = Billing::ChatGptPlan;
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if r.path == "/api/accounts/oauth/token" {
+            return refresh_reply(r);
+        }
+        MockReply {
+            status: 429,
+            body: json!({"error": {"code": "subscription_sharing_usage_limit_exceeded", "message": "Weekly app limit"}}),
+            delay: Duration::ZERO,
+        }
+    }))
+    .await;
+    let session =
+        Session::resume(servers(&m), "oaiapp_test".into(), "r1".into(), persist(&Default::default())).unwrap();
+    let client = Client::new(Endpoint::chatgpt(Arc::new(session)), fast()).unwrap();
+    let summary = Runner::new(db.clone(), client, Catalog::builtin(), Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Paused));
+    let rec = db.lock().unwrap().session(sid).unwrap();
+    assert!(rec.error.unwrap().contains("usage limit"));
+    assert_eq!(m.requests().iter().filter(|r| r.path == "/v1/responses").count(), 1, "no retries");
+}
+
+#[tokio::test]
+async fn billing_must_match_the_approved_session() {
+    let db = seed(1);
+    let mut cfg = config(Provider::Openai, &[Task::Labels]);
+    cfg.billing = Billing::ChatGptPlan;
+    let sid = session(&db, &cfg);
+    let err = runner(&db, Provider::Openai, "http://127.0.0.1:9", Control::default()).run(sid, YES).await.unwrap_err();
+    assert!(matches!(err, RunError::BillingMismatch { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn chatgpt_refresh_failure_signs_out_and_counting_is_unsupported() {
+    let m = mock(Arc::new(|r: &Recorded, _| refresh_reply(r))).await;
+    let saved: Saved = Default::default();
+    let session = Arc::new(Session::resume(servers(&m), "oaiapp_test".into(), "dead".into(), persist(&saved)).unwrap());
+    assert_eq!(session.access_token().await, Err(AuthError::SignedOut));
+    assert_eq!(*saved.lock().unwrap(), vec![None], "unusable token is cleared");
+
+    let client = Client::new(Endpoint::chatgpt(session), fast()).unwrap();
+    let req = juttusihti_ai::Request {
+        model: "m".into(),
+        system: "s".into(),
+        user: "u".into(),
+        schema_name: "x".into(),
+        schema: json!({"type": "object"}),
+        max_output_tokens: 10,
+    };
+    assert!(matches!(client.count_tokens(&req).await, Err(AiError::Unsupported(_))));
+    assert!(matches!(client.complete(&req).await, Err(AiError::Auth(AuthError::SignedOut))));
+}
+
+/// What the fake authorization server issues next.
+#[derive(Default)]
+struct AuthScript {
+    challenge: String,
+    nonce: String,
+    subject: String,
+    scope: String,
+}
+
+fn id_token(claims: Value) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!("{}.{}.sig", b64.encode(r#"{"alg":"RS256"}"#), b64.encode(claims.to_string()))
+}
+
+#[tokio::test]
+async fn chatgpt_sign_in_registers_then_returns() {
+    use sha2::Digest;
+    let script = Arc::new(Mutex::new(AuthScript::default()));
+    let base = Arc::new(Mutex::new(String::new()));
+    let (sc, b) = (script.clone(), base.clone());
+    let m = mock(Arc::new(move |r: &Recorded, _| {
+        let f = form_of(&r.raw);
+        let s = sc.lock().unwrap();
+        use base64::Engine;
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(f.get("code_verifier").cloned().unwrap_or_default().as_bytes()));
+        if f.get("grant_type").map(String::as_str) != Some("authorization_code")
+            || f.get("code").map(String::as_str) != Some("code-1")
+            || challenge != s.challenge
+        {
+            return MockReply { status: 400, body: json!({"error": "invalid_grant"}), delay: Duration::ZERO };
+        }
+        let claims = json!({"iss": *b.lock().unwrap(), "aud": f["client_id"], "nonce": s.nonce,
+                            "exp": chrono::Utc::now().timestamp() + 600, "sub": s.subject, "email": "user@example.com"});
+        ok(json!({"access_token": "a1", "refresh_token": "r1", "id_token": id_token(claims),
+                  "expires_in": 3600, "scope": s.scope}))
+    }))
+    .await;
+    *base.lock().unwrap() = m.base.clone();
+
+    // Drives one browser round trip; returns the authorization URL's query.
+    async fn sign_in(
+        m: &Mock,
+        script: &Arc<Mutex<AuthScript>>,
+        reg: Registration,
+        subject: &str,
+        scope: &str,
+    ) -> (std::collections::HashMap<String, String>, Result<juttusihti_ai::chatgpt::SignedIn, AuthError>) {
+        let pending = PendingSignIn::start(servers(m), reg).await.unwrap();
+        let url = url::Url::parse(pending.url()).unwrap();
+        assert!(url.as_str().starts_with(&format!("{}/api/accounts/authorize?", m.base)));
+        let q: std::collections::HashMap<String, String> = url.query_pairs().into_owned().collect();
+        *script.lock().unwrap() = AuthScript {
+            challenge: q["code_challenge"].clone(),
+            nonce: q["nonce"].clone(),
+            subject: subject.into(),
+            scope: scope.into(),
+        };
+        let redirect = q["redirect_uri"].clone();
+        let finish = tokio::spawn(pending.finish());
+        let http = reqwest::Client::new();
+        // A stray local request with the wrong state is ignored.
+        let stray = http.get(format!("{redirect}?code=evil&state=wrong")).send().await.unwrap();
+        assert_eq!(stray.status(), 400);
+        let back = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("code", "code-1")
+            .append_pair("state", &q["state"])
+            .append_pair("scope", scope)
+            .append_pair("client_id", q["client_id"].replace("dynamic_agent_client", "oaiapp_new").as_str())
+            .finish();
+        let page = http.get(format!("{redirect}?{back}")).send().await.unwrap();
+        assert_eq!(page.status(), 200);
+        (q, finish.await.unwrap())
+    }
+
+    // First sign-in: dynamic registration.
+    let (q, result) = sign_in(&m, &script, Registration::new(), "user-1", PLAN_SCOPES).await;
+    assert_eq!(q["client_id"], "dynamic_agent_client");
+    assert_eq!(q["agent_name_hint"], "Juttusihti");
+    assert_eq!(q["scope"], PLAN_SCOPES);
+    assert_eq!(q["resource"], "https://api.openai.com/v1");
+    assert_eq!(q["code_challenge_method"], "S256");
+    assert!(q["redirect_uri"].starts_with("http://127.0.0.1:") && q["redirect_uri"].ends_with("/auth/callback"));
+    assert!(q["ext_agent_host_id"].starts_with("urn:uuid:"));
+    let signed = result.unwrap();
+    assert_eq!(signed.registration.client_id.as_deref(), Some("oaiapp_new"));
+    assert_eq!(signed.registration.subject.as_deref(), Some("user-1"));
+    assert_eq!(signed.registration.email.as_deref(), Some("user@example.com"));
+    assert_eq!(signed.refresh_token, "r1");
+    let exchange = form_of(&m.requests().last().unwrap().raw);
+    assert_eq!(exchange["client_id"], "oaiapp_new");
+    assert_eq!(exchange["redirect_uri"], q["redirect_uri"]);
+    assert!(!exchange.contains_key("client_secret"));
+
+    // Returning sign-in reuses the issued client id and hints the account.
+    let reg = signed.registration.clone();
+    let (q, result) = sign_in(&m, &script, reg.clone(), "user-1", PLAN_SCOPES).await;
+    assert_eq!(q["client_id"], "oaiapp_new");
+    assert_eq!(q["login_hint"], "user@example.com");
+    assert!(!q.contains_key("agent_name_hint"));
+    assert_eq!(q["ext_agent_host_id"], reg.host_id, "host id is stable");
+    assert!(result.is_ok());
+
+    // Another account, or no plan scope, is refused.
+    let (_, result) = sign_in(&m, &script, reg.clone(), "user-2", PLAN_SCOPES).await;
+    assert_eq!(result.unwrap_err(), AuthError::DifferentAccount);
+    let (_, result) = sign_in(&m, &script, reg, "user-1", "openid profile email offline_access").await;
+    assert_eq!(result.unwrap_err(), AuthError::NotEligible);
 }

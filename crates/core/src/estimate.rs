@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{AnalysisConfig, Depth, Scope, Task};
-use crate::pricing::{Catalog, Micros, Price, Usage, format_usd};
+use crate::pricing::{Billing, Catalog, Micros, Price, Provider, Usage, format_usd};
 
 /// Local token approximation for one text. Calibrated loosely: ASCII text
 /// averages ~4 characters per token across current tokenizers; non-ASCII
@@ -286,7 +286,8 @@ pub fn estimate(
     today: NaiveDate,
 ) -> Estimate {
     let requests = plan(config, scope, label_vocabulary);
-    let price = catalog.lookup(config.provider, &config.model, today);
+    let price = catalog.price_for(config.provider, &config.model, config.billing, today);
+    let price = price.as_ref();
     let caching_supported = price.is_some_and(|p| p.rates.cached_input.is_some());
     let scenarios: BTreeMap<Scenario, ScenarioTotals> =
         [Scenario::Optimistic, Scenario::Expected, Scenario::Conservative]
@@ -353,6 +354,16 @@ pub fn estimate(
     }
     if config.use_batch {
         warnings.push("Batch processing is not supported yet; this estimate and the run use standard prices.".into());
+    }
+    if config.billing == Billing::ChatGptPlan {
+        if config.provider == Provider::Openai {
+            warnings.push(
+                "Runs use your ChatGPT plan allowance instead of API credit. OpenAI does not publish plan allowances                  in tokens; the run pauses if the plan or the app's weekly cap is reached. Output length cannot                  be capped on the plan, so token use may exceed the estimate."
+                    .into(),
+            );
+        } else {
+            warnings.push(format!("{} cannot be billed to a ChatGPT plan.", config.provider));
+        }
     }
     let expected_cost = scenarios[&Scenario::Expected].cost;
     let conservative = &scenarios[&Scenario::Conservative];

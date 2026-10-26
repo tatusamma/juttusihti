@@ -40,6 +40,34 @@ impl std::fmt::Display for Provider {
     }
 }
 
+/// How a run is paid for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// Per-token API charges on the user's own API key.
+    #[default]
+    ApiKey,
+    /// The user's ChatGPT plan through Sign in with ChatGPT (OpenAI only).
+    /// Usage counts against the plan's allowance; there is no per-token
+    /// API charge.
+    ChatGptPlan,
+}
+
+impl Billing {
+    pub fn label(self) -> &'static str {
+        match self {
+            Billing::ApiKey => "API key",
+            Billing::ChatGptPlan => "ChatGPT plan",
+        }
+    }
+}
+
+impl std::fmt::Display for Billing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Per-million-token rates for one pricing tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rates {
@@ -77,6 +105,26 @@ pub struct Price {
 }
 
 impl Price {
+    /// Requests charged to a ChatGPT plan have no per-token API cost: the
+    /// cost is a known zero, not an unknown price.
+    pub fn chatgpt_plan(model: &str) -> Self {
+        let zero = Some(0);
+        Price {
+            provider: Provider::Openai,
+            model: model.to_string(),
+            currency: "USD".into(),
+            valid_from: None,
+            valid_until: None,
+            rates: Rates { input: zero, cached_input: zero, cache_write: zero, output: zero },
+            long_context: None,
+            batch_permille: None,
+            reasoning: true,
+            source: "charged to your ChatGPT plan, no API cost".into(),
+            verified_on: None,
+            manual: false,
+        }
+    }
+
     fn valid_on(&self, day: NaiveDate) -> bool {
         self.valid_from.is_none_or(|f| day >= f) && self.valid_until.is_none_or(|u| day < u)
     }
@@ -267,6 +315,15 @@ impl Catalog {
     }
 
     /// Distinct model ids known for a provider.
+    /// The price a run with `billing` is charged at.
+    pub fn price_for(&self, provider: Provider, model: &str, billing: Billing, day: NaiveDate) -> Option<Price> {
+        match billing {
+            Billing::ChatGptPlan if provider == Provider::Openai => Some(Price::chatgpt_plan(model)),
+            Billing::ChatGptPlan => None,
+            Billing::ApiKey => self.lookup(provider, model, day).cloned(),
+        }
+    }
+
     pub fn models(&self, provider: Provider) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in self.entries.iter().filter(|p| p.provider == provider) {

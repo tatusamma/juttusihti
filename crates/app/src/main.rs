@@ -6,6 +6,7 @@ mod format;
 mod graph_view;
 mod labels;
 mod map_view;
+mod plan;
 mod providers;
 mod reports;
 mod research;
