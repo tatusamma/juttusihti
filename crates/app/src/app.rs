@@ -67,6 +67,8 @@ pub struct Sidebar {
 pub struct Listing {
     items: Vec<ArticleSummary>,
     total: u64,
+    total_is_exact: bool,
+    ranked_window: bool,
     interpreted: Option<String>,
 }
 
@@ -217,7 +219,7 @@ impl App {
             active_search: String::new(),
             page: Page::first(PAGE_SIZE),
             list_generation: 0,
-            listing: Listing { items: vec![], total: 0, interpreted: None },
+            listing: Listing { items: vec![], total: 0, total_is_exact: true, ranked_window: false, interpreted: None },
             preview: None,
             add_feed: String::new(),
             refreshing: 0,
@@ -288,6 +290,8 @@ impl App {
                     s.search(&query, page).map(|r| Listing {
                         items: r.items,
                         total: r.total,
+                        total_is_exact: r.total_is_exact,
+                        ranked_window: r.ranked_window,
                         interpreted: r.interpreted,
                     })
                 })
@@ -986,9 +990,15 @@ impl App {
         let range = if self.listing.total == 0 {
             "0".to_string()
         } else {
-            format!("{first}–{last} of {}", self.listing.total)
+            let plus = if self.listing.total_is_exact { "" } else { "+" };
+            format!("{first}–{last} of {}{plus}", self.listing.total)
         };
         let mut header = row![text(range).size(12).width(Fill)].spacing(6).align_y(iced::Center);
+        if self.listing.ranked_window {
+            header = header.push(
+                text("Very many matches: ranked among the 10,000 newest. Add words or filters to narrow.").size(11),
+            );
+        }
         if let Some(interp) = &self.listing.interpreted {
             header = header.push(text(format!("Query: {interp}")).size(12));
         }

@@ -9,6 +9,7 @@ use crate::db::Db;
 pub const KEY_RETENTION_DAYS: &str = "retention_days";
 pub const KEY_REFRESH_MINUTES: &str = "refresh_minutes";
 pub const KEY_THEME: &str = "theme";
+pub const KEY_RENDERER: &str = "renderer";
 
 pub const DEFAULT_REFRESH_MINUTES: u32 = 30;
 
@@ -20,11 +21,13 @@ pub struct Values {
     /// 0 disables automatic refresh.
     pub refresh_minutes: u32,
     pub dark: bool,
+    /// Software rendering: far less memory, slower drawing. Applied at startup.
+    pub cpu_renderer: bool,
 }
 
 impl Default for Values {
     fn default() -> Self {
-        Self { retention_days: None, refresh_minutes: DEFAULT_REFRESH_MINUTES, dark: true }
+        Self { retention_days: None, refresh_minutes: DEFAULT_REFRESH_MINUTES, dark: true, cpu_renderer: false }
     }
 }
 
@@ -35,6 +38,7 @@ pub fn read(store: &juttusihti_core::store::Store) -> juttusihti_core::Result<Va
         retention_days: store.setting(KEY_RETENTION_DAYS)?.and_then(|v| v.parse().ok()).filter(|d| *d > 0),
         refresh_minutes: store.setting(KEY_REFRESH_MINUTES)?.and_then(|v| v.parse().ok()).unwrap_or(d.refresh_minutes),
         dark: store.setting(KEY_THEME)?.is_none_or(|v| v != "light"),
+        cpu_renderer: store.setting(KEY_RENDERER)?.is_some_and(|v| v == "cpu"),
     })
 }
 
@@ -44,6 +48,7 @@ pub enum Msg {
     Retention(String),
     Refresh(String),
     Dark(bool),
+    CpuRenderer(bool),
     Save,
     Saved(Result<(Values, usize), String>),
     ThemeSaved(Result<(), String>),
@@ -61,6 +66,7 @@ pub struct State {
     retention: String,
     refresh: String,
     dark: bool,
+    cpu_renderer: bool,
     tile_url: String,
     tile_cache_bytes: u64,
     message: Option<Result<String, String>>,
@@ -76,6 +82,7 @@ impl State {
             retention: String::new(),
             refresh: v.refresh_minutes.to_string(),
             dark: v.dark,
+            cpu_renderer: v.cpu_renderer,
             tile_url: juttusihti_fetch::tiles::OSM_TILE_URL.into(),
             tile_cache_bytes: 0,
             message: None,
@@ -106,6 +113,7 @@ impl State {
         self.retention = self.values.retention_days.map(|d| d.to_string()).unwrap_or_default();
         self.refresh = self.values.refresh_minutes.to_string();
         self.dark = self.values.dark;
+        self.cpu_renderer = self.values.cpu_renderer;
     }
 
     fn parse(&self) -> Result<Values, String> {
@@ -121,7 +129,7 @@ impl State {
         if refresh_minutes != 0 && refresh_minutes < 5 {
             return Err("Refresh at most every 5 minutes, to be polite to feed servers.".into());
         }
-        Ok(Values { retention_days, refresh_minutes, dark: self.dark })
+        Ok(Values { retention_days, refresh_minutes, dark: self.dark, cpu_renderer: self.cpu_renderer })
     }
 
     /// Persists only the theme; used by the toolbar toggle.
@@ -145,6 +153,7 @@ impl State {
             Msg::Retention(s) => self.retention = s,
             Msg::Refresh(s) => self.refresh = s,
             Msg::Dark(d) => self.dark = d,
+            Msg::CpuRenderer(on) => self.cpu_renderer = on,
             Msg::Save => match self.parse() {
                 Err(e) => self.message = Some(Err(e)),
                 Ok(v) => {
@@ -158,6 +167,7 @@ impl State {
                                 )?;
                                 s.set_setting(KEY_REFRESH_MINUTES, &v.refresh_minutes.to_string())?;
                                 s.set_setting(KEY_THEME, if v.dark { "dark" } else { "light" })?;
+                                s.set_setting(KEY_RENDERER, if v.cpu_renderer { "cpu" } else { "gpu" })?;
                                 let removed = match v.retention_days {
                                     Some(d) => s.apply_retention(d)?,
                                     None => 0,
@@ -248,6 +258,9 @@ impl State {
             .align_y(iced::Center),
             text("Appearance").size(16).font(bold),
             checkbox(self.dark).label("Dark theme").on_toggle(Msg::Dark),
+            checkbox(self.cpu_renderer)
+                .label("CPU renderer: uses far less memory, draws maps and graphs more slowly (applies after restart)")
+                .on_toggle(Msg::CpuRenderer),
             button(text("Save")).on_press(Msg::Save),
             text("Map").size(16).font(bold),
             row![
@@ -287,7 +300,10 @@ mod tests {
         s.set_setting(KEY_RETENTION_DAYS, "90").unwrap();
         s.set_setting(KEY_REFRESH_MINUTES, "0").unwrap();
         s.set_setting(KEY_THEME, "light").unwrap();
-        assert_eq!(read(&s).unwrap(), Values { retention_days: Some(90), refresh_minutes: 0, dark: false });
+        assert_eq!(
+            read(&s).unwrap(),
+            Values { retention_days: Some(90), refresh_minutes: 0, dark: false, cpu_renderer: false }
+        );
         s.set_setting(KEY_RETENTION_DAYS, "0").unwrap();
         s.set_setting(KEY_REFRESH_MINUTES, "junk").unwrap();
         let v = read(&s).unwrap();

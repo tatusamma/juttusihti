@@ -426,11 +426,19 @@ pub struct SearchQuery {
     pub hide_dismissed: bool,
 }
 
+/// Counts stop at this many matches; beyond it the UI shows "10,000+".
+pub const COUNT_CAP: u64 = 10_000;
+
 /// Search results plus the interpreted query for display.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchResults {
     pub items: Vec<ArticleSummary>,
+    /// Number of matches, exact unless `total_is_exact` is false (then at least this many).
     pub total: u64,
+    pub total_is_exact: bool,
+    /// True when more than [`COUNT_CAP`] text matches exist: results are then
+    /// ranked among the [`COUNT_CAP`] most recently stored matches.
+    pub ranked_window: bool,
     pub interpreted: Option<String>,
 }
 
@@ -501,47 +509,109 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     Ok((sql, params, node))
 }
 
+/// Counts matches up to `cap` (+1 to know whether there are more).
+fn count_capped(conn: &rusqlite::Connection, from_where: &str, params: &[Value], cap: u64) -> Result<(u64, bool)> {
+    let mut p = params.to_vec();
+    p.push(Value::Integer(cap as i64 + 1));
+    let n: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM (SELECT 1{from_where} LIMIT ?)"),
+        rusqlite::params_from_iter(p.iter()),
+        |r| r.get(0),
+    )?;
+    let n = n as u64;
+    Ok(if n > cap { (cap, false) } else { (n, true) })
+}
+
+const BM25: &str = "bm25(articles_fts, 10.0, 3.0, 1.0, 2.0)";
+
 /// Runs a search with pagination. Text queries are ranked by bm25 with
 /// title matches weighted highest; filter-only queries are newest first.
+///
+/// Text search runs in two steps: the page is chosen from (id, rank) pairs
+/// only, then snippets and details are computed for that page alone. When
+/// more than [`COUNT_CAP`] articles match, ranking covers the most recently
+/// stored [`COUNT_CAP`] matches, which keeps very common words fast.
 pub fn search(conn: &rusqlite::Connection, q: &SearchQuery, page: Page) -> Result<SearchResults> {
-    let (from_where, mut params, node) = build_where(q)?;
-    let total: i64 =
-        conn.query_row(&format!("SELECT count(*){from_where}"), rusqlite::params_from_iter(params.iter()), |r| {
-            r.get(0)
-        })?;
-    let (select_extra, order) = if node.is_some() {
-        (
-            format!(
-                ", snippet(articles_fts, -1, '{HIGHLIGHT_START}', '{HIGHLIGHT_END}', '…', 16), bm25(articles_fts, 10.0, 3.0, 1.0, 2.0)"
-            ),
-            " ORDER BY bm25(articles_fts, 10.0, 3.0, 1.0, 2.0), a.effective_at DESC",
+    search_capped(conn, q, page, COUNT_CAP)
+}
+
+#[doc(hidden)]
+pub fn search_capped(conn: &rusqlite::Connection, q: &SearchQuery, page: Page, cap: u64) -> Result<SearchResults> {
+    let (from_where, params, node) = build_where(q)?;
+    let (total, total_is_exact) = count_capped(conn, &from_where, &params, cap)?;
+    let interpreted = node.as_ref().map(describe);
+
+    let Some(node) = node else {
+        let mut p = params.clone();
+        p.push(Value::Integer(page.limit as i64));
+        p.push(Value::Integer(page.offset as i64));
+        let sql = format!(
+            "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved, NULL, NULL{from_where}
+             ORDER BY a.effective_at DESC, a.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let items =
+            stmt.query_map(rusqlite::params_from_iter(p.iter()), summary_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        return Ok(SearchResults { items, total, total_is_exact, ranked_window: false, interpreted });
+    };
+
+    // Step 1: choose the page from ids and ranks only.
+    let ranked_window = !total_is_exact;
+    let mut p = params.clone();
+    let inner = if ranked_window {
+        p.push(Value::Integer(cap as i64));
+        format!(
+            "SELECT a.id AS id, {BM25} AS rank, a.effective_at AS at{from_where} ORDER BY articles_fts.rowid DESC LIMIT ?"
         )
     } else {
-        (", NULL, NULL".to_string(), " ORDER BY a.effective_at DESC, a.id DESC")
+        format!("SELECT a.id AS id, {BM25} AS rank, a.effective_at AS at{from_where}")
     };
+    p.push(Value::Integer(page.limit as i64));
+    p.push(Value::Integer(page.offset as i64));
+    let mut stmt =
+        conn.prepare(&format!("SELECT id, rank FROM ({inner}) ORDER BY rank, at DESC, id DESC LIMIT ? OFFSET ?"))?;
+    let ranked: Vec<(i64, f64)> = stmt
+        .query_map(rusqlite::params_from_iter(p.iter()), |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if ranked.is_empty() {
+        return Ok(SearchResults { items: Vec::new(), total, total_is_exact, ranked_window, interpreted });
+    }
+
+    // Step 2: details and highlighted snippets for this page only.
+    let placeholders = vec!["?"; ranked.len()].join(",");
     let sql = format!(
-        "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved{select_extra}{from_where}{order} LIMIT ? OFFSET ?"
+        "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved,
+                snippet(articles_fts, -1, '{HIGHLIGHT_START}', '{HIGHLIGHT_END}', '…', 16), NULL
+         FROM articles_fts JOIN articles a ON a.id = articles_fts.rowid JOIN feeds f ON f.id = a.feed_id
+         WHERE articles_fts MATCH ? AND articles_fts.rowid IN ({placeholders})"
     );
-    params.push(Value::Integer(page.limit as i64));
-    params.push(Value::Integer(page.offset as i64));
+    let mut p: Vec<Value> = vec![Value::Text(to_fts5(&node))];
+    p.extend(ranked.iter().map(|(id, _)| Value::Integer(*id)));
     let mut stmt = conn.prepare(&sql)?;
-    let items = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok(ArticleSummary {
-                id: r.get(0)?,
-                feed_id: r.get(1)?,
-                feed_title: r.get(2)?,
-                title: r.get(3)?,
-                url: r.get(4)?,
-                effective_at: r.get(5)?,
-                is_read: r.get(6)?,
-                is_saved: r.get(7)?,
-                snippet: r.get(8)?,
-                rank: r.get(9)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(SearchResults { items, total: total as u64, interpreted: node.as_ref().map(describe) })
+    let mut by_id: std::collections::HashMap<i64, ArticleSummary> = stmt
+        .query_map(rusqlite::params_from_iter(p.iter()), summary_row)?
+        .map(|r| r.map(|a| (a.id, a)))
+        .collect::<rusqlite::Result<_>>()?;
+    let items = ranked
+        .into_iter()
+        .filter_map(|(id, rank)| by_id.remove(&id).map(|a| ArticleSummary { rank: Some(rank), ..a }))
+        .collect();
+    Ok(SearchResults { items, total, total_is_exact, ranked_window, interpreted })
+}
+
+fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleSummary> {
+    Ok(ArticleSummary {
+        id: r.get(0)?,
+        feed_id: r.get(1)?,
+        feed_title: r.get(2)?,
+        title: r.get(3)?,
+        url: r.get(4)?,
+        effective_at: r.get(5)?,
+        is_read: r.get(6)?,
+        is_saved: r.get(7)?,
+        snippet: r.get(8)?,
+        rank: r.get(9)?,
+    })
 }
 
 /// Article ids matching a query, newest first, up to `limit`. Used to

@@ -47,12 +47,31 @@ fn main() -> iced::Result {
         }
     };
     tracing::info!(path = %db_path.display(), "database opened");
+    // The renderer is chosen before the window exists. An explicit
+    // ICED_BACKEND from the environment wins over the setting.
+    if std::env::var_os("ICED_BACKEND").is_none() && settings::read(&store).is_ok_and(|v| v.cpu_renderer) {
+        // SAFETY: still single-threaded here; nothing else reads or writes
+        // the environment concurrently.
+        unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
+    }
     let db = db::Db::new(store);
 
     iced::application(move || app::App::boot(db.clone(), db_path.clone()), app::App::update, app::App::view)
         .title(app::App::title)
         .theme(app::App::theme)
         .subscription(app::App::subscription)
-        .window_size((1280.0, 800.0))
+        .window(iced::window::Settings {
+            size: iced::Size::new(1280.0, 800.0),
+            min_size: Some(iced::Size::new(900.0, 560.0)),
+            icon: window_icon(),
+            ..Default::default()
+        })
         .run()
+}
+
+fn window_icon() -> Option<iced::window::Icon> {
+    let png = include_bytes!("../../../packaging/icons/juttusihti-64.png");
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    iced::window::icon::from_rgba(img.into_raw(), w, h).ok()
 }

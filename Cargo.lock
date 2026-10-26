@@ -2590,6 +2590,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "juttusihti-bench"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "juttusihti-analytics",
+ "juttusihti-core",
+ "serde_json",
+]
+
+[[package]]
 name = "juttusihti-core"
 version = "0.1.0"
 dependencies = [

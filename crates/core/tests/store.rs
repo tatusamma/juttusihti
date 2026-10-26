@@ -396,3 +396,66 @@ fn wal_allows_concurrent_reader_during_write() {
     let after: i64 = reader.query_row("SELECT count(*) FROM articles", [], |r| r.get(0)).unwrap();
     assert_eq!(after, 2);
 }
+
+#[test]
+fn counts_cap_and_large_text_results_rank_within_recent_window() {
+    use juttusihti_core::search::search_capped;
+    let (mut s, fi, _) = seeded();
+    let more: Vec<NewArticle> = (0..8)
+        .map(|i| entry(&format!("x{i}"), &format!("Hallitus päätti {i}"), "Uutinen.", OCT1 + 10 * DAY + i))
+        .collect();
+    s.ingest(fi, &more).unwrap();
+    // 9 "hallitus" matches with a cap of 5: count is a lower bound, ranking uses the window.
+    let r = search_capped(s.conn(), &text("hallitus"), Page::first(3), 5).unwrap();
+    assert_eq!((r.total, r.total_is_exact, r.ranked_window), (5, false, true));
+    assert_eq!(r.items.len(), 3);
+    assert!(r.items.iter().all(|a| a.snippet.is_some() && a.rank.is_some()));
+    // The window holds the most recently stored matches, so the oldest article is excluded.
+    let all = search_capped(s.conn(), &text("hallitus"), Page::first(50), 5).unwrap();
+    assert_eq!(all.items.len(), 5);
+    assert!(all.items.iter().all(|a| a.title != "Hallitus esittää muutoksia työttömyysturvaan"));
+    // Under the cap everything is exact.
+    let exact = search_capped(s.conn(), &text("hallitus"), Page::first(50), 100).unwrap();
+    assert_eq!((exact.total, exact.total_is_exact, exact.ranked_window, exact.items.len()), (9, true, false, 9));
+    // Filter-only lists also cap their count.
+    let list = search_capped(s.conn(), &SearchQuery::default(), Page::first(2), 4).unwrap();
+    assert_eq!((list.total, list.total_is_exact, list.items.len()), (4, false, 2));
+}
+
+#[test]
+fn list_queries_read_from_indexes_without_sorting() {
+    let (s, fi, _) = seeded();
+    let plan = |where_sql: &str| -> String {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN SELECT a.id FROM articles a JOIN feeds f ON f.id = a.feed_id WHERE 1=1 {where_sql}
+             ORDER BY a.effective_at DESC, a.id DESC LIMIT 50"
+        );
+        let mut stmt = s.conn().prepare(&sql).unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|x| x.unwrap()).collect::<Vec<_>>().join(" | ")
+    };
+    for (name, w) in [
+        ("all", String::new()),
+        ("unread", " AND a.is_read = 0".into()),
+        ("saved", " AND a.is_saved = 1".into()),
+        ("feed", format!(" AND a.feed_id IN ({fi})")),
+    ] {
+        let p = plan(&w);
+        assert!(!p.contains("TEMP B-TREE"), "{name} view sorts instead of using an index: {p}");
+    }
+}
+
+#[test]
+fn ingest_lookups_use_exact_indexes() {
+    let (s, _, _) = seeded();
+    for sql in [
+        "SELECT id, content_hash FROM articles WHERE feed_id = 1 AND guid = 'x'",
+        "SELECT 1 FROM articles WHERE feed_id = 1 AND dedup_key = 'k'",
+    ] {
+        let mut stmt = s.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan: String = stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|x| x.unwrap()).collect();
+        assert!(
+            plan.contains("guid=?") || plan.contains("dedup_key=?"),
+            "ingest lookup must use a (feed, key) index, not a feed scan: {sql} -> {plan}"
+        );
+    }
+}

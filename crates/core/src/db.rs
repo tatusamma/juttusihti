@@ -14,6 +14,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_reader.sql"),
     include_str!("../migrations/0002_research.sql"),
     include_str!("../migrations/0003_relevance.sql"),
+    include_str!("../migrations/0004_list_indexes.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
