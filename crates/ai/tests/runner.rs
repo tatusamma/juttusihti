@@ -518,6 +518,33 @@ async fn requests_run_in_parallel_waves() {
 }
 
 #[tokio::test]
+async fn low_reasoning_effort_is_dropped_if_the_model_rejects_it() {
+    let db = seed(98); // 5 extraction batches
+    let sid = session(&db, &config(Provider::Openai, &[Task::Labels]));
+    let good = good_model(Provider::Openai);
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        if r.body.get("reasoning").is_some() {
+            MockReply {
+                status: 400,
+                body: json!({"error": {"message": "Unsupported value: 'reasoning.effort' does not support 'low'."}}),
+                delay: Duration::ZERO,
+            }
+        } else {
+            good(r, n)
+        }
+    }))
+    .await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    let reqs = m.requests();
+    assert_eq!(reqs[0].body["reasoning"]["effort"], "low", "extraction asks for low effort");
+    let rejected = reqs.iter().filter(|r| r.body.get("reasoning").is_some()).count();
+    assert!(rejected <= 4, "at most the first parallel wave tries it: {rejected}");
+    assert_eq!(reqs.len() - rejected, 5, "every batch succeeds without it");
+    assert_eq!(r.calls, 5, "rejected requests are not billed");
+}
+
+#[tokio::test]
 async fn invalid_and_injected_output_is_discarded() {
     let db = seed(2);
     let sid = session(&db, &config(Provider::Openai, &[Task::Labels]));
@@ -652,6 +679,7 @@ async fn provider_token_counting() {
             schema_name: "x".into(),
             schema: json!({"type": "object"}),
             max_output_tokens: 10,
+            reasoning_effort: None,
         };
         assert_eq!(client.count_tokens(&req).await.unwrap(), 321, "{provider:?}");
     }
@@ -795,6 +823,7 @@ async fn chatgpt_refresh_failure_signs_out_and_counting_is_unsupported() {
         schema_name: "x".into(),
         schema: json!({"type": "object"}),
         max_output_tokens: 10,
+        reasoning_effort: None,
     };
     assert!(matches!(client.count_tokens(&req).await, Err(AiError::Unsupported(_))));
     assert!(matches!(client.complete(&req).await, Err(AiError::Auth(AuthError::SignedOut))));

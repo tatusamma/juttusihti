@@ -87,6 +87,10 @@ pub struct Request {
     pub schema_name: String,
     pub schema: Value,
     pub max_output_tokens: u32,
+    /// Reasoning effort for OpenAI reasoning models ("low" keeps simple
+    /// extraction fast and cheap). Dropped automatically if the model
+    /// rejects it; ignored by the other providers.
+    pub reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +182,9 @@ pub struct Client {
     http: reqwest::Client,
     endpoint: Endpoint,
     policy: RetryPolicy,
+    /// Set once the model rejected a reasoning effort, so later requests
+    /// do not repeat the failed attempt.
+    no_reasoning_effort: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Model ids go into URL paths (Gemini); allow only safe characters.
@@ -196,7 +203,7 @@ impl Client {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AiError::NotSent(e.to_string()))?;
-        Ok(Self { http, endpoint, policy })
+        Ok(Self { http, endpoint, policy, no_reasoning_effort: Default::default() })
     }
 
     pub fn provider(&self) -> Provider {
@@ -212,8 +219,27 @@ impl Client {
         if !valid_model(&req.model) {
             return Err(AiError::InvalidModel);
         }
-        let (url, body) = providers::completion(&self.endpoint, req);
-        let json = self.post_with_retries(&url, &body).await?;
+        use std::sync::atomic::Ordering;
+        let (url, mut body) = providers::completion(&self.endpoint, req);
+        if self.no_reasoning_effort.load(Ordering::Relaxed)
+            && let Some(o) = body.as_object_mut()
+        {
+            o.remove("reasoning");
+        }
+        let json = match self.post_with_retries(&url, &body).await {
+            // Not every model accepts every effort level; a rejected request is not billed.
+            Err(AiError::Status { status: 400, message })
+                if body.get("reasoning").is_some() && message.to_ascii_lowercase().contains("reasoning") =>
+            {
+                tracing::info!(model = %req.model, %message, "model rejected the reasoning effort; retrying without it");
+                self.no_reasoning_effort.store(true, Ordering::Relaxed);
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("reasoning");
+                }
+                self.post_with_retries(&url, &body).await?
+            }
+            other => other?,
+        };
         providers::parse_completion(self.endpoint.provider, &json)
     }
 

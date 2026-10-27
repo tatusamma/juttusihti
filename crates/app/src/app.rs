@@ -145,6 +145,9 @@ pub enum Message {
     DecideHeadline(juttusihti_core::Status),
     HeadlineDecided(Result<(), String>),
     Providers(crate::providers::Msg),
+    Quick(crate::quick::Msg),
+    /// Opens the quick AI panel for the list being viewed.
+    OpenQuick,
     Settings(crate::settings::Msg),
     RetentionApplied(Result<usize, String>),
     LabelInput(String),
@@ -194,6 +197,7 @@ pub struct App {
     /// Show AI-rewritten headlines in place of clickbait titles.
     ai_headlines: bool,
     providers: crate::providers::State,
+    quick: crate::quick::State,
     settings: crate::settings::State,
 }
 
@@ -216,7 +220,8 @@ impl App {
             ),
             hide_dismissed: false,
             ai_headlines: true,
-            providers: crate::providers::State::new(),
+            providers: crate::providers::State::new(db.clone()),
+            quick: crate::quick::State::new(db.clone()),
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
             db,
             fetcher,
@@ -286,21 +291,48 @@ impl App {
         )
     }
 
-    fn load_list(&mut self) -> Task<Message> {
-        self.list_generation += 1;
-        let generation = self.list_generation;
-        let db = self.db.clone();
+    /// The query behind the article list being viewed.
+    fn list_query(&self) -> SearchQuery {
         let filter = self.selection.filter();
-        let page = self.page;
-        let query = SearchQuery {
+        SearchQuery {
             text: self.active_search.clone(),
             view: filter.view,
             feed_ids: filter.feed_id.into_iter().collect(),
             folder_ids: filter.folder_id.into_iter().collect(),
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
+        }
+    }
+
+    /// "Yle Uutiset", "Unread matching “sähkö”", …
+    fn list_label(&self) -> String {
+        let base = match self.selection {
+            Selection::View(View::All) => "All articles".to_string(),
+            Selection::View(View::Unread) => "Unread".to_string(),
+            Selection::View(View::Saved) => "Saved".to_string(),
+            Selection::Feed(id) => {
+                self.sidebar.feeds.iter().find(|f| f.id == id).map_or("Feed".into(), |f| f.title.clone())
+            }
+            Selection::Folder(id) => {
+                self.sidebar.folders.iter().find(|f| f.id == id).map_or("Folder".into(), |f| f.name.clone())
+            }
         };
-        Task::perform(
+        if self.active_search.is_empty() { base } else { format!("{base} matching “{}”", self.active_search) }
+    }
+
+    fn load_list(&mut self) -> Task<Message> {
+        self.list_generation += 1;
+        let generation = self.list_generation;
+        let db = self.db.clone();
+        let page = self.page;
+        let query = self.list_query();
+        // An open quick panel follows the list being viewed.
+        let retarget = if self.quick.open && !self.quick.is_running() && !self.quick.targets(&query) {
+            self.quick.open(query.clone(), self.list_label()).map(Message::Quick)
+        } else {
+            Task::none()
+        };
+        let load = Task::perform(
             async move {
                 db.call(move |s| -> juttusihti_core::Result<Listing> {
                     let r = s.search(&query, page)?;
@@ -317,7 +349,8 @@ impl App {
                 .await
             },
             move |r| Message::ListLoaded(generation, r),
-        )
+        );
+        Task::batch([load, retarget])
     }
 
     fn set_state(&self, id: ArticleId, read: Option<bool>, saved: Option<bool>) -> Task<Message> {
@@ -699,6 +732,27 @@ impl App {
                 self.load_list()
             }
             Message::Providers(msg) => self.providers.update(msg).map(Message::Providers),
+            Message::OpenQuick => {
+                if self.quick.open && !self.quick.is_running() {
+                    return self.quick.update(crate::quick::Msg::Close).map(Message::Quick);
+                }
+                self.quick.open(self.list_query(), self.list_label()).map(Message::Quick)
+            }
+            Message::Quick(crate::quick::Msg::OpenSetup) => self.update(Message::ShowScreen(Screen::Providers)),
+            Message::Quick(crate::quick::Msg::Review(id)) => {
+                self.screen = Screen::Review;
+                self.review.open(id).map(Message::Review)
+            }
+            Message::Quick(msg) => {
+                // Show results as they arrive: rewritten headlines and labels.
+                let refresh = matches!(
+                    msg,
+                    crate::quick::Msg::Run(crate::research::RunEvent::Progress(juttusihti_ai::Progress::Call { .. }))
+                        | crate::quick::Msg::Run(crate::research::RunEvent::Finished(_))
+                );
+                let task = self.quick.update(msg).map(Message::Quick);
+                if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
+            }
             Message::Settings(msg) => {
                 // Apply retention once settings are known at startup, and
                 // reload lists after a save (retention may remove articles).
@@ -937,7 +991,7 @@ impl App {
                 .padding([6, 10])
                 .style(if self.screen == Screen::Reports { button::primary } else { button::text })
                 .on_press(Message::ShowScreen(Screen::Reports)),
-            button(text("New Analysis").size(14))
+            button(text("Custom analysis").size(14))
                 .width(Fill)
                 .padding([6, 10])
                 .style(if self.screen == Screen::Research { button::primary } else { button::text })
@@ -947,7 +1001,7 @@ impl App {
             self.screen_button("Timeline", Screen::Timeline),
             self.screen_button("Map", Screen::Map),
             self.screen_button("Labels", Screen::Labels),
-            self.screen_button("AI Providers", Screen::Providers),
+            self.screen_button("AI setup", Screen::Providers),
             self.screen_button("Settings", Screen::Settings),
             rule::horizontal(1),
         ]
@@ -1062,6 +1116,11 @@ impl App {
         if let Some(interp) = &self.listing.interpreted {
             header = header.push(text(format!("Query: {interp}")).size(12));
         }
+        header = header.push(
+            button(text("✨ AI").size(12))
+                .style(if self.quick.open { button::primary } else { button::secondary })
+                .on_press(Message::OpenQuick),
+        );
         // Only offered when this page has rewrites to switch between.
         let rewritten = self.listing.headlines.len();
         if rewritten > 0 {
@@ -1095,6 +1154,9 @@ impl App {
         let mut col = column![container(header).padding([6, 12])];
         if let Some(edit) = self.feed_edit.as_ref().filter(|e| self.selection == Selection::Feed(e.id)) {
             col = col.push(self.view_feed_edit(edit));
+        }
+        if self.quick.open {
+            col = col.push(container(self.quick.view().map(Message::Quick)).padding([4, 12]));
         }
         col.push(rule::horizontal(1)).push(scrollable(list).height(Fill)).into()
     }

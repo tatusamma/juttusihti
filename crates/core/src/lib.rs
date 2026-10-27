@@ -3,6 +3,7 @@
 //!
 //! Nothing in this crate needs network access or an AI provider.
 
+pub mod ai_defaults;
 pub mod analysis;
 pub mod budget;
 pub mod db;

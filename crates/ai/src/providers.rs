@@ -62,6 +62,16 @@ fn gemini_request(req: &Request) -> Value {
 }
 
 pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
+    let (url, mut body) = completion_body(e, req);
+    if e.provider == Provider::Openai
+        && let Some(effort) = req.reasoning_effort
+    {
+        body["reasoning"] = json!({"effort": effort});
+    }
+    (url, body)
+}
+
+fn completion_body(e: &Endpoint, req: &Request) -> (String, Value) {
     match e.provider {
         Provider::Anthropic => {
             let mut body = anthropic_body(req);
@@ -354,6 +364,7 @@ mod tests {
             schema_name: "s".into(),
             schema: json!({"type": "object"}),
             max_output_tokens: 100,
+            reasoning_effort: None,
         }
     }
 

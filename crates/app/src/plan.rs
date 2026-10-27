@@ -47,7 +47,7 @@ pub async fn session() -> Result<Arc<Session>, String> {
     let (reg, token) =
         blocking(|| Ok::<_, String>((secrets::chatgpt_registration()?, secrets::chatgpt_refresh_token()?))).await?;
     let (Some(client_id), Some(token)) = (reg.and_then(|r| r.client_id), token) else {
-        return Err("Not signed in with ChatGPT. Sign in under AI Providers.".into());
+        return Err("Not signed in with ChatGPT. Sign in under AI setup.".into());
     };
     let s = Arc::new(Session::resume(Servers::default(), client_id, token, persist()).map_err(|e| e.to_string())?);
     // Another task may have resumed meanwhile; keep a single session.

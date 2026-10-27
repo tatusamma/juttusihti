@@ -145,6 +145,17 @@ tokenizer, or AI-assisted query expansion.
       stored apart from the article; the reader shows them with an "AI" tag and the original
       underneath, and each can be kept or switched back to the original. A button in the list
       header shows all original headlines.
+    - Quick AI: a "✨ AI" button above every article list opens a small panel for that list
+      (feed, folder, view or search). It offers task checkboxes, a local estimate (new articles, requests,
+      tokens, cost) and one "Send N articles to <provider>" button, which is the consent for
+      that run. Results show up in the list while the run goes on. Provider, Fast/Quality
+      model and per-run limits come from the AI defaults on the AI setup screen; until they
+      are saved, the provider follows what is connected (ChatGPT sign-in first). The custom
+      analysis screen starts from the same defaults.
+    - Recommended models: Fast — GPT-6 Luna, Claude Haiku 5.5, Gemini 3.5 Flash-Lite;
+      Quality — GPT-6.1 Sol, Claude Sonnet 5.5, Gemini 3.8 Flash. Extraction and pair checks
+      ask OpenAI models for low reasoning effort (dropped automatically if a model rejects
+      it); Flash-Lite thinks minimally by default and Haiku runs without extended thinking.
     - Up to 4 requests run in parallel. Each call reserves budget before it is sent, and
       actual usage is recorded in the ledger.
     - JSON in a Markdown code fence is accepted. On a ChatGPT plan the answer is rebuilt from

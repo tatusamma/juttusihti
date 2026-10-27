@@ -39,6 +39,10 @@ const OUTPUT_RETRIES: u32 = 1;
 /// Requests in flight at once. Each one's worst case is reserved in the
 /// budget before it is sent, so limits hold with requests in parallel.
 const PARALLEL_REQUESTS: usize = 4;
+/// Reasoning effort for per-article extraction and pair checks: simple,
+/// well-specified tasks that need little thinking. Summaries keep the
+/// model's default.
+const LIGHT_EFFORT: &str = "low";
 
 /// Pause/cancel switch shared with the UI.
 #[derive(Clone, Default)]
@@ -326,9 +330,9 @@ impl Runner {
                     AiError::PlanLimit(m) => Err(Stop::Paused(format!(
                         "ChatGPT plan usage limit reached ({m}). Check ChatGPT settings → Usage, then resume."
                     ))),
-                    AiError::Status { status: 401 | 403, .. } if ctx.config.billing == Billing::ChatGptPlan => Err(
-                        Stop::Failed("OpenAI rejected the ChatGPT sign-in; sign in again under AI Providers.".into()),
-                    ),
+                    AiError::Status { status: 401 | 403, .. } if ctx.config.billing == Billing::ChatGptPlan => {
+                        Err(Stop::Failed("OpenAI rejected the ChatGPT sign-in; sign in again under AI setup.".into()))
+                    }
                     AiError::Status { status: 401 | 403, .. } => {
                         Err(Stop::Failed("The provider rejected the API key.".into()))
                     }
@@ -409,14 +413,16 @@ impl Runner {
             .iter()
             .map(|batch| {
                 let max_out = per_article_out * batch.len() as u32 * 5 + 1_024;
-                prompts::extraction_request(
+                let mut req = prompts::extraction_request(
                     &config.model,
                     tasks,
                     batch,
                     &vocabulary,
                     config.relevance_criteria.as_deref(),
                     max_out,
-                )
+                );
+                req.reasoning_effort = Some(LIGHT_EFFORT);
+                req
             })
             .collect();
         self.run_parallel(
@@ -615,7 +621,11 @@ impl Runner {
         self.emit(Progress::Stage { name: "Related-story validation", requests: batches.len() });
         let reqs: Vec<Request> = batches
             .iter()
-            .map(|batch| prompts::related_request(&ctx.config.model, batch, (batch.len() as u32) * 250 + 1_024))
+            .map(|batch| {
+                let mut req = prompts::related_request(&ctx.config.model, batch, (batch.len() as u32) * 250 + 1_024);
+                req.reasoning_effort = Some(LIGHT_EFFORT);
+                req
+            })
             .collect();
         self.run_parallel(
             ctx,

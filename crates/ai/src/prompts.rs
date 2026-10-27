@@ -215,6 +215,7 @@ pub fn extraction_request(
         schema_name: "article_extraction".into(),
         schema: extraction_schema(tasks),
         max_output_tokens,
+        reasoning_effort: None,
     }
 }
 
@@ -357,6 +358,7 @@ pub fn related_request(model: &str, pairs: &[(&ArticleRecord, &ArticleRecord)], 
             &["pairs"],
         ),
         max_output_tokens,
+        reasoning_effort: None,
     }
 }
 
@@ -431,6 +433,7 @@ pub fn summary_request(model: &str, records: &[&ArticleRecord], max_output_token
         schema_name: "research_summary".into(),
         schema: summary_schema(),
         max_output_tokens,
+        reasoning_effort: None,
     }
 }
 
@@ -451,6 +454,7 @@ pub fn final_summary_request(model: &str, partials: &[Summary], max_output_token
         schema_name: "research_summary".into(),
         schema: summary_schema(),
         max_output_tokens,
+        reasoning_effort: None,
     }
 }
 

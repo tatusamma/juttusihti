@@ -1,5 +1,6 @@
 //! Juttusihti desktop application.
 
+mod ai_setup;
 mod app;
 mod db;
 mod format;
@@ -8,6 +9,7 @@ mod labels;
 mod map_view;
 mod plan;
 mod providers;
+mod quick;
 mod reports;
 mod research;
 mod review;

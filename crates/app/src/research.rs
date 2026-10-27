@@ -1,4 +1,4 @@
-//! "New Analysis" screen: scope selection, local preview, cost estimate and
+//! "Custom analysis" screen: scope selection, local preview, cost estimate and
 //! saving a session for approval. Nothing here contacts an AI provider.
 
 use std::collections::BTreeSet;
@@ -25,6 +25,7 @@ pub struct Lists {
     folders: Vec<Folder>,
     labels: Vec<Label>,
     sessions: Vec<SessionSummary>,
+    defaults: Option<juttusihti_core::ai_defaults::AiDefaults>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +126,8 @@ pub struct State {
     consent: bool,
     run: Option<ActiveRun>,
     last_log: Vec<String>,
+    /// The AI defaults fill the form once, on the first load.
+    defaults_applied: bool,
 }
 
 const DATE_FORMATS: &[&str] = &["%-d.%-m.%Y", "%d.%m.%Y", "%Y-%m-%d"];
@@ -185,6 +188,7 @@ impl State {
             consent: false,
             run: None,
             last_log: Vec::new(),
+            defaults_applied: false,
         }
     }
 
@@ -226,59 +230,21 @@ impl State {
             cost: Some(0),
             billing,
         });
-        let shared = self.db.shared();
-        let catalog = self.catalog.clone();
-        let stream = iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
-            use iced::futures::SinkExt;
-            let endpoint = match billing {
-                Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
-                Billing::ApiKey => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
-                    Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
-                    Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI Providers.")),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(e.to_string()),
-                },
-            };
-            let endpoint = match endpoint {
-                Ok(e) => e,
-                Err(e) => {
-                    let _ = out.send(RunEvent::Finished(Err(e))).await;
-                    return;
-                }
-            };
-            let client = match juttusihti_ai::Client::new(endpoint, juttusihti_ai::RetryPolicy::default()) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = out.send(RunEvent::Finished(Err(e.to_string()))).await;
-                    return;
-                }
-            };
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let runner = juttusihti_ai::Runner::new(shared, client, catalog, control).with_progress(tx);
-            let handle = tokio::spawn(async move { runner.run(id, Approval { consent_to_send: true }).await });
-            while let Some(p) = rx.recv().await {
-                let _ = out.send(RunEvent::Progress(p)).await;
-            }
-            let result = match handle.await {
-                Ok(Ok(summary)) => Ok(summary),
-                Ok(Err(e)) => Err(e.to_string()),
-                Err(e) => Err(format!("analysis task failed: {e}")),
-            };
-            let _ = out.send(RunEvent::Finished(result)).await;
-        });
-        Cmd::run(stream, Msg::Run)
+        Cmd::run(run_session(self.db.shared(), self.catalog.clone(), id, provider, billing, control), Msg::Run)
     }
 
     pub fn load(&self) -> Cmd<Msg> {
         let db = self.db.clone();
         Cmd::perform(
             async move {
-                db.call(|s| -> juttusihti_core::Result<Lists> {
+                let defaults = crate::ai_setup::defaults(&db).await.ok();
+                db.call(move |s| -> juttusihti_core::Result<Lists> {
                     Ok(Lists {
                         feeds: s.feeds()?,
                         folders: s.folders()?,
                         labels: s.labels()?,
                         sessions: s.recent_sessions(20)?,
+                        defaults,
                     })
                 })
                 .await
@@ -360,7 +326,24 @@ impl State {
 
     pub fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
-            Msg::Loaded(Ok(lists)) => self.lists = Some(lists),
+            Msg::Loaded(Ok(lists)) => {
+                if !self.defaults_applied
+                    && let Some(d) = &lists.defaults
+                {
+                    self.defaults_applied = true;
+                    self.provider = d.provider;
+                    self.billing = d.billing();
+                    self.model = d.model();
+                    self.tasks = d.tasks.clone();
+                    if let Some(c) = d.max_cost {
+                        self.max_cost = format_usd(c).trim_start_matches('$').to_string();
+                    }
+                    if let Some(t) = d.max_tokens {
+                        self.max_tokens = t.to_string();
+                    }
+                }
+                self.lists = Some(lists);
+            }
             Msg::Loaded(Err(e)) => self.error = Some(e),
             Msg::From(s) => {
                 self.from = s;
@@ -406,7 +389,9 @@ impl State {
                 if p != Provider::Openai {
                     self.billing = Billing::ApiKey;
                 }
-                self.model = self.catalog.models(p).into_iter().next().unwrap_or_default();
+                self.model = juttusihti_core::ai_defaults::recommended(p, juttusihti_core::ai_defaults::Tier::Fast)
+                    .model
+                    .to_string();
                 self.invalidate();
             }
             Msg::Billing(b) => {
@@ -681,6 +666,13 @@ impl State {
             .align_y(iced::Center),
         ]
         .spacing(8);
+        {
+            use juttusihti_core::ai_defaults::{Tier, recommended};
+            let fast = recommended(self.provider, Tier::Fast);
+            let quality = recommended(self.provider, Tier::Quality);
+            provider = provider
+                .push(text(format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)).size(12));
+        }
         if self.provider == Provider::Openai {
             provider = provider.push(
                 row![
@@ -754,7 +746,8 @@ impl State {
         }
 
         let mut form = column![
-            text("New Analysis").size(24).font(bold),
+            text("Custom analysis").size(24).font(bold),
+            text("For a quick run on the list you are reading, use the ✨ AI button above the article list.").size(13),
             text("AI analysis only runs when you start it. The preview below is computed locally; no data leaves this computer.").size(13),
             dates,
             sources,
@@ -1012,8 +1005,53 @@ impl State {
     }
 }
 
+/// Runs an approved session with the stored credentials for its billing,
+/// streaming progress. The caller has already obtained the user's consent.
+pub fn run_session(
+    shared: std::sync::Arc<std::sync::Mutex<juttusihti_core::store::Store>>,
+    catalog: Catalog,
+    id: i64,
+    provider: Provider,
+    billing: Billing,
+    control: Control,
+) -> impl iced::futures::Stream<Item = RunEvent> {
+    iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
+        use iced::futures::SinkExt;
+        let endpoint = match billing {
+            Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
+            Billing::ApiKey => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
+                Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
+                Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI setup.")),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(e.to_string()),
+            },
+        };
+        let client = match endpoint.and_then(|e| {
+            juttusihti_ai::Client::new(e, juttusihti_ai::RetryPolicy::default()).map_err(|e| e.to_string())
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = out.send(RunEvent::Finished(Err(e))).await;
+                return;
+            }
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let runner = juttusihti_ai::Runner::new(shared, client, catalog, control).with_progress(tx);
+        let handle = tokio::spawn(async move { runner.run(id, Approval { consent_to_send: true }).await });
+        while let Some(p) = rx.recv().await {
+            let _ = out.send(RunEvent::Progress(p)).await;
+        }
+        let result = match handle.await {
+            Ok(Ok(summary)) => Ok(summary),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(format!("analysis task failed: {e}")),
+        };
+        let _ = out.send(RunEvent::Finished(result)).await;
+    })
+}
+
 /// Dollar cost, or the plan for runs charged to a ChatGPT plan.
-fn cost_text(billing: Option<Billing>, cost: Option<Micros>) -> String {
+pub fn cost_text(billing: Option<Billing>, cost: Option<Micros>) -> String {
     match (billing, cost) {
         (Some(Billing::ChatGptPlan), _) => "on your ChatGPT plan".into(),
         (_, Some(c)) => format_usd(c),
@@ -1033,7 +1071,7 @@ fn toggle(set: &mut BTreeSet<i64>, id: i64, on: bool) {
     }
 }
 
-fn thousands(n: u64) -> String {
+pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {

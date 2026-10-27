@@ -1,11 +1,14 @@
-//! AI Providers screen: Sign in with ChatGPT, API keys in the OS secret
-//! store, and how to get a key from each provider.
+//! AI setup screen: the defaults used by the quick AI panel (provider,
+//! fast or quality model, limits), Sign in with ChatGPT, API keys in the OS
+//! secret store, and how to get a key from each provider.
 
-use iced::widget::{Space, button, column, container, row, rule, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, pick_list, radio, row, rule, scrollable, text, text_input};
 use iced::{Element, Font, Task as Cmd, font};
-use juttusihti_core::pricing::Provider;
+use juttusihti_core::ai_defaults::{AiDefaults, Tier, recommended};
+use juttusihti_core::pricing::{Billing, Provider, format_usd, usd_to_micros};
 
-use crate::{plan, secrets};
+use crate::db::Db;
+use crate::{ai_setup, plan, secrets};
 
 const CLAUDE_CONSOLE: &str = "https://platform.claude.com/";
 const CLAUDE_KEYS: &str = "https://platform.claude.com/settings/keys";
@@ -30,6 +33,13 @@ pub enum Msg {
     CancelSignIn,
     CopyLink,
     SignOut,
+    DefaultsLoaded(Result<AiDefaults, String>),
+    SetProvider(Provider),
+    SetBilling(Billing),
+    SetTier(Tier),
+    MaxArticles(String),
+    MaxCost(String),
+    DefaultsSaved(Result<(), String>),
 }
 
 enum ChatGpt {
@@ -45,6 +55,10 @@ enum ChatGpt {
 }
 
 pub struct State {
+    db: Db,
+    defaults: Option<AiDefaults>,
+    max_articles: String,
+    max_cost: String,
     status: Vec<(Provider, Result<bool, String>)>,
     inputs: [String; 3],
     message: Option<Result<String, String>>,
@@ -60,19 +74,78 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 impl State {
-    pub fn new() -> Self {
-        Self { status: Vec::new(), inputs: Default::default(), message: None, chatgpt: ChatGpt::Unknown }
+    pub fn new(db: Db) -> Self {
+        Self {
+            db,
+            defaults: None,
+            max_articles: String::new(),
+            max_cost: String::new(),
+            status: Vec::new(),
+            inputs: Default::default(),
+            message: None,
+            chatgpt: ChatGpt::Unknown,
+        }
     }
 
     pub fn load(&self) -> Cmd<Msg> {
+        let db = self.db.clone();
         Cmd::batch([
+            Cmd::perform(async move { ai_setup::defaults(&db).await }, Msg::DefaultsLoaded),
             Cmd::perform(blocking(secrets::status), Msg::Loaded),
             Cmd::perform(plan::status(), Msg::ChatGptStatus),
         ])
     }
 
+    /// Changes the defaults and saves them.
+    fn change(&mut self, f: impl FnOnce(&mut AiDefaults)) -> Cmd<Msg> {
+        let Some(d) = self.defaults.as_mut() else { return Cmd::none() };
+        f(d);
+        let (db, d) = (self.db.clone(), d.clone());
+        Cmd::perform(async move { ai_setup::save(&db, d).await }, Msg::DefaultsSaved)
+    }
+
     pub fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
+            Msg::DefaultsLoaded(Ok(d)) => {
+                self.max_articles = d.max_articles.to_string();
+                self.max_cost = d.max_cost.map(format_usd).unwrap_or_default().trim_start_matches('$').to_string();
+                self.defaults = Some(d);
+            }
+            Msg::DefaultsLoaded(Err(e)) | Msg::DefaultsSaved(Err(e)) => self.message = Some(Err(e)),
+            Msg::DefaultsSaved(Ok(())) => {}
+            Msg::SetProvider(p) => {
+                return self.change(|d| {
+                    d.provider = p;
+                    d.model = None;
+                });
+            }
+            Msg::SetBilling(b) => return self.change(|d| d.billing = b),
+            Msg::SetTier(t) => {
+                return self.change(|d| {
+                    d.tier = t;
+                    d.model = None;
+                });
+            }
+            Msg::MaxArticles(v) => {
+                self.max_articles = v;
+                if let Ok(n) = self.max_articles.trim().parse::<u32>()
+                    && (1..=1_000).contains(&n)
+                {
+                    return self.change(|d| d.max_articles = n);
+                }
+            }
+            Msg::MaxCost(v) => {
+                self.max_cost = v;
+                let t = self.max_cost.trim().trim_start_matches('$').replace(',', ".");
+                let parsed = if t.is_empty() {
+                    Some(None)
+                } else {
+                    t.parse::<f64>().ok().and_then(|x| usd_to_micros(x).ok()).map(Some)
+                };
+                if let Some(c) = parsed {
+                    return self.change(|d| d.max_cost = c);
+                }
+            }
             Msg::Loaded(s) => self.status = s,
             Msg::Input(p, s) => self.inputs[idx(p)] = s,
             Msg::Save(p) => {
@@ -177,6 +250,61 @@ impl State {
         .into()
     }
 
+    fn view_defaults(&self) -> Element<'_, Msg> {
+        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
+        let Some(d) = &self.defaults else { return text("…").into() };
+        let mut col = column![
+            text("AI defaults").size(18).font(bold),
+            text("Used by the ✨ AI button above every article list. Set once; change any time.").size(13),
+            row![
+                text("Provider").size(13).width(120),
+                pick_list(&Provider::ALL[..], Some(d.provider), Msg::SetProvider),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        ]
+        .spacing(8);
+        if d.provider == Provider::Openai {
+            col = col.push(
+                row![
+                    text("Pay with").size(13).width(120),
+                    radio("My ChatGPT plan", Billing::ChatGptPlan, Some(d.billing), Msg::SetBilling),
+                    radio("API key", Billing::ApiKey, Some(d.billing), Msg::SetBilling),
+                ]
+                .spacing(16)
+                .align_y(iced::Center),
+            );
+        }
+        let mut tiers = column![].spacing(4);
+        for t in Tier::ALL {
+            tiers = tiers
+                .push(radio(recommended(d.provider, t).note, t, Some(d.tier), Msg::SetTier).size(14).text_size(13));
+        }
+        col = col.push(row![text("Model").size(13).width(120), tiers].spacing(8));
+        if d.model.is_some() {
+            col = col.push(text(format!("Using model {}", d.model())).size(12));
+        }
+        col = col.push(
+            text(
+                "Fast models handle headlines, labels, people & places and related stories well and use the \
+                 fewest tokens. Pick Quality when you mostly want research summaries.",
+            )
+            .size(12),
+        );
+        col = col.push(
+            row![
+                text("Per quick run").size(13).width(120),
+                text_input("50", &self.max_articles).on_input(Msg::MaxArticles).width(70),
+                text("newest articles, at most").size(13),
+                text_input("0.25", &self.max_cost).on_input(Msg::MaxCost).width(70),
+                text("USD").size(13),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+        col.into()
+    }
+
     fn view_chatgpt(&self) -> Element<'_, Msg> {
         let mut col = column![
             text(
@@ -227,7 +355,7 @@ impl State {
         let heading = |s: &'static str| text(s).size(18).font(bold);
         let sub = |s: &'static str| text(s).size(14).font(bold);
         let mut col = column![
-            text("AI Providers").size(24).font(bold),
+            text("AI setup").size(24).font(bold),
             text(
                 "Credentials are kept in your operating system's secret store, not in Juttusihti's database. \
                  Nothing is sent to a provider until you start an analysis and agree to send its articles."
@@ -243,6 +371,7 @@ impl State {
             None => {}
         }
 
+        col = col.push(self.view_defaults());
         col = col
             .push(rule::horizontal(1))
             .push(heading("OpenAI"))

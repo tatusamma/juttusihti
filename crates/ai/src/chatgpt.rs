@@ -59,7 +59,7 @@ pub enum AuthError {
     NotEligible,
     #[error("signed in as a different ChatGPT account than before; sign out first to switch accounts")]
     DifferentAccount,
-    #[error("the ChatGPT sign-in has expired or was revoked; sign in again under AI Providers")]
+    #[error("the ChatGPT sign-in has expired or was revoked; sign in again under AI setup")]
     SignedOut,
     #[error("could not save the sign-in: {0}")]
     Store(String),
