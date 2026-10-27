@@ -139,12 +139,41 @@ pub fn is_plan_limit(body: &[u8]) -> bool {
 /// final `response` object. Only `response.completed` or
 /// `response.incomplete` count as an answer; a stream that ends without
 /// one has an unknown outcome.
+///
+/// The terminal event's `output` may be empty when the answer was already
+/// streamed (observed on ChatGPT plans), so output items and text deltas
+/// are collected along the way and used to fill it in.
 pub fn final_response_from_stream(bytes: &[u8]) -> Result<Value, AiError> {
     let text = String::from_utf8_lossy(bytes);
-    let handle = |data: &str| -> Option<Result<Value, AiError>> {
+    let mut items: Vec<Value> = Vec::new();
+    let mut deltas = String::new();
+    let mut handle = |data: &str| -> Option<Result<Value, AiError>> {
         let v: Value = serde_json::from_str(data).ok()?;
         match v["type"].as_str()? {
-            "response.completed" | "response.incomplete" => Some(Ok(v["response"].clone())),
+            "response.output_item.done" => {
+                if v["item"].is_object() {
+                    items.push(v["item"].clone());
+                }
+                None
+            }
+            "response.output_text.delta" => {
+                deltas.push_str(v["delta"].as_str().unwrap_or_default());
+                None
+            }
+            "response.completed" | "response.incomplete" => {
+                let mut response = v["response"].clone();
+                let has_output = response["output"].as_array().is_some_and(|o| !o.is_empty());
+                if !has_output && response.is_object() {
+                    response["output"] = if !items.is_empty() {
+                        Value::Array(std::mem::take(&mut items))
+                    } else if !deltas.is_empty() {
+                        json!([{"type": "message", "content": [{"type": "output_text", "text": deltas}]}])
+                    } else {
+                        json!([])
+                    };
+                }
+                Some(Ok(response))
+            }
             kind @ ("response.failed" | "error") => {
                 let err = if kind == "error" { &v["error"] } else { &v["response"]["error"] };
                 let err = if err.is_null() { &v } else { err };
@@ -182,11 +211,26 @@ fn u(v: &Value) -> u64 {
     v.as_u64().unwrap_or(0)
 }
 
+/// Parses model text as JSON. Tolerates a Markdown code fence or prose
+/// around one JSON object; the result is still validated by the caller.
 fn json_or_text(text: String) -> Outcome {
-    match serde_json::from_str::<Value>(&text) {
-        Ok(v) => Outcome::Json(v),
-        Err(_) => Outcome::NotJson(text.chars().take(500).collect()),
+    let t = text.trim();
+    let unfenced = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .and_then(|rest| rest.trim_end().strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(t);
+    let object = match (unfenced.find('{'), unfenced.rfind('}')) {
+        (Some(a), Some(b)) if a < b => Some(&unfenced[a..=b]),
+        _ => None,
+    };
+    for candidate in [Some(unfenced), object].into_iter().flatten() {
+        if let Ok(v) = serde_json::from_str::<Value>(candidate) {
+            return Outcome::Json(v);
+        }
     }
+    Outcome::NotJson(text.chars().take(500).collect())
 }
 
 pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError> {
@@ -364,6 +408,37 @@ mod tests {
         assert!(matches!(final_response_from_stream(cut.as_bytes()), Err(AiError::Unknown(_))));
         assert!(is_plan_limit(br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"m"}}"#));
         assert!(!is_plan_limit(br#"{"error":{"code":"rate_limit_exceeded"}}"#));
+    }
+
+    #[test]
+    fn rebuilds_output_missing_from_the_completed_event() {
+        let item = json!({"type": "message", "content": [{"type": "output_text", "text": "{\"a\":2}"}]});
+        let empty_done = json!({"type": "response.completed",
+            "response": {"status": "completed", "output": [], "usage": {"input_tokens": 5, "output_tokens": 4}}});
+        let from_items =
+            format!("data: {}\n\ndata: {}\n\n", json!({"type": "response.output_item.done", "item": item}), empty_done);
+        let v = final_response_from_stream(from_items.as_bytes()).unwrap();
+        assert_eq!(parse_completion(Provider::Openai, &v).unwrap().outcome, Outcome::Json(json!({"a": 2})));
+
+        let from_deltas = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            json!({"type": "response.output_text.delta", "delta": "{\"a\":"}),
+            json!({"type": "response.output_text.delta", "delta": "3}"}),
+            empty_done
+        );
+        let v = final_response_from_stream(from_deltas.as_bytes()).unwrap();
+        let r = parse_completion(Provider::Openai, &v).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 3})));
+        assert_eq!(r.usage.total(), 9);
+    }
+
+    #[test]
+    fn json_in_fences_or_prose_is_accepted() {
+        assert_eq!(json_or_text("```json\n{\"a\":1}\n```".into()), Outcome::Json(json!({"a": 1})));
+        assert_eq!(json_or_text("```\n{\"a\":1}\n```".into()), Outcome::Json(json!({"a": 1})));
+        assert_eq!(json_or_text("Here you go: {\"a\":1} done".into()), Outcome::Json(json!({"a": 1})));
+        assert!(matches!(json_or_text("no json".into()), Outcome::NotJson(_)));
+        assert!(matches!(json_or_text(String::new()), Outcome::NotJson(_)));
     }
 
     #[test]

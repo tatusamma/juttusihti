@@ -139,7 +139,16 @@ tokenizer, or AI-assisted query expansion.
       validation of locally generated story pairs; a hierarchical summary with cited article ids.
     - Results are stored only as AI suggestions with provenance (provider, model, prompt
       version, evidence).
-    - Each call reserves budget before it is sent, and actual usage is recorded in the ledger.
+    - Clickbait headline rewriting: an informative headline stated from the article text, in
+      the article's language. A rewrite is accepted only if it differs from the title and is
+      grounded in the text (every number and most longer words must occur there). Rewrites are
+      stored apart from the article; the reader shows them with an "AI" tag and the original
+      underneath, and each can be kept or switched back to the original. A button in the list
+      header shows all original headlines.
+    - Up to 4 requests run in parallel. Each call reserves budget before it is sent, and
+      actual usage is recorded in the ledger.
+    - JSON in a Markdown code fence is accepted. On a ChatGPT plan the answer is rebuilt from
+      the streamed events when the final event carries no output.
     - Pause, cancel and resume are supported. A request cancelled mid-flight is charged at its
       worst case, and finished articles are cached so resuming does not repeat paid work.
   - Model output is untrusted:

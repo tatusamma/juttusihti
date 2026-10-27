@@ -42,6 +42,7 @@ const SUMMARY_CHUNK: usize = 40;
 const OUT_LABELS: u64 = 30;
 const OUT_ENTITIES: u64 = 90;
 const OUT_RELEVANCE: u64 = 25;
+const OUT_HEADLINE: u64 = 30;
 const OUT_PAIR: u64 = 50;
 const OUT_CHUNK_SUMMARY: u64 = 500;
 const OUT_FINAL_SUMMARY: u64 = 2_000;
@@ -146,6 +147,7 @@ pub fn plan(config: &AnalysisConfig, scope: &Scope, label_vocabulary: usize) -> 
             Task::Labels => OUT_LABELS,
             Task::Entities => OUT_ENTITIES,
             Task::Relevance => OUT_RELEVANCE,
+            Task::Headlines => OUT_HEADLINE,
             _ => 0,
         })
         .sum();
@@ -348,6 +350,12 @@ pub fn estimate(
             s.with_full_text, s.selected
         )),
         _ => {}
+    }
+    if config.tasks.contains(&Task::Headlines) && config.depth == Depth::Headlines {
+        warnings.push(
+            "Rewriting headlines needs the article description or text; with headlines only, none are rewritten."
+                .into(),
+        );
     }
     if s.truncated > 0 {
         warnings.push(format!("{} long articles are shortened before analysis.", s.truncated));

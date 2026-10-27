@@ -70,6 +70,8 @@ pub struct Listing {
     total_is_exact: bool,
     ranked_window: bool,
     interpreted: Option<String>,
+    /// AI-rewritten headlines for this page (not rejected ones).
+    headlines: std::collections::HashMap<ArticleId, String>,
 }
 
 /// Feed being edited in the list header.
@@ -97,6 +99,7 @@ pub struct Preview {
     feed_title: String,
     body: String,
     labels: Vec<ArticleLabel>,
+    headline: Option<juttusihti_core::headlines::Headline>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +141,9 @@ pub enum Message {
     Map(crate::map_view::Msg),
     MapArticle,
     ToggleHideDismissed,
+    ToggleAiHeadlines,
+    DecideHeadline(juttusihti_core::Status),
+    HeadlineDecided(Result<(), String>),
     Providers(crate::providers::Msg),
     Settings(crate::settings::Msg),
     RetentionApplied(Result<usize, String>),
@@ -185,6 +191,8 @@ pub struct App {
     timeline: crate::timeline_view::State,
     map: crate::map_view::State,
     hide_dismissed: bool,
+    /// Show AI-rewritten headlines in place of clickbait titles.
+    ai_headlines: bool,
     providers: crate::providers::State,
     settings: crate::settings::State,
 }
@@ -207,6 +215,7 @@ impl App {
                 db_path.parent().map(|p| p.join("tiles")).unwrap_or_else(|| PathBuf::from("tiles")),
             ),
             hide_dismissed: false,
+            ai_headlines: true,
             providers: crate::providers::State::new(),
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
             db,
@@ -219,7 +228,14 @@ impl App {
             active_search: String::new(),
             page: Page::first(PAGE_SIZE),
             list_generation: 0,
-            listing: Listing { items: vec![], total: 0, total_is_exact: true, ranked_window: false, interpreted: None },
+            listing: Listing {
+                items: vec![],
+                total: 0,
+                total_is_exact: true,
+                ranked_window: false,
+                interpreted: None,
+                headlines: Default::default(),
+            },
             preview: None,
             add_feed: String::new(),
             refreshing: 0,
@@ -286,8 +302,11 @@ impl App {
         };
         Task::perform(
             async move {
-                db.call(move |s| {
-                    s.search(&query, page).map(|r| Listing {
+                db.call(move |s| -> juttusihti_core::Result<Listing> {
+                    let r = s.search(&query, page)?;
+                    let ids: Vec<ArticleId> = r.items.iter().map(|a| a.id).collect();
+                    Ok(Listing {
+                        headlines: s.shown_headlines(&ids)?,
                         items: r.items,
                         total: r.total,
                         total_is_exact: r.total_is_exact,
@@ -393,6 +412,7 @@ impl App {
                             Ok(Box::new(Preview {
                                 body: s.article_text(id)?,
                                 labels: s.article_labels(id)?,
+                                headline: s.headline(id)?,
                                 feed_title,
                                 article,
                             }))
@@ -643,6 +663,35 @@ impl App {
                 let (id, title) = (p.article.id, p.article.title.clone());
                 self.screen = Screen::Graph;
                 self.graph.focus_article(id, &title).map(Message::Graph)
+            }
+            Message::ToggleAiHeadlines => {
+                self.ai_headlines = !self.ai_headlines;
+                Task::none()
+            }
+            Message::DecideHeadline(status) => {
+                let Some(p) = self.preview.as_mut() else { return Task::none() };
+                let Some(h) = p.headline.as_mut() else { return Task::none() };
+                h.status = status;
+                let id = p.article.id;
+                match status {
+                    juttusihti_core::Status::Rejected => {
+                        self.listing.headlines.remove(&id);
+                    }
+                    _ => {
+                        self.listing.headlines.insert(id, h.headline.clone());
+                    }
+                }
+                let db = self.db.clone();
+                Task::perform(
+                    async move { db.call(move |s| s.decide_headline(id, status)).await },
+                    Message::HeadlineDecided,
+                )
+            }
+            Message::HeadlineDecided(r) => {
+                if let Err(e) = r {
+                    self.status = Some(e);
+                }
+                Task::none()
             }
             Message::ToggleHideDismissed => {
                 self.hide_dismissed = !self.hide_dismissed;
@@ -949,8 +998,19 @@ impl App {
         let mut list = column![].spacing(1);
         for a in &self.listing.items {
             let weight = if a.is_read { font::Weight::Normal } else { font::Weight::Bold };
+            let rewritten = self.ai_headlines.then(|| self.listing.headlines.get(&a.id)).flatten();
+            let title: Element<'_, Message> = match rewritten {
+                Some(h) => row![
+                    container(text("AI").size(10)).padding([1, 4]).style(container::bordered_box),
+                    text(h).size(15).font(Font { weight, ..Font::DEFAULT }),
+                ]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into(),
+                None => text(&a.title).size(15).font(Font { weight, ..Font::DEFAULT }).into(),
+            };
             let mut entry = column![
-                text(&a.title).size(15).font(Font { weight, ..Font::DEFAULT }),
+                title,
                 row![
                     text(&a.feed_title).size(12).width(Fill),
                     text(if a.is_saved { "★ " } else { "" }).size(12),
@@ -1007,6 +1067,11 @@ impl App {
                 button(text(if self.hide_dismissed { "Show dismissed" } else { "Hide dismissed" }).size(12))
                     .style(button::text)
                     .on_press(Message::ToggleHideDismissed),
+            )
+            .push(
+                button(text(if self.ai_headlines { "Original headlines" } else { "AI headlines" }).size(12))
+                    .style(button::text)
+                    .on_press(Message::ToggleAiHeadlines),
             )
             .push(button(text("Mark all read").size(12)).style(button::text).on_press(Message::MarkAllRead))
             .push(
@@ -1081,6 +1146,35 @@ impl App {
         )
     }
 
+    /// The article title, or its AI rewrite with the original underneath
+    /// and buttons to keep or reject the rewrite.
+    fn view_headline<'a>(&'a self, p: &'a Preview) -> Element<'a, Message> {
+        use juttusihti_core::Status;
+        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
+        let original = &p.article.title;
+        match &p.headline {
+            Some(h) if self.ai_headlines && h.status != Status::Rejected => {
+                let mut actions = row![text("AI-rewritten headline").size(12)].spacing(8).align_y(iced::Center);
+                if h.status == Status::Suggested {
+                    actions = actions.push(
+                        button(text("Keep").size(12))
+                            .style(button::secondary)
+                            .on_press(Message::DecideHeadline(Status::Confirmed)),
+                    );
+                }
+                actions = actions.push(
+                    button(text("Use original").size(12))
+                        .style(button::secondary)
+                        .on_press(Message::DecideHeadline(Status::Rejected)),
+                );
+                column![text(&h.headline).size(24).font(bold), text(format!("Original: {original}")).size(13), actions,]
+                    .spacing(4)
+                    .into()
+            }
+            _ => text(original).size(24).font(bold).into(),
+        }
+    }
+
     fn view_preview(&self) -> Element<'_, Message> {
         let Some(p) = &self.preview else {
             return container(
@@ -1152,7 +1246,7 @@ impl App {
         };
         scrollable(
             column![
-                text(&a.title).size(24).font(Font { weight: font::Weight::Bold, ..Font::DEFAULT }),
+                self.view_headline(p),
                 meta,
                 actions,
                 labels,

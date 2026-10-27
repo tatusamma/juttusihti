@@ -71,10 +71,13 @@ pub enum Task {
     Entities,
     Relevance,
     Summary,
+    /// Informative replacements for clickbait or vague headlines.
+    Headlines,
 }
 
 impl Task {
-    pub const ALL: [Task; 5] = [Task::Labels, Task::Related, Task::Entities, Task::Relevance, Task::Summary];
+    pub const ALL: [Task; 6] =
+        [Task::Labels, Task::Related, Task::Entities, Task::Relevance, Task::Headlines, Task::Summary];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -83,12 +86,13 @@ impl Task {
             Task::Entities => "Extract entities & locations",
             Task::Relevance => "Relevance filtering",
             Task::Summary => "Generate research summary",
+            Task::Headlines => "Rewrite clickbait headlines",
         }
     }
 
     /// Tasks whose result is per article and therefore cacheable per article.
     pub fn per_article(self) -> bool {
-        matches!(self, Task::Labels | Task::Entities | Task::Relevance)
+        matches!(self, Task::Labels | Task::Entities | Task::Relevance | Task::Headlines)
     }
 
     fn key(self) -> &'static str {
@@ -98,6 +102,7 @@ impl Task {
             Task::Entities => "entities",
             Task::Relevance => "relevance",
             Task::Summary => "summary",
+            Task::Headlines => "headlines",
         }
     }
 }

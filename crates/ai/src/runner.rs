@@ -20,7 +20,7 @@ use chrono::Utc;
 use juttusihti_core::analysis::{
     AnalysisConfig, ArticleRecord, PROMPT_VERSION, Scope, Task, cache_key as article_cache_key,
 };
-use juttusihti_core::budget::{Guard, Refusal};
+use juttusihti_core::budget::{Guard, Refusal, Reservation};
 use juttusihti_core::normalize::sha256_hex;
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Usage};
 use juttusihti_core::research::{NewLocation, NewSuggestion};
@@ -29,13 +29,16 @@ use juttusihti_core::{EntityKind, Origin, SessionStatus};
 use tokio::sync::{Notify, mpsc};
 
 use crate::prompts::{self, Summary};
-use crate::{AiError, Client, Outcome, Request};
+use crate::{AiError, Client, Outcome, Reply, Request};
 
 const EXTRACT_BATCH: usize = 20;
 const PAIR_BATCH: usize = 10;
 const SUMMARY_CHUNK: usize = 40;
 /// Retries of a batch whose output failed validation or was truncated.
 const OUTPUT_RETRIES: u32 = 1;
+/// Requests in flight at once. Each one's worst case is reserved in the
+/// budget before it is sent, so limits hold with requests in parallel.
+const PARALLEL_REQUESTS: usize = 4;
 
 /// Pause/cancel switch shared with the UI.
 #[derive(Clone, Default)]
@@ -107,6 +110,13 @@ pub enum RunError {
     ProviderMismatch { provider: juttusihti_core::pricing::Provider, session: juttusihti_core::pricing::Provider },
     #[error("the session is billed to {session}, but the client uses {client}")]
     BillingMismatch { client: juttusihti_core::pricing::Billing, session: juttusihti_core::pricing::Billing },
+}
+
+/// A sent request's budget reservation, settled when it returns.
+struct InFlight {
+    reservation: Reservation,
+    worst_usage: Usage,
+    worst_cost: Option<Micros>,
 }
 
 enum Stop {
@@ -227,6 +237,13 @@ impl Runner {
         operation: &'static str,
         req: &Request,
     ) -> Result<Option<serde_json::Value>, Stop> {
+        let flight = self.begin(ctx, req)?;
+        let result = self.send(req).await;
+        self.finish(ctx, operation, flight, result)
+    }
+
+    /// Checks pause/cancel and reserves the request's worst case.
+    fn begin(&self, ctx: &mut Ctx, req: &Request) -> Result<InFlight, Stop> {
         self.check_control()?;
         let prompt_estimate = juttusihti_core::estimate::approx_tokens(&req.system)
             + juttusihti_core::estimate::approx_tokens(&req.user)
@@ -241,11 +258,26 @@ impl Runner {
             Refusal::Paused => Stop::Paused("paused".into()),
             other => Stop::Paused(format!("stopped before the next request: {other}")),
         })?;
+        Ok(InFlight { reservation, worst_usage, worst_cost })
+    }
 
-        let result = tokio::select! {
+    /// Sends a request; `None` if the run was cancelled while waiting.
+    async fn send(&self, req: &Request) -> Option<Result<Reply, AiError>> {
+        tokio::select! {
             r = self.client.complete(req) => Some(r),
             _ = self.control.cancelled() => None,
-        };
+        }
+    }
+
+    /// Settles a returned (or abandoned) request in the budget and ledger.
+    fn finish(
+        &self,
+        ctx: &mut Ctx,
+        operation: &'static str,
+        flight: InFlight,
+        result: Option<Result<Reply, AiError>>,
+    ) -> Result<Option<serde_json::Value>, Stop> {
+        let InFlight { reservation, worst_usage, worst_cost } = flight;
         let Some(result) = result else {
             // Cancelled in flight: the provider may still bill the request.
             ctx.guard.settle(reservation, None);
@@ -270,8 +302,14 @@ impl Runner {
                         self.emit(Progress::Note(format!("A {operation} response hit its output limit.")));
                         Ok(None)
                     }
-                    Outcome::NotJson(_) => {
-                        self.emit(Progress::Note(format!("A {operation} response was not valid JSON.")));
+                    Outcome::NotJson(text) => {
+                        let shown: String = text.chars().take(160).collect();
+                        tracing::warn!(operation, text = %text, "model output was not JSON");
+                        self.emit(Progress::Note(if shown.trim().is_empty() {
+                            format!("A {operation} response was empty.")
+                        } else {
+                            format!("A {operation} response was not valid JSON: {shown}")
+                        }));
                         Ok(None)
                     }
                 }
@@ -354,40 +392,47 @@ impl Runner {
             })
             .collect();
         let batches: Vec<&[&ArticleRecord]> = pending.chunks(EXTRACT_BATCH).collect();
-        self.emit(Progress::Stage { name: "Labels / entities / relevance", requests: batches.len() });
-        for (i, batch) in batches.iter().enumerate() {
-            let vocabulary: Vec<String> =
-                self.db(|s| s.labels()).map(|l| l.into_iter().map(|l| l.name).collect()).unwrap_or_default();
-            let per_article_out: u32 = tasks
-                .iter()
-                .map(|t| match t {
-                    Task::Labels => 30,
-                    Task::Entities => 90,
-                    Task::Relevance => 25,
-                    _ => 0,
-                })
-                .sum();
-            let max_out = per_article_out * batch.len() as u32 * 5 + 1_024;
-            let req = prompts::extraction_request(
-                &config.model,
-                tasks,
-                batch,
-                &vocabulary,
-                config.relevance_criteria.as_deref(),
-                max_out,
-            );
-            let items =
-                self.call_validated(ctx, "extraction", &req, |v| prompts::validate_extraction(v, batch, tasks)).await?;
-            if let Some(items) = items {
+        self.emit(Progress::Stage { name: "Labels / entities / relevance / headlines", requests: batches.len() });
+        let vocabulary: Vec<String> =
+            self.db(|s| s.labels()).map(|l| l.into_iter().map(|l| l.name).collect()).unwrap_or_default();
+        let per_article_out: u32 = tasks
+            .iter()
+            .map(|t| match t {
+                Task::Labels => 30,
+                Task::Entities => 90,
+                Task::Relevance => 25,
+                Task::Headlines => 30,
+                _ => 0,
+            })
+            .sum();
+        let reqs: Vec<Request> = batches
+            .iter()
+            .map(|batch| {
+                let max_out = per_article_out * batch.len() as u32 * 5 + 1_024;
+                prompts::extraction_request(
+                    &config.model,
+                    tasks,
+                    batch,
+                    &vocabulary,
+                    config.relevance_criteria.as_deref(),
+                    max_out,
+                )
+            })
+            .collect();
+        self.run_parallel(
+            ctx,
+            "extraction",
+            &reqs,
+            |i, v| prompts::validate_extraction(v, batches[i], tasks),
+            |this, ctx, i, items| {
                 for item in items {
-                    let Some(rec) = batch.iter().find(|r| r.id == item.id) else { continue };
-                    self.persist_extraction(ctx, rec, &item, tasks);
+                    if let Some(rec) = batches[i].iter().find(|r| r.id == item.id) {
+                        this.persist_extraction(ctx, rec, &item, tasks);
+                    }
                 }
-            }
-            let (tokens, cost) = (ctx.summary.usage.total(), ctx.summary.cost);
-            self.emit(Progress::Call { stage: "extraction", done: i + 1, total: batches.len(), tokens, cost });
-        }
-        Ok(())
+            },
+        )
+        .await
     }
 
     /// Calls and validates, retrying once when output is unusable.
@@ -412,6 +457,73 @@ impl Runner {
         Ok(None)
     }
 
+    /// Sends independent requests, up to [`PARALLEL_REQUESTS`] at a time.
+    /// Valid results are handed to `accept` (and stored) as soon as their
+    /// wave returns, so a stop never loses paid work. Unusable output is
+    /// retried up to [`OUTPUT_RETRIES`] times.
+    async fn run_parallel<T>(
+        &self,
+        ctx: &mut Ctx,
+        operation: &'static str,
+        reqs: &[Request],
+        validate: impl Fn(usize, &serde_json::Value) -> Result<T, String>,
+        mut accept: impl FnMut(&Self, &mut Ctx, usize, T),
+    ) -> Result<(), Stop> {
+        let mut queue: std::collections::VecDeque<usize> = (0..reqs.len()).collect();
+        let mut attempts = vec![0u32; reqs.len()];
+        let mut done = 0;
+        while !queue.is_empty() {
+            let mut wave: Vec<(usize, InFlight)> = Vec::new();
+            while wave.len() < PARALLEL_REQUESTS
+                && let Some(&i) = queue.front()
+            {
+                match self.begin(ctx, &reqs[i]) {
+                    Ok(f) => {
+                        queue.pop_front();
+                        wave.push((i, f));
+                    }
+                    Err(stop) if wave.is_empty() => return Err(stop),
+                    // Budget may free up once this wave settles at actual usage.
+                    Err(_) => break,
+                }
+            }
+            let replies = futures_util::future::join_all(wave.iter().map(|(i, _)| self.send(&reqs[*i]))).await;
+            let mut stop = None;
+            for ((i, flight), reply) in wave.into_iter().zip(replies) {
+                match self.finish(ctx, operation, flight, reply) {
+                    Ok(Some(v)) => match validate(i, &v) {
+                        Ok(t) => {
+                            accept(self, ctx, i, t);
+                            done += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(operation, error = %e, "model output failed validation");
+                            self.emit(Progress::Note(format!("Discarded invalid {operation} output: {e}")));
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(s) => {
+                        stop.get_or_insert(s);
+                        continue;
+                    }
+                }
+                attempts[i] += 1;
+                if attempts[i] <= OUTPUT_RETRIES {
+                    queue.push_back(i);
+                } else {
+                    done += 1;
+                }
+            }
+            let (tokens, cost) = (ctx.summary.usage.total(), ctx.summary.cost);
+            self.emit(Progress::Call { stage: operation, done, total: reqs.len(), tokens, cost });
+            if let Some(s) = stop {
+                return Err(s);
+            }
+        }
+        Ok(())
+    }
+
     fn persist_extraction(
         &self,
         ctx: &mut Ctx,
@@ -427,6 +539,7 @@ impl Runner {
                 "name": e.name, "kind": e.kind.as_str(), "role": e.role.as_str(), "evidence": e.evidence,
             })).collect::<Vec<_>>(),
             "relevance": item.relevance.as_ref().map(|(c, r)| serde_json::json!({"class": c.as_str(), "reason": r})),
+            "headline": item.headline,
         });
         let suggestion = self.suggestion(ctx, "extraction", payload.clone(), None, None);
         let ctx_session = ctx.session;
@@ -463,6 +576,9 @@ impl Runner {
                     )?;
                 }
             }
+            if let Some(h) = &item.headline {
+                s.suggest_headline(rec.id, h, Some(ctx_session), Some(sid))?;
+            }
             if let Some((class, reason)) = &item.relevance {
                 s.record_relevance(rec.id, Some(ctx_session), class.as_str(), Some(reason), Origin::Ai, Some(sid))?;
             }
@@ -497,35 +613,45 @@ impl Runner {
             .collect();
         let batches: Vec<&[(&ArticleRecord, &ArticleRecord)]> = pairs.chunks(PAIR_BATCH).collect();
         self.emit(Progress::Stage { name: "Related-story validation", requests: batches.len() });
-        for (i, batch) in batches.iter().enumerate() {
-            let req = prompts::related_request(&ctx.config.model, batch, (batch.len() as u32) * 250 + 1_024);
-            let verdicts = self.call_validated(ctx, "related", &req, |v| prompts::validate_related(v, batch)).await?;
-            for v in verdicts.unwrap_or_default() {
-                let (Some(a), Some(b)) = (find(v.a), find(v.b)) else { continue };
-                let suggestion = self.suggestion(
-                    ctx,
-                    "relationship",
-                    serde_json::json!({"a": v.a, "b": v.b, "relation": v.kind.map(|k| k.as_str()).unwrap_or("unrelated")}),
-                    Some(v.confidence),
-                    v.evidence.clone(),
-                );
-                let key = Self::pair_key(ctx, a, b);
-                let stored = self.db(|s| {
-                    let sid = s.record_suggestion(&suggestion)?;
-                    if let Some(kind) = v.kind {
-                        s.relate(v.a, v.b, kind, Origin::Ai, v.evidence.as_deref(), Some(v.confidence), Some(sid))?;
-                    }
-                    s.cache_result(&key, v.a, Task::Related, &serde_json::json!({"suggestion": sid}))
-                });
-                match stored {
-                    Ok(()) => ctx.summary.suggestions += 1,
-                    Err(e) => tracing::error!(error = %e, "could not store relationship"),
+        let reqs: Vec<Request> = batches
+            .iter()
+            .map(|batch| prompts::related_request(&ctx.config.model, batch, (batch.len() as u32) * 250 + 1_024))
+            .collect();
+        self.run_parallel(
+            ctx,
+            "related",
+            &reqs,
+            |i, v| prompts::validate_related(v, batches[i]),
+            |this, ctx, _, verdicts| {
+                for v in verdicts {
+                    let (Some(a), Some(b)) = (find(v.a), find(v.b)) else { continue };
+                    this.persist_relationship(ctx, a, b, &v);
                 }
+            },
+        )
+        .await
+    }
+
+    fn persist_relationship(&self, ctx: &mut Ctx, a: &ArticleRecord, b: &ArticleRecord, v: &prompts::PairVerdict) {
+        let suggestion = self.suggestion(
+            ctx,
+            "relationship",
+            serde_json::json!({"a": v.a, "b": v.b, "relation": v.kind.map(|k| k.as_str()).unwrap_or("unrelated")}),
+            Some(v.confidence),
+            v.evidence.clone(),
+        );
+        let key = Self::pair_key(ctx, a, b);
+        let stored = self.db(|s| {
+            let sid = s.record_suggestion(&suggestion)?;
+            if let Some(kind) = v.kind {
+                s.relate(v.a, v.b, kind, Origin::Ai, v.evidence.as_deref(), Some(v.confidence), Some(sid))?;
             }
-            let (tokens, cost) = (ctx.summary.usage.total(), ctx.summary.cost);
-            self.emit(Progress::Call { stage: "related", done: i + 1, total: batches.len(), tokens, cost });
+            s.cache_result(&key, v.a, Task::Related, &serde_json::json!({"suggestion": sid}))
+        });
+        match stored {
+            Ok(()) => ctx.summary.suggestions += 1,
+            Err(e) => tracing::error!(error = %e, "could not store relationship"),
         }
-        Ok(())
     }
 
     // ---- stage 3: summary -------------------------------------------------------------
@@ -543,15 +669,19 @@ impl Runner {
             let req = prompts::summary_request(&ctx.config.model, chunks[0], 10_024);
             self.call_validated(ctx, "summary", &req, |v| prompts::validate_summary(v, &allowed)).await?
         } else {
-            let mut partials: Vec<Summary> = Vec::new();
-            for chunk in &chunks {
-                let req = prompts::summary_request(&ctx.config.model, chunk, 3_524);
-                if let Some(p) =
-                    self.call_validated(ctx, "summary_chunk", &req, |v| prompts::validate_summary(v, &allowed)).await?
-                {
-                    partials.push(p);
-                }
-            }
+            let reqs: Vec<Request> =
+                chunks.iter().map(|chunk| prompts::summary_request(&ctx.config.model, chunk, 3_524)).collect();
+            let mut parts: Vec<Option<Summary>> = vec![None; reqs.len()];
+            self.run_parallel(
+                ctx,
+                "summary_chunk",
+                &reqs,
+                |_, v| prompts::validate_summary(v, &allowed),
+                |_, _, i, p| parts[i] = Some(p),
+            )
+            .await?;
+            // Partials stay in chronological chunk order.
+            let partials: Vec<Summary> = parts.into_iter().flatten().collect();
             if partials.is_empty() {
                 None
             } else {

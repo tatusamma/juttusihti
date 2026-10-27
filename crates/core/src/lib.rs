@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod estimate;
 pub mod feed;
 pub mod graph;
+pub mod headlines;
 pub mod model;
 pub mod normalize;
 pub mod opml_io;

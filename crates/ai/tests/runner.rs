@@ -183,11 +183,14 @@ fn good_model(provider: Provider) -> impl Fn(&Recorded, usize) -> MockReply + Se
             json!({"articles": items.iter().map(|a| {
                 let title = a["title"].as_str().unwrap_or_default();
                 let first = title.split_whitespace().next().unwrap_or("x");
+                // A rewrite grounded in the article's own description.
+                let text = a["text"].as_str().unwrap_or_default().trim_end_matches('.');
                 json!({
                     "id": a["id"],
                     "labels": ["Politiikka"],
                     "entities": [{"name": first, "kind": "organization", "role": "subject", "evidence": first}],
-                    "relevance": {"class": "relevant", "reason": "On topic."}
+                    "relevance": {"class": "relevant", "reason": "On topic."},
+                    "headline": format!("{text} kertoo säästä"),
                 })
             }).collect::<Vec<_>>()})
         } else if schema_kind.get("pairs").is_some() {
@@ -355,8 +358,9 @@ async fn resumes_without_repeating_finished_batches() {
     let cfg = config(Provider::Anthropic, &[Task::Labels]);
     let sid = session(&db, &cfg);
     let good = good_model(Provider::Anthropic);
+    // Batches are sent in parallel, so fail the second batch by its size, not arrival order.
     let failing = mock(Arc::new(move |r: &Recorded, n: usize| {
-        if n == 0 {
+        if articles_in(&user_text(Provider::Anthropic, &r.body)).len() == 20 {
             good(r, n)
         } else {
             MockReply { status: 400, body: json!({"error": {"message": "bad request"}}), delay: Duration::ZERO }
@@ -452,10 +456,11 @@ async fn cancel_in_flight_charges_worst_case_and_stops() {
 
 #[tokio::test]
 async fn pause_between_calls_then_resume() {
-    let db = seed(30);
+    // 100 articles: 5 extraction batches, more than one wave of parallel requests.
+    let db = seed(98);
     let sid = session(&db, &config(Provider::Gemini, &[Task::Labels]));
     let control = Control::default();
-    // The user presses Pause while the first request is in flight.
+    // The user presses Pause while the first wave is in flight.
     let pause_during_first = control.clone();
     let good = good_model(Provider::Gemini);
     let m = mock(Arc::new(move |r: &Recorded, n: usize| {
@@ -467,10 +472,49 @@ async fn pause_between_calls_then_resume() {
     .await;
     let r = runner(&db, Provider::Gemini, &m.base, control).run(sid, YES).await.unwrap();
     assert_eq!(r.final_status, Some(SessionStatus::Paused));
-    assert_eq!(m.count(), 1, "the in-flight request finishes; no new one starts");
+    assert_eq!(m.count(), 4, "the in-flight wave finishes; no new request starts");
     let r = runner(&db, Provider::Gemini, &m.base, Control::default()).run(sid, YES).await.unwrap();
     assert_eq!(r.final_status, Some(SessionStatus::Completed));
-    assert_eq!(m.count(), 2);
+    assert_eq!(m.count(), 5, "resume sends only the unfinished batch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn requests_run_in_parallel_waves() {
+    let db = seed(98); // 100 articles → 5 extraction batches
+    let sid = session(&db, &config(Provider::Openai, &[Task::Labels, Task::Headlines]));
+    // Each answer of the first wave waits (up to 2 s) until 4 requests have
+    // arrived, which only happens if they are sent at the same time.
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let seen_together = Arc::new(AtomicUsize::new(0));
+    let (count, together) = (arrived.clone(), seen_together.clone());
+    let good = good_model(Provider::Openai);
+    let m = mock(Arc::new(move |r: &Recorded, n: usize| {
+        count.fetch_add(1, Ordering::SeqCst);
+        if n < 4 {
+            // block_in_place hands this worker's queued tasks to other workers.
+            tokio::task::block_in_place(|| {
+                let start = std::time::Instant::now();
+                while count.load(Ordering::SeqCst) < 4 && start.elapsed() < Duration::from_secs(2) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+            together.fetch_max(count.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        good(r, n)
+    }))
+    .await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!(m.count(), 5);
+    assert_eq!(seen_together.load(Ordering::SeqCst), 4, "the first four batches are in flight together");
+    let s = db.lock().unwrap();
+    let rewritten: i64 = s
+        .conn()
+        .query_row("SELECT count(*) FROM article_headlines WHERE status = 'suggested'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rewritten, 98, "every 'Uutinen N' article gets a grounded rewrite");
+    let h = s.headline(1).unwrap().unwrap();
+    assert_eq!(h.headline, "Kuvaus numero 0 kertoo säästä");
 }
 
 #[tokio::test]
