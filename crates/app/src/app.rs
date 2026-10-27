@@ -1062,16 +1062,21 @@ impl App {
         if let Some(interp) = &self.listing.interpreted {
             header = header.push(text(format!("Query: {interp}")).size(12));
         }
+        // Only offered when this page has rewrites to switch between.
+        let rewritten = self.listing.headlines.len();
+        if rewritten > 0 {
+            let label = if self.ai_headlines {
+                format!("Show original headlines ({rewritten} rewritten)")
+            } else {
+                format!("Show AI headlines ({rewritten})")
+            };
+            header = header.push(button(text(label).size(12)).style(button::text).on_press(Message::ToggleAiHeadlines));
+        }
         header = header
             .push(
                 button(text(if self.hide_dismissed { "Show dismissed" } else { "Hide dismissed" }).size(12))
                     .style(button::text)
                     .on_press(Message::ToggleHideDismissed),
-            )
-            .push(
-                button(text(if self.ai_headlines { "Original headlines" } else { "AI headlines" }).size(12))
-                    .style(button::text)
-                    .on_press(Message::ToggleAiHeadlines),
             )
             .push(button(text("Mark all read").size(12)).style(button::text).on_press(Message::MarkAllRead))
             .push(
