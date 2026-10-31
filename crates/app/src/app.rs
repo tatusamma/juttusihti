@@ -21,7 +21,7 @@ use tokio::sync::Semaphore;
 
 use crate::db::Db;
 use crate::icons::{Icon, icon};
-use crate::style::{self, READ_WIDTH, SIZE_ARTICLE_TITLE, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
+use crate::style::{self, READ_WIDTH, SEMIBOLD, SIZE_ARTICLE_TITLE, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
 use crate::{feeds_menu, format, rail};
 
 const PAGE_SIZE: u32 = 50;
@@ -36,7 +36,12 @@ const LIST_HEADER_PAD: f32 = 12.0;
 const LIST_MENU_WIDTH: f32 = 280.0;
 /// Diameter of the unread dot in the article list.
 const UNREAD_DOT: f32 = 6.0;
-const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
+/// Height of one headline line: `SIZE_BODY` at Iced's default 1.3 line height. The unread
+/// dot is centred on it.
+const HEADLINE_LINE: f32 = SIZE_BODY * 1.3;
+/// Drops the small ✨ before a rewritten headline onto the headline's text line
+/// (the icon is `SIZE_SMALL`, the headline `SIZE_BODY`).
+const SPARKLE_DROP: f32 = 3.0;
 
 /// Which list the reader shows: the news stream or the saved articles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +148,8 @@ pub enum Message {
     ToggleFeedsMenu,
     /// Opens or closes the ⋯ menu above the article list.
     ToggleListMenu,
+    /// An item picked in the ⋯ menu: closes the menu, then does the item's action.
+    MenuPick(Box<Message>),
     /// Closes any open dropdown (click outside, Esc).
     CloseOverlays,
     MarkAllRead,
@@ -153,8 +160,7 @@ pub enum Message {
     Imported(Result<(usize, usize), String>),
     ExportOpml,
     Exported(Result<Option<PathBuf>, String>),
-    // No theme switch in the UI until it moves into Settings.
-    #[allow(dead_code)]
+    /// Switches between the dark and light theme (Settings → Appearance).
     ToggleTheme,
     ShowScreen(Screen),
     Research(crate::research::Msg),
@@ -675,7 +681,6 @@ impl App {
                 Task::batch([refresh, fetch])
             }
             Message::RemoveFeed(id) => {
-                self.list_menu_open = false;
                 self.confirm_unsubscribe = Some(id);
                 self.feeds_open = true;
                 Task::none()
@@ -721,12 +726,15 @@ impl App {
                 self.list_menu_open = open;
                 Task::none()
             }
+            Message::MenuPick(pick) => {
+                self.list_menu_open = false;
+                self.update(*pick)
+            }
             Message::CloseOverlays => {
                 self.close_overlays();
                 Task::none()
             }
             Message::MarkAllRead => {
-                self.list_menu_open = false;
                 let db = self.db.clone();
                 let filter = self.list_filter();
                 for item in &mut self.listing.items {
@@ -854,7 +862,6 @@ impl App {
                 self.graph.focus_article(id, &title).map(Message::Graph)
             }
             Message::ToggleAiHeadlines => {
-                self.list_menu_open = false;
                 self.ai_headlines = !self.ai_headlines;
                 Task::none()
             }
@@ -884,7 +891,6 @@ impl App {
                 Task::none()
             }
             Message::ToggleHideDismissed => {
-                self.list_menu_open = false;
                 self.hide_dismissed = !self.hide_dismissed;
                 self.page = Page::first(PAGE_SIZE);
                 self.load_list()
@@ -919,6 +925,14 @@ impl App {
                 }
                 if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
             }
+            Message::Settings(crate::settings::Msg::SetDark(dark)) => {
+                if dark == self.settings.values.dark {
+                    return Task::none();
+                }
+                self.update(Message::ToggleTheme)
+            }
+            Message::Settings(crate::settings::Msg::ImportOpml) => self.update(Message::ImportOpml),
+            Message::Settings(crate::settings::Msg::ExportOpml) => self.update(Message::ExportOpml),
             Message::Settings(msg) => {
                 // Apply retention once settings are known at startup, and
                 // reload lists after a save (retention may remove articles).
@@ -977,7 +991,6 @@ impl App {
                 Task::none()
             }
             Message::EditFeed(id) => {
-                self.list_menu_open = false;
                 self.feeds_open = true;
                 self.confirm_unsubscribe = None;
                 if let Some(f) = self.sidebar.feeds.iter().find(|f| f.id == id) {
@@ -1080,7 +1093,8 @@ impl App {
 
     /// The whole window; `size` places the ⋯ menu at the right edge of the article list.
     fn view_sized(&self, size: Size) -> Element<'_, Message> {
-        // Two fifths of the width right of the rail and the two vertical rules.
+        // The list takes 2 of 5 parts (a 2:3 split with the reading pane) of what is left
+        // after the rail (`rail::WIDTH`) and the two 1px vertical rules (rail | list | pane).
         let list_width = ((size.width - rail::WIDTH - 2.0) * 2.0 / 5.0).floor().max(0.0);
         let main: Element<'_, Message> = match self.screen {
             Screen::Reader => row![
@@ -1105,7 +1119,7 @@ impl App {
         if let Some(status) = &self.status {
             let mut line = row![text(status).size(SIZE_SMALL).width(Fill)].spacing(SPACE[1]).align_y(Center);
             if let Some(id) = self.status_review {
-                line = line.push(quiet_button(
+                line = line.push(style::quiet_button(
                     None,
                     "Review",
                     style::quiet,
@@ -1118,7 +1132,9 @@ impl App {
                     .style(style::icon)
                     .on_press(Message::DismissStatus),
             );
-            layout = layout.push(container(line).padding([SPACE[0], SPACE[2]]).style(style::status));
+            // A rule above the status row separates it from the screen.
+            let bar = container(line).padding([SPACE[0], SPACE[2]]).style(style::status);
+            layout = layout.push(rule::horizontal(1)).push(bar);
         }
         // The menus and the AI popover open just under the list header.
         let below_header = TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT;
@@ -1165,12 +1181,8 @@ impl App {
             style::tip("Search: words, \"phrases\", OR, -exclude, prefix*, title:…"),
             tooltip::Position::Bottom,
         );
-        let clear = (!self.active_search.is_empty()).then(|| {
-            button(text("Clear").size(SIZE_SMALL))
-                .padding([SPACE[0], SPACE[1] + 2.0])
-                .style(style::quiet)
-                .on_press(Message::ClearSearch)
-        });
+        let clear = (!self.active_search.is_empty())
+            .then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
         let refresh_tip =
             if self.refreshing > 0 { format!("Refreshing {}", self.refreshing) } else { "Refresh all feeds".into() };
         let refresh = tooltip(
@@ -1208,10 +1220,7 @@ impl App {
                 list = list.push(
                     column![
                         text("No feeds yet.").size(SIZE_BODY).style(style::muted),
-                        button(text("Add a site or feed").size(SIZE_BODY))
-                            .padding([SPACE[1], SPACE[2]])
-                            .style(style::main)
-                            .on_press(Message::ToggleFeedsMenu),
+                        style::main_button("Add a site or feed", Some(Message::ToggleFeedsMenu)),
                     ]
                     .spacing(SPACE[2])
                     .padding(SPACE[3]),
@@ -1226,7 +1235,7 @@ impl App {
         header = match self.place {
             Place::News => header
                 .push(feeds_menu::button(self.scope_label(), self.scope_unread(), self.feeds_open))
-                .push(style::segmented(&[(false, "All"), (true, "Unread")], self.unread_only, Message::SetUnreadOnly)),
+                .push(style::segmented([(false, "All"), (true, "Unread")], self.unread_only, Message::SetUnreadOnly)),
             Place::Saved => {
                 header.push(container(text("Saved").size(SIZE_BODY).font(SEMIBOLD)).padding([0.0, SPACE[1]]))
             }
@@ -1246,6 +1255,10 @@ impl App {
         let mut content = row![icon(Icon::Sparkles)].spacing(SPACE[0]).align_y(Center);
         if let Some(badge) = self.quick.badge() {
             content = content.push(text(badge).size(SIZE_SMALL).style(style::accent));
+        } else if self.quick.is_running() {
+            // Running, but the first stage has not said how many requests it makes yet.
+            let dot = Space::new().width(UNREAD_DOT).height(UNREAD_DOT);
+            content = content.push(container(dot).style(style::unread_dot));
         }
         let tip = if self.quick.is_running() { "AI run in progress" } else { "AI for this list" };
         tooltip(
@@ -1266,7 +1279,8 @@ impl App {
         let mut title = row![].spacing(SPACE[0] + 2.0);
         if rewritten.is_some() {
             title = title.push(tooltip(
-                container(icon(Icon::Sparkles).size(SIZE_SMALL).style(style::faint)).padding(Padding::ZERO.top(3.0)),
+                container(icon(Icon::Sparkles).size(SIZE_SMALL).style(style::faint))
+                    .padding(Padding::ZERO.top(SPARKLE_DROP)),
                 style::tip("AI-rewritten headline"),
                 tooltip::Position::Top,
             ));
@@ -1301,7 +1315,7 @@ impl App {
         } else {
             container(Space::new().width(UNREAD_DOT).height(UNREAD_DOT)).style(style::unread_dot).into()
         };
-        let dot = container(dot).padding(Padding::ZERO.top((SIZE_BODY * 1.3 - UNREAD_DOT) / 2.0));
+        let dot = container(dot).padding(Padding::ZERO.top((HEADLINE_LINE - UNREAD_DOT) / 2.0));
         let row_button = button(row![dot, entry].spacing(SPACE[1]))
             .width(Fill)
             .padding([SPACE[1], SPACE[2]])
@@ -1362,12 +1376,13 @@ impl App {
 
     /// The ⋯ menu: list-wide actions and, for a single feed, edit and unsubscribe.
     fn view_list_menu(&self) -> Element<'_, Message> {
+        let pick = |target: Message| Message::MenuPick(Box::new(target));
         let item = |label: String, target: Message| -> Element<'_, Message> {
             button(text(label).size(SIZE_BODY))
                 .width(Fill)
                 .padding([SPACE[0] + 2.0, SPACE[1]])
                 .style(style::row)
-                .on_press(target)
+                .on_press(pick(target))
                 .into()
         };
         let dismissed = if self.hide_dismissed { "Show dismissed" } else { "Hide dismissed" };
@@ -1388,8 +1403,13 @@ impl App {
         }
         if let (Place::News, Scope::Feed(id)) = (self.place, self.scope) {
             menu = menu.push(rule::horizontal(1)).push(item("Edit feed".into(), Message::EditFeed(id))).push(
-                container(quiet_button(None, "Unsubscribe…", style::quiet_danger, Some(Message::RemoveFeed(id))))
-                    .padding([SPACE[0], SPACE[1]]),
+                container(style::quiet_button(
+                    None,
+                    "Unsubscribe…",
+                    style::quiet_danger,
+                    Some(pick(Message::RemoveFeed(id))),
+                ))
+                .padding([SPACE[0], SPACE[1]]),
             );
         }
         container(menu).width(LIST_MENU_WIDTH).padding(SPACE[1]).style(style::popover).into()
@@ -1428,10 +1448,10 @@ impl App {
                 .align_y(Center);
                 if h.status == Status::Suggested {
                     let keep = Some(Message::DecideHeadline(Status::Confirmed));
-                    note = note.push(quiet_button(None, "Keep", style::quiet, keep));
+                    note = note.push(style::quiet_button(None, "Keep", style::quiet, keep));
                 }
                 let reject = Some(Message::DecideHeadline(Status::Rejected));
-                note = note.push(quiet_button(None, "Use original", style::quiet, reject));
+                note = note.push(style::quiet_button(None, "Use original", style::quiet, reject));
                 column![
                     text(&h.headline).size(SIZE_ARTICLE_TITLE).font(SEMIBOLD),
                     text(format!("Original: {original}")).size(SIZE_SMALL).style(style::muted),
@@ -1466,18 +1486,18 @@ impl App {
             meta.push_str(&format!(" · {author}"));
         }
         let save = if a.is_saved {
-            quiet_button(Some(Icon::Star), "Saved", style::quiet_active, Some(Message::ToggleSaved))
+            style::quiet_button(Some(Icon::Star), "Saved", style::quiet_active, Some(Message::ToggleSaved))
         } else {
-            quiet_button(Some(Icon::Star), "Save", style::quiet, Some(Message::ToggleSaved))
+            style::quiet_button(Some(Icon::Star), "Save", style::quiet, Some(Message::ToggleSaved))
         };
         let open = a.url.as_ref().map(|_| Message::OpenInBrowser);
         let read = if a.is_read { "Mark unread" } else { "Mark read" };
         let actions = row![
             save,
-            quiet_button(Some(Icon::External), "Open in browser", style::quiet, open),
-            quiet_button(None, read, style::quiet, Some(Message::ToggleRead)),
+            style::quiet_button(Some(Icon::External), "Open in browser", style::quiet, open),
+            style::quiet_button(None, read, style::quiet, Some(Message::ToggleRead)),
             tooltip(
-                quiet_button(Some(Icon::Connections), "Connections", style::quiet, Some(Message::MapArticle)),
+                style::quiet_button(Some(Icon::Connections), "Connections", style::quiet, Some(Message::MapArticle)),
                 style::tip("Relationship map around this article"),
                 tooltip::Position::Bottom,
             ),
@@ -1493,17 +1513,24 @@ impl App {
                 juttusihti_core::Status::Rejected => continue,
             };
             let id = l.label.id;
-            let chip_button = |glyph: &'static str, target: Message| {
-                button(text(glyph).size(SIZE_SMALL)).padding(0).style(style::icon).on_press(target)
-            };
+            let chip_button =
+                |i: Icon, tip: &'static str, target: Message| style::icon_button(i, tip, SIZE_SMALL, Some(target));
             let mut chip =
                 row![text(format!("{}{marker}", l.label.name)).size(SIZE_SMALL)].spacing(SPACE[0]).align_y(Center);
             if l.status == juttusihti_core::Status::Suggested {
                 chip = chip
-                    .push(chip_button("✓", Message::DecideLabel(id, juttusihti_core::Status::Confirmed)))
-                    .push(chip_button("✕", Message::DecideLabel(id, juttusihti_core::Status::Rejected)));
+                    .push(chip_button(
+                        Icon::Check,
+                        "Accept label",
+                        Message::DecideLabel(id, juttusihti_core::Status::Confirmed),
+                    ))
+                    .push(chip_button(
+                        Icon::Close,
+                        "Reject label",
+                        Message::DecideLabel(id, juttusihti_core::Status::Rejected),
+                    ));
             } else {
-                chip = chip.push(chip_button("×", Message::RemoveLabel(id)));
+                chip = chip.push(chip_button(Icon::Close, "Remove label", Message::RemoveLabel(id)));
             }
             labels = labels.push(container(chip).padding([2.0, SPACE[1]]).style(style::chip));
         }
@@ -1548,21 +1575,6 @@ fn header_icon<'a>(i: Icon, tip: &'a str, open: bool, target: Message) -> Elemen
         tooltip::Position::Bottom,
     )
     .into()
-}
-
-/// A quiet button with small text, optionally led by an icon in the same colour.
-fn quiet_button<'a>(
-    lead: Option<Icon>,
-    label: &'a str,
-    style: fn(&Theme, button::Status) -> button::Style,
-    target: Option<Message>,
-) -> Element<'a, Message> {
-    let mut content = row![].spacing(SPACE[0] + 2.0).align_y(Center);
-    if let Some(i) = lead {
-        content = content.push(icon(i).size(SIZE_SMALL));
-    }
-    content = content.push(text(label).size(SIZE_SMALL));
-    button(content).padding([SPACE[0], SPACE[1] + 2.0]).style(style).on_press_maybe(target).into()
 }
 
 #[cfg(test)]
@@ -1674,6 +1686,19 @@ mod tests {
         assert_eq!(app.quick_label(), "All feeds");
         app.active_search = "vaalit".into();
         assert_eq!(app.quick_label(), "All feeds matching “vaalit”");
+    }
+
+    #[test]
+    fn run_finished_while_closed_reports_in_the_status_bar() {
+        let (mut app, _) = app_with_feed();
+        app.quick.start_test_run(7);
+        assert!(!app.quick.open);
+        let finished = crate::research::RunEvent::Finished(Ok(juttusihti_ai::RunSummary::default()));
+        let _ = app.update(Message::Quick(crate::quick::Msg::Run(finished)));
+        assert!(app.status.as_deref().is_some_and(|s| s.starts_with("Stopped") || s.starts_with("Done")));
+        assert_eq!(app.status_review, Some(7));
+        let _ = app.update(Message::DismissStatus);
+        assert_eq!((app.status.as_deref(), app.status_review), (None, None));
     }
 
     #[test]

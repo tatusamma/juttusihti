@@ -1,10 +1,14 @@
-//! Calm "warm paper & amber" design tokens and the custom Iced themes built from them.
-// Consumed by later restyle tasks; remove once every token is used.
-#![allow(dead_code)]
+//! Calm "warm paper & amber" design tokens, the custom Iced themes built from them,
+//! and the shared text, button and container styles of every screen.
 
 use iced::theme::Palette;
-use iced::widget::{Space, button, container, mouse_area, opaque, pin, row as ui_row, stack, text};
-use iced::{Background, Border, Color, Element, Fill, Point, Shadow, Theme, Vector, border};
+use iced::widget::{
+    Space, Text, button, checkbox as cb, container, mouse_area, opaque, pin, radio as rd, row as ui_row, stack, text,
+    tooltip,
+};
+use iced::{Background, Border, Center, Color, Element, Fill, Font, Point, Shadow, Theme, Vector, border, font};
+
+use crate::icons::{self, Icon};
 
 const DARK_NAME: &str = "Juttusihti Dark";
 const LIGHT_NAME: &str = "Juttusihti Light";
@@ -238,10 +242,9 @@ pub fn unread_dot(theme: &Theme) -> container::Style {
     }
 }
 
-/// Status bar surface.
+/// Status bar surface: pane colour, muted text. The app draws a rule above it.
 pub fn status(theme: &Theme) -> container::Style {
-    let t = tokens(theme);
-    container::Style { text_color: Some(t.muted), border: border::width(1.0).color(t.line), ..pane(theme) }
+    container::Style { text_color: Some(tokens(theme).muted), ..pane(theme) }
 }
 
 /// Small tag/chip surface.
@@ -279,14 +282,130 @@ pub fn accent(theme: &Theme) -> text::Style {
     colored(tokens(theme).accent)
 }
 
+/// Error text.
+pub fn danger(theme: &Theme) -> text::Style {
+    colored(tokens(theme).danger)
+}
+
+/// Bordered card for grouped items (review items, the selected map place, notes).
+pub fn card(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style { border: border::rounded(RADIUS).width(1.0).color(t.line), ..container::Style::default() }
+}
+
+/// Neutral checkbox: text-coloured check on the pane colour with a border; never amber.
+pub fn checkbox(theme: &Theme, status: cb::Status) -> cb::Style {
+    let t = tokens(theme);
+    let (hovered, disabled) = match status {
+        cb::Status::Active { .. } => (false, false),
+        cb::Status::Hovered { .. } => (true, false),
+        cb::Status::Disabled { .. } => (false, true),
+    };
+    cb::Style {
+        background: Background::Color(if hovered { t.selection } else { t.pane }),
+        icon_color: if disabled { t.faint } else { t.text },
+        border: border::rounded(3.0).width(1.0).color(if disabled { t.line } else { t.muted }),
+        text_color: Some(if disabled { t.faint } else { t.body }),
+    }
+}
+
+/// Neutral radio button: text-coloured dot on the pane colour with a border; never amber.
+pub fn radio(theme: &Theme, status: rd::Status) -> rd::Style {
+    let t = tokens(theme);
+    let hovered = matches!(status, rd::Status::Hovered { .. });
+    rd::Style {
+        background: Background::Color(if hovered { t.selection } else { t.pane }),
+        dot_color: t.text,
+        border_width: 1.0,
+        border_color: t.muted,
+        text_color: Some(t.body),
+    }
+}
+
+/// Semibold, for titles and headings.
+pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
+
+/// A screen title.
+pub fn title<'a>(label: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(label).size(SIZE_TITLE).font(SEMIBOLD)
+}
+
+/// A section heading inside a screen.
+pub fn heading<'a>(label: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(label).size(SIZE_BODY).font(SEMIBOLD)
+}
+
+/// A line of secondary text.
+pub fn note<'a>(label: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(label).size(SIZE_SMALL).style(muted)
+}
+
+/// Width of the help tooltip before its text wraps.
+const HELP_WIDTH: f32 = 380.0;
+
+/// A small "?" whose tooltip holds a full explanation.
+pub fn help<'a, M: 'a>(full: impl text::IntoFragment<'a>) -> Element<'a, M> {
+    let tip = container(text(full).size(SIZE_SMALL)).padding([SPACE[1], SPACE[2]]).max_width(HELP_WIDTH).style(popover);
+    tooltip(icons::icon(Icon::Help).size(SIZE_BODY).style(faint), tip, tooltip::Position::Bottom).gap(SPACE[0]).into()
+}
+
+/// One muted line followed by a "?" with the full explanation.
+pub fn intro<'a, M: 'a>(line: impl text::IntoFragment<'a>, full: impl text::IntoFragment<'a>) -> Element<'a, M> {
+    iced::widget::row![note(line), help(full)].spacing(SPACE[1]).align_y(Center).into()
+}
+
+/// A done/failed message: body text, or danger text for an error.
+pub fn message<'a, M: 'a>(m: &'a Result<String, String>) -> Element<'a, M> {
+    match m {
+        Ok(m) => text(m).size(SIZE_SMALL).style(body).into(),
+        Err(e) => text(e).size(SIZE_SMALL).style(danger).into(),
+    }
+}
+
+/// A quiet button with small text, optionally led by an icon in the same colour.
+/// `style` is [`quiet`], [`quiet_active`] or [`quiet_danger`]; `None` disables it.
+pub fn quiet_button<'a, M: Clone + 'a>(
+    lead: Option<Icon>,
+    label: impl text::IntoFragment<'a>,
+    style: fn(&Theme, button::Status) -> button::Style,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    let mut content = iced::widget::row![].spacing(SPACE[0] + 2.0).align_y(Center);
+    if let Some(i) = lead {
+        content = content.push(icons::icon(i).size(SIZE_SMALL));
+    }
+    content = content.push(text(label).size(SIZE_SMALL));
+    button::Button::new(content).padding([SPACE[0], SPACE[1] + 2.0]).style(style).on_press_maybe(on_press).into()
+}
+
+/// The one amber main button of a screen; `None` disables it.
+pub fn main_button<'a, M: Clone + 'a>(label: impl text::IntoFragment<'a>, on_press: Option<M>) -> Element<'a, M> {
+    button::Button::new(text(label).size(SIZE_BODY))
+        .padding([SPACE[1], SPACE[2]])
+        .style(main)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+/// A borderless icon button with a tooltip; `None` disables it.
+pub fn icon_button<'a, M: Clone + 'a>(i: Icon, tip_text: &'a str, size: f32, on_press: Option<M>) -> Element<'a, M> {
+    tooltip(
+        button::Button::new(icons::icon(i).size(size)).padding(SPACE[0]).style(self::icon).on_press_maybe(on_press),
+        tip(tip_text),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
 /// A row of joined quiet buttons; the selected one has the selection background and accent text.
-pub fn segmented<'a, T: Copy + PartialEq + 'a, M: Clone + 'a>(
-    options: &[(T, &'a str)],
+pub fn segmented<'a, T: Copy + PartialEq + 'a, M: Clone + 'a, L: text::IntoFragment<'a>>(
+    options: impl IntoIterator<Item = (T, L)>,
     selected: T,
     on: impl Fn(T) -> M,
 ) -> Element<'a, M> {
+    let options: Vec<(T, L)> = options.into_iter().collect();
     let last = options.len().saturating_sub(1);
-    let buttons = options.iter().enumerate().map(|(i, &(value, label))| {
+    let buttons = options.into_iter().enumerate().map(|(i, (value, label))| {
         let is_selected = value == selected;
         let radius = border::Radius {
             top_left: if i == 0 { RADIUS } else { 0.0 },
@@ -332,12 +451,15 @@ pub fn overlay<'a, M: Clone + 'a>(
     stack![base.into(), opaque(backdrop), pin(opaque(panel)).position(anchor)].into()
 }
 
+// Only the contrast tests use these.
+#[cfg_attr(not(test), allow(dead_code))]
 fn luminance(c: Color) -> f32 {
     let lin = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
     0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
 }
 
 /// WCAG 2.1 contrast ratio between two colours (1.0 to 21.0).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn contrast(a: Color, b: Color) -> f32 {
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
@@ -394,6 +516,28 @@ mod tests {
             assert_ne!(s(f).background, Some(DARK.accent.into()));
         }
         assert_eq!(s(quiet).border.width, 1.0);
+    }
+
+    #[test]
+    fn no_literal_text_sizes_in_views() {
+        let sources = [
+            include_str!("app.rs"),
+            include_str!("reports.rs"),
+            include_str!("research.rs"),
+            include_str!("review.rs"),
+            include_str!("labels.rs"),
+            include_str!("providers.rs"),
+            include_str!("settings.rs"),
+            include_str!("timeline_view.rs"),
+            include_str!("graph_view.rs"),
+            include_str!("map_view.rs"),
+            include_str!("quick.rs"),
+            include_str!("rail.rs"),
+            include_str!("feeds_menu.rs"),
+        ];
+        for src in sources {
+            assert!(!src.contains(".size(1") && !src.contains(".size(2"), "use style::SIZE_* constants");
+        }
     }
 
     #[test]

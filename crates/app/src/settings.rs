@@ -1,10 +1,11 @@
 //! Settings screen: retention, refresh interval and appearance, stored in
 //! the SQLite `settings` table.
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
-use iced::{Element, Font, Task as Cmd, font};
+use iced::widget::{checkbox, column, row, scrollable, text, text_input};
+use iced::{Center, Element, Fill, Task as Cmd};
 
 use crate::db::Db;
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 pub const KEY_RETENTION_DAYS: &str = "retention_days";
 pub const KEY_REFRESH_MINUTES: &str = "refresh_minutes";
@@ -47,7 +48,11 @@ pub enum Msg {
     Loaded(Result<Values, String>),
     Retention(String),
     Refresh(String),
-    Dark(bool),
+    /// Handled by the app: switch to the dark (true) or light theme now.
+    SetDark(bool),
+    /// Handled by the app: the same OPML import and export as the feeds dropdown.
+    ImportOpml,
+    ExportOpml,
     CpuRenderer(bool),
     Save,
     Saved(Result<(Values, usize), String>),
@@ -152,7 +157,7 @@ impl State {
             Msg::Loaded(Err(e)) => self.message = Some(Err(e)),
             Msg::Retention(s) => self.retention = s,
             Msg::Refresh(s) => self.refresh = s,
-            Msg::Dark(d) => self.dark = d,
+            Msg::SetDark(_) | Msg::ImportOpml | Msg::ExportOpml => {}
             Msg::CpuRenderer(on) => self.cpu_renderer = on,
             Msg::Save => match self.parse() {
                 Err(e) => self.message = Some(Err(e)),
@@ -235,55 +240,93 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let mut col = column![
-            text("Settings").size(24).font(bold),
-            text("Storage").size(16).font(bold),
+        fn field<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg, width: f32) -> Element<'a, Msg> {
+            text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1]).width(width).into()
+        }
+        let label = |s: &'static str| text(s).size(SIZE_BODY);
+        let storage = column![
+            style::heading("Storage"),
             row![
-                text("Keep articles for").size(14),
-                text_input("forever", &self.retention).on_input(Msg::Retention).width(90),
-                text("days (empty = forever)").size(14),
+                label("Keep articles for"),
+                field("forever", &self.retention, Msg::Retention, 90.0),
+                label("days (empty = forever)"),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text("Saved articles, annotated articles, confirmed research links and articles in analysis sessions are always kept.")
-                .size(12),
-            text("Feeds").size(16).font(bold),
-            row![
-                text("Refresh feeds every").size(14),
-                text_input("30", &self.refresh).on_input(Msg::Refresh).width(70),
-                text("minutes (0 = manual only)").size(14),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text("Appearance").size(16).font(bold),
-            checkbox(self.dark).label("Dark theme").on_toggle(Msg::Dark),
-            checkbox(self.cpu_renderer)
-                .label("CPU renderer: uses far less memory, draws maps and graphs more slowly (applies after restart)")
-                .on_toggle(Msg::CpuRenderer),
-            button(text("Save")).on_press(Msg::Save),
-            text("Map").size(16).font(bold),
-            row![
-                text_input(juttusihti_fetch::tiles::OSM_TILE_URL, &self.tile_url).on_input(Msg::TileUrl).on_submit(Msg::SaveTileUrl),
-                button(text("Save")).style(button::secondary).on_press(Msg::SaveTileUrl),
-            ]
-            .spacing(8),
-            text("Tile server URL (https, with {z}/{x}/{y}). Respect the provider's usage policy.").size(12),
-            row![
-                text(format!("Tile cache: {:.1} MB", self.tile_cache_bytes as f64 / 1_048_576.0)).size(12),
-                button(text("Clear map tile cache").size(12)).style(button::secondary).on_press(Msg::ClearTiles),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text(format!("Database: {}", self.db_path.display())).size(11),
+            .spacing(SPACE[1])
+            .align_y(Center),
+            style::note(
+                "Saved articles, annotated articles, confirmed research links and articles in analysis sessions are always kept."
+            ),
         ]
-        .spacing(14)
-        .padding(24)
+        .spacing(SPACE[1]);
+        let feeds = column![
+            style::heading("Feeds"),
+            row![
+                label("Refresh feeds every"),
+                field("30", &self.refresh, Msg::Refresh, 70.0),
+                label("minutes (0 = manual only)"),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+            row![
+                style::quiet_button(None, "Import OPML", style::quiet, Some(Msg::ImportOpml)),
+                style::quiet_button(None, "Export OPML", style::quiet, Some(Msg::ExportOpml)),
+            ]
+            .spacing(SPACE[1]),
+        ]
+        .spacing(SPACE[1]);
+        let appearance = column![
+            style::heading("Appearance"),
+            row![
+                style::segmented([(true, "Dark"), (false, "Light")], self.values.dark, Msg::SetDark),
+                checkbox(self.cpu_renderer)
+                    .label(
+                        "CPU renderer: uses far less memory, draws maps and graphs more slowly (applies after restart)"
+                    )
+                    .size(SIZE_BODY)
+                    .text_size(SIZE_BODY)
+                    .style(style::checkbox)
+                    .on_toggle(Msg::CpuRenderer),
+            ]
+            .spacing(SPACE[3])
+            .align_y(Center),
+        ]
+        .spacing(SPACE[1]);
+        let map = column![
+            style::heading("Map"),
+            row![
+                text_input(juttusihti_fetch::tiles::OSM_TILE_URL, &self.tile_url)
+                    .on_input(Msg::TileUrl)
+                    .on_submit(Msg::SaveTileUrl)
+                    .size(SIZE_BODY)
+                    .padding(SPACE[1])
+                    .width(Fill),
+                style::quiet_button(None, "Save", style::quiet, Some(Msg::SaveTileUrl)),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+            style::note("Tile server URL (https, with {z}/{x}/{y}). Respect the provider's usage policy."),
+            row![
+                style::note(format!("Tile cache: {:.1} MB", self.tile_cache_bytes as f64 / 1_048_576.0)),
+                style::quiet_button(None, "Clear map tile cache", style::quiet, Some(Msg::ClearTiles)),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+        ]
+        .spacing(SPACE[1]);
+        let mut col = column![
+            style::title("Settings"),
+            storage,
+            feeds,
+            appearance,
+            style::main_button("Save", Some(Msg::Save)),
+            map,
+            text(format!("Database: {}", self.db_path.display())).size(SIZE_SMALL).style(style::faint),
+        ]
+        .spacing(SPACE[4])
+        .padding(SPACE[4])
         .max_width(720);
-        match &self.message {
-            Some(Ok(m)) => col = col.push(container(text(m).size(13)).padding(8).style(container::success)),
-            Some(Err(m)) => col = col.push(container(text(m).size(13)).padding(8).style(container::danger)),
-            None => {}
+        if let Some(m) = &self.message {
+            col = col.push(style::message(m));
         }
         scrollable(col).into()
     }

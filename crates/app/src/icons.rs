@@ -1,6 +1,4 @@
 //! Bundled Lucide icon font and the icons the interface uses.
-// Consumed by the later restyle tasks; drop this allow once every icon is used.
-#![allow(dead_code)]
 
 use iced::Font;
 use iced::widget::{Text, text};
@@ -36,6 +34,7 @@ pub enum Icon {
     Edit,
     External,
     Help,
+    Check,
 }
 
 /// Codepoints from lucide-static 1.55.0 `font/lucide.css`.
@@ -63,6 +62,7 @@ fn codepoint(i: Icon) -> char {
         Icon::Edit => '\u{e1f9}',         // pencil
         Icon::External => '\u{e0b9}',     // external-link
         Icon::Help => '\u{e082}',         // circle-question-mark
+        Icon::Check => '\u{e06c}',        // check
     }
 }
 
@@ -74,7 +74,7 @@ pub fn icon<'a>(i: Icon) -> Text<'a> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 23] = [
         Icon::News,
         Icon::Saved,
         Icon::Reports,
@@ -97,6 +97,7 @@ mod tests {
         Icon::Edit,
         Icon::External,
         Icon::Help,
+        Icon::Check,
     ];
 
     #[test]

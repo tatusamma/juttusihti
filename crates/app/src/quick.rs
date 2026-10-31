@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use chrono::Local;
 use iced::widget::{button, checkbox, column, container, row, text, tooltip};
-use iced::{Center, Element, Fill, Font, Task as Cmd, Theme, font};
+use iced::{Center, Element, Fill, Task as Cmd};
 use juttusihti_ai::{Control, Progress};
 use juttusihti_core::ai_defaults::{AiDefaults, task_hint};
 use juttusihti_core::analysis::{AnalysisConfig, Task};
@@ -19,7 +19,7 @@ use crate::ai_setup;
 use crate::db::Db;
 use crate::icons::{Icon, icon};
 use crate::research::{RunEvent, cost_text, run_session, thousands};
-use crate::style::{self, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 /// Tasks offered in the panel; relevance needs a topic and lives in the
 /// custom analysis.
@@ -92,9 +92,9 @@ impl State {
         }
     }
 
-    /// "done/total" of the stage being run, while a run is in progress.
+    /// "done/total" of the stage being run, once that stage knows how many requests it makes.
     pub fn badge(&self) -> Option<String> {
-        self.run.as_ref().map(|r| format!("{}/{}", r.done, r.total))
+        self.run.as_ref().filter(|r| r.total > 0).map(|r| format!("{}/{}", r.done, r.total))
     }
 
     /// The result line and session of a run that finished while the popover was closed, once.
@@ -103,6 +103,20 @@ impl State {
             return None;
         }
         self.result.as_ref().map(|(r, session)| (r.clone().unwrap_or_else(|e| e), *session))
+    }
+
+    /// Pretends a run of `session` has started, for tests outside this module.
+    #[cfg(test)]
+    pub fn start_test_run(&mut self, session: i64) {
+        self.run = Some(Running {
+            session,
+            control: Control::default(),
+            stage: "Labels".into(),
+            done: 0,
+            total: 0,
+            tokens: 0,
+            cost: Some(0),
+        });
     }
 
     pub fn is_running(&self) -> bool {
@@ -284,7 +298,7 @@ impl State {
     pub fn view(&self) -> Element<'_, Msg> {
         let idle = self.run.is_none();
         let header = row![
-            text(format!("AI for: {}", self.scope_label)).size(SIZE_TITLE).font(SEMIBOLD).width(Fill),
+            style::title(format!("AI for: {}", self.scope_label)).width(Fill),
             quiet("Setup", Msg::OpenSetup),
             button(icon(Icon::Close)).padding(SPACE[0]).style(style::icon).on_press(Msg::Close),
         ]
@@ -305,6 +319,7 @@ impl State {
                     .label(label)
                     .size(SIZE_BODY)
                     .text_size(SIZE_BODY)
+                    .style(style::checkbox)
                     .on_toggle_maybe(idle.then_some(move |on| Msg::ToggleTask(t, on))),
                 style::tip(task_hint(t)),
                 tooltip::Position::Right,
@@ -346,7 +361,7 @@ impl State {
                 }
                 col = col.push(line);
             }
-            Some((Err(e), _)) => col = col.push(text(e).size(SIZE_SMALL).style(danger)),
+            Some((Err(e), _)) => col = col.push(text(e).size(SIZE_SMALL).style(style::danger)),
             None => {}
         }
         container(col).padding(SPACE[3]).width(WIDTH).style(style::popover).into()
@@ -357,10 +372,7 @@ impl State {
         if let Some(Err(problem)) = &self.ready {
             return column![
                 text(problem).size(SIZE_SMALL).style(style::body),
-                button(text("Open AI setup").size(SIZE_BODY))
-                    .padding([SPACE[1], SPACE[2]])
-                    .style(style::main)
-                    .on_press(Msg::OpenSetup),
+                style::main_button("Open AI setup", Some(Msg::OpenSetup)),
             ]
             .spacing(SPACE[1])
             .into();
@@ -394,12 +406,10 @@ impl State {
         if let Some(w) = over_limit {
             col = col.push(small(format!("⚠ {w}")));
         }
-        col.push(
-            button(text(format!("Send {} articles to {}", s.to_process, config.provider)).size(SIZE_BODY))
-                .padding([SPACE[1], SPACE[2]])
-                .style(style::main)
-                .on_press_maybe(can_send.then_some(Msg::Start)),
-        )
+        col.push(style::main_button(
+            format!("Send {} articles to {}", s.to_process, config.provider),
+            can_send.then_some(Msg::Start),
+        ))
         .push(
             text("Sends the headline and description of each article. Results are suggestions you can undo.")
                 .size(SIZE_SMALL)
@@ -412,19 +422,13 @@ impl State {
 /// Popover width.
 pub const WIDTH: f32 = 340.0;
 
-const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
-
 /// A line of secondary text.
 fn small<'a>(line: impl text::IntoFragment<'a>) -> Element<'a, Msg> {
     text(line).size(SIZE_SMALL).style(style::muted).into()
 }
 
 fn quiet(label: &str, msg: Msg) -> Element<'_, Msg> {
-    button(text(label).size(SIZE_SMALL)).padding([SPACE[0], SPACE[1] + 2.0]).style(style::quiet).on_press(msg).into()
-}
-
-fn danger(theme: &Theme) -> text::Style {
-    text::Style { color: Some(style::tokens(theme).danger) }
+    style::quiet_button(None, label, style::quiet, Some(msg))
 }
 
 #[cfg(test)]
@@ -467,6 +471,14 @@ mod tests {
         assert!(!st.open);
         assert!(st.is_running());
         assert_eq!(st.badge().as_deref(), Some("3/12"));
+    }
+
+    #[test]
+    fn badge_has_no_count_before_the_total_is_known() {
+        let mut st = State::new(test_db());
+        st.run = Some(running(0, 0));
+        assert_eq!(st.badge(), None);
+        assert!(st.is_running());
     }
 
     #[test]
