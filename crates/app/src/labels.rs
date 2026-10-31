@@ -1,11 +1,13 @@
 //! Labels screen: the label vocabulary with counts; rename, merge, delete
 //! and bulk decisions on pending AI suggestions.
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
-use iced::{Element, Fill, Font, Task as Cmd, font};
+use iced::widget::{button, column, pick_list, row, rule, scrollable, text, text_input};
+use iced::{Center, Element, Fill, Task as Cmd};
 use juttusihti_core::{Label, LabelId, Status};
 
 use crate::db::Db;
+use crate::icons::Icon;
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -142,42 +144,46 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let mut list = column![].spacing(2);
         for (l, confirmed, suggested) in &self.labels {
             let label = row![
-                text(&l.name).size(14).width(Fill),
-                text(format!("{confirmed}")).size(12).width(50),
-                text(if *suggested > 0 { format!("+{suggested} AI") } else { String::new() }).size(12).width(70),
-            ];
+                text(&l.name).size(SIZE_BODY).width(Fill),
+                text(format!("{confirmed}")).size(SIZE_SMALL).style(style::muted).width(50),
+                text(if *suggested > 0 { format!("+{suggested} AI") } else { String::new() })
+                    .size(SIZE_SMALL)
+                    .style(style::muted)
+                    .width(70),
+            ]
+            .align_y(Center);
             list = list.push(
                 button(label)
                     .width(Fill)
-                    .padding([6, 10])
-                    .style(if self.selected == Some(l.id) { button::secondary } else { button::text })
+                    .padding([SPACE[1], SPACE[2]])
+                    .style(if self.selected == Some(l.id) { style::row_selected } else { style::row })
                     .on_press(Msg::Select(l.id)),
             );
         }
         if self.labels.is_empty() {
-            list = list.push(text("No labels yet. Create one below or label an article from its preview.").size(13));
+            list = list.push(style::note("No labels yet. Create one below or label an article from its preview."));
         }
         let create = row![
-            text_input("New label", &self.new_name).on_input(Msg::NewName).on_submit(Msg::Create),
-            button(text("Create")).on_press(Msg::Create),
+            input("New label", &self.new_name, Msg::NewName).on_submit(Msg::Create),
+            style::main_button("Create", Some(Msg::Create)),
         ]
-        .spacing(8);
+        .spacing(SPACE[1])
+        .align_y(Center);
         let left = column![
-            text("Labels").size(24).font(bold),
-            text("Counts: confirmed articles, then pending AI suggestions.").size(12),
+            column![style::title("Labels"), style::note("Counts: confirmed articles, then pending AI suggestions.")]
+                .spacing(SPACE[1]),
             scrollable(list).height(Fill),
             create
         ]
-        .spacing(10)
-        .padding(24)
+        .spacing(SPACE[3])
+        .padding(SPACE[4])
         .width(420);
 
         let right: Element<'_, Msg> = match self.labels.iter().find(|(l, ..)| Some(l.id) == self.selected) {
-            None => text("Select a label to edit it.").size(14).into(),
+            None => style::note("Select a label to edit it.").into(),
             Some((l, confirmed, suggested)) => {
                 let targets: Vec<Target> = self
                     .labels
@@ -186,52 +192,71 @@ impl State {
                     .map(|(o, ..)| Target(o.id, o.name.clone()))
                     .collect();
                 let mut col = column![
-                    text(&l.name).size(20).font(bold),
-                    text(format!("{confirmed} confirmed, {suggested} pending AI suggestions")).size(13),
-                    row![
-                        text_input("Name", &self.rename).on_input(Msg::Rename).on_submit(Msg::SaveRename),
-                        button(text("Rename")).on_press(Msg::SaveRename)
+                    column![
+                        style::title(&l.name),
+                        style::note(format!("{confirmed} confirmed, {suggested} pending AI suggestions")),
                     ]
-                    .spacing(8),
+                    .spacing(SPACE[1]),
                     row![
-                        pick_list(targets, self.merge_target.clone(), Msg::MergeTarget).placeholder("Merge into…"),
-                        button(text("Merge"))
-                            .style(button::secondary)
-                            .on_press_maybe(self.merge_target.as_ref().map(|_| Msg::Merge)),
+                        input("Name", &self.rename, Msg::Rename).on_submit(Msg::SaveRename),
+                        style::quiet_button(None, "Rename", style::quiet, Some(Msg::SaveRename)),
                     ]
-                    .spacing(8),
+                    .spacing(SPACE[1])
+                    .align_y(Center),
                     row![
-                        button(text("Accept all suggestions"))
-                            .style(button::success)
-                            .on_press_maybe((*suggested > 0).then_some(Msg::Decide(Status::Confirmed))),
-                        button(text("Reject all suggestions"))
-                            .style(button::secondary)
-                            .on_press_maybe((*suggested > 0).then_some(Msg::Decide(Status::Rejected))),
+                        pick_list(targets, self.merge_target.clone(), Msg::MergeTarget)
+                            .placeholder("Merge into…")
+                            .text_size(SIZE_BODY),
+                        style::quiet_button(
+                            None,
+                            "Merge",
+                            style::quiet,
+                            self.merge_target.as_ref().map(|_| Msg::Merge)
+                        ),
                     ]
-                    .spacing(8),
+                    .spacing(SPACE[1])
+                    .align_y(Center),
+                    row![
+                        style::quiet_button(
+                            Some(Icon::Check),
+                            "Accept all suggestions",
+                            style::quiet,
+                            (*suggested > 0).then_some(Msg::Decide(Status::Confirmed))
+                        ),
+                        style::quiet_button(
+                            None,
+                            "Reject all suggestions",
+                            style::quiet_danger,
+                            (*suggested > 0).then_some(Msg::Decide(Status::Rejected))
+                        ),
+                    ]
+                    .spacing(SPACE[1]),
                 ]
-                .spacing(12);
+                .spacing(SPACE[4]);
                 col = if self.confirm_delete {
                     col.push(
                         row![
-                            text("Delete this label from all articles?").size(13),
-                            button(text("Delete")).style(button::danger).on_press(Msg::ConfirmDelete)
+                            text("Delete this label from all articles?").size(SIZE_SMALL),
+                            style::quiet_button(None, "Delete", style::quiet_danger, Some(Msg::ConfirmDelete)),
                         ]
-                        .spacing(8)
-                        .align_y(iced::Center),
+                        .spacing(SPACE[1])
+                        .align_y(Center),
                     )
                 } else {
-                    col.push(button(text("Delete label")).style(button::danger).on_press(Msg::Delete))
+                    col.push(style::quiet_button(None, "Delete label", style::quiet_danger, Some(Msg::Delete)))
                 };
                 col.into()
             }
         };
-        let mut right_col = column![right].spacing(12).padding(24);
-        match &self.message {
-            Some(Ok(m)) => right_col = right_col.push(container(text(m).size(13)).padding(8).style(container::success)),
-            Some(Err(m)) => right_col = right_col.push(container(text(m).size(13)).padding(8).style(container::danger)),
-            None => {}
+        let mut right_col = column![right].spacing(SPACE[3]).padding(SPACE[4]);
+        if let Some(m) = &self.message {
+            right_col = right_col.push(style::message(m));
         }
-        row![left, right_col].into()
+        row![left, rule::vertical(1), right_col].into()
     }
+}
+
+/// A text field in the screen's size.
+fn input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> iced::widget::TextInput<'a, Msg> {
+    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1])
 }
