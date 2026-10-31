@@ -8,10 +8,8 @@ use std::path::PathBuf;
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::image::Handle;
-use iced::widget::{
-    button, canvas as canvas_widget, checkbox, column, container, pick_list, row, rule, scrollable, text,
-};
-use iced::{Color, Element, Fill, Font, Length, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, Vector, font};
+use iced::widget::{button, canvas as canvas_widget, column, container, pick_list, row, rule, scrollable, text};
+use iced::{Center, Color, Element, Fill, Length, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, Vector};
 use juttusihti_core::analysis::SessionSummary;
 use juttusihti_core::review::LocationRow;
 use juttusihti_core::{ArticleId, LocationRole, Status};
@@ -21,7 +19,9 @@ use juttusihti_fetch::tiles::{
 };
 
 use crate::db::Db;
+use crate::icons::Icon;
 use crate::review::SessionChoice;
+use crate::style::{self, SEMIBOLD, SIZE_BODY, SIZE_SMALL, SPACE};
 
 pub const KEY_TILES_ENABLED: &str = "map_tiles_enabled";
 pub const KEY_TILE_URL: &str = "tile_url";
@@ -277,60 +277,59 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let mut sessions = vec![SessionChoice(0, "All locations".into())];
         sessions.extend(
             self.sessions.iter().map(|s| SessionChoice(s.id, format!("Session #{} · {}", s.id, s.range_label))),
         );
         let selected_session = sessions.iter().find(|c| c.0 == self.session.unwrap_or(0)).cloned();
         let host = self.template.split('/').nth(2).unwrap_or("the tile server").to_string();
+        let tiles_note = if self.tiles_enabled {
+            style::intro(
+                format!("Tiles for the area you view are requested from {host}."),
+                format!(
+                    "Tiles for the area you view are requested from {host}, which sees your IP address and viewing \
+                     area. Tiles are cached locally; nothing is downloaded in the background."
+                ),
+            )
+        } else {
+            style::note("Map tiles are off: only a coordinate grid is shown and nothing is sent anywhere.").into()
+        };
         let mut top = column![
             row![
-                text("Map").size(22).font(bold),
-                pick_list(sessions, selected_session, Msg::Session),
-                checkbox(self.tiles_enabled).label(format!("Load map tiles from {host}")).on_toggle(Msg::EnableTiles),
+                style::title("Map"),
+                pick_list(sessions, selected_session, Msg::Session).text_size(SIZE_SMALL),
+                style::check(self.tiles_enabled, format!("Load map tiles from {host}")).on_toggle(Msg::EnableTiles),
             ]
-            .spacing(12)
-            .align_y(iced::Center),
+            .spacing(SPACE[2])
+            .align_y(Center),
+            tiles_note,
         ]
-        .spacing(6)
-        .padding([12, 16]);
-        if self.tiles_enabled {
-            top = top.push(
-                text(format!(
-                    "Tiles for the area you view are requested from {host}, which sees your IP address and viewing area. \
-                     Tiles are cached locally; nothing is downloaded in the background."
-                ))
-                .size(11),
-            );
-        } else {
-            top = top.push(
-                text("Map tiles are off: only a coordinate grid is shown and nothing is sent anywhere.").size(11),
-            );
-        }
+        .spacing(SPACE[1])
+        .padding([SPACE[2], SPACE[3]]);
         if let Some(id) = self.placing {
             let name = self.locations.iter().find(|l| l.id == id).map_or("", |l| l.place_name.as_str());
             top = top.push(
-                container(text(format!("Click the map where “{name}” is.")).size(12))
-                    .padding(4)
-                    .style(container::warning),
+                container(text(format!("Click the map where “{name}” is.")).size(SIZE_SMALL).style(style::body))
+                    .padding([SPACE[0], SPACE[1]])
+                    .style(style::card),
             );
         }
         if let Some(e) = &self.error {
-            top = top.push(container(text(e).size(12)).padding(4).style(container::danger));
+            top = top.push(text(e).size(SIZE_SMALL).style(style::danger));
         }
 
         let program = MapCanvas { state: self };
         let mut map = column![canvas_widget(program).width(Fill).height(Fill)];
         if self.tiles_enabled {
+            let link = |label: &'static str, url: &'static str| {
+                button(text(label).size(SIZE_SMALL).style(style::muted))
+                    .style(style::row)
+                    .padding([2.0, SPACE[1]])
+                    .on_press(Msg::OpenUrl(url))
+            };
             map = map.push(
-                row![
-                    button(text(ATTRIBUTION).size(11)).style(button::text).on_press(Msg::OpenUrl(OSM_COPYRIGHT_URL)),
-                    button(text("Report a map issue").size(11))
-                        .style(button::text)
-                        .on_press(Msg::OpenUrl(OSM_FIX_THE_MAP_URL)),
-                ]
-                .spacing(8),
+                row![link(ATTRIBUTION, OSM_COPYRIGHT_URL), link("Report a map issue", OSM_FIX_THE_MAP_URL)]
+                    .spacing(SPACE[1]),
             );
         }
         column![
@@ -341,14 +340,13 @@ impl State {
     }
 
     fn view_places(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let placed = self.locations.iter().filter(|l| l.coordinates.is_some()).count();
         let mut col = column![
-            text(format!("{} places, {placed} on the map", self.locations.len())).size(12),
-            text("AI-suggested places have no coordinates. Use “Place on map” after checking the evidence.").size(11),
+            style::note(format!("{} places, {placed} on the map", self.locations.len())),
+            style::note("AI-suggested places have no coordinates. Use “Place on map” after checking the evidence."),
         ]
-        .spacing(6)
-        .padding(12);
+        .spacing(SPACE[1])
+        .padding(SPACE[2]);
         for l in &self.locations {
             let selected = self.selected == Some(l.id);
             let status = match l.status {
@@ -357,56 +355,53 @@ impl State {
                 Status::Rejected => "rejected",
             };
             let mut item = column![
-                button(text(format!("{}{}", if l.ambiguous { "⚠ " } else { "" }, l.place_name)).size(14).font(bold))
-                    .style(button::text)
-                    .padding(0)
-                    .on_press(Msg::Select(l.id)),
-                text(format!("{} · {status}", role_label(l.role))).size(11),
-                text(match l.coordinates {
+                button(
+                    text(format!("{}{}", if l.ambiguous { "⚠ " } else { "" }, l.place_name))
+                        .size(SIZE_BODY)
+                        .font(SEMIBOLD)
+                )
+                .style(style::row)
+                .padding(0)
+                .on_press(Msg::Select(l.id)),
+                style::note(format!("{} · {status}", role_label(l.role))),
+                style::note(match l.coordinates {
                     Some((lat, lon)) =>
                         format!("{lat:.4}, {lon:.4} ({})", l.coordinate_source.as_deref().unwrap_or("?")),
                     None => "Not placed".into(),
-                })
-                .size(11),
+                }),
             ]
             .spacing(2);
             if selected {
                 if let Some(e) = &l.evidence {
-                    item = item.push(text(format!("“{e}”")).size(11));
+                    item = item.push(text(format!("“{e}”")).size(SIZE_SMALL).style(style::faint));
                 }
                 item = item.push(
-                    button(text(l.article_title.clone()).size(11))
-                        .style(button::text)
+                    button(text(l.article_title.clone()).size(SIZE_SMALL).style(style::muted))
+                        .style(style::row)
                         .padding(0)
                         .on_press(Msg::OpenArticle(l.article_id)),
                 );
-                let mut actions = row![].spacing(4);
+                let mut actions = row![].spacing(SPACE[0]);
                 if l.status == Status::Suggested {
-                    actions = actions.push(
-                        button(text("Confirm").size(11))
-                            .style(button::success)
-                            .on_press(Msg::Decide(l.id, Status::Confirmed)),
-                    );
+                    actions = actions.push(style::quiet_button(
+                        Some(Icon::Check),
+                        "Confirm",
+                        style::quiet,
+                        Some(Msg::Decide(l.id, Status::Confirmed)),
+                    ));
                 }
                 actions = actions
-                    .push(
-                        button(text("Reject").size(11))
-                            .style(button::secondary)
-                            .on_press(Msg::Decide(l.id, Status::Rejected)),
-                    )
-                    .push(button(text("Place on map").size(11)).on_press(Msg::PlaceMode(l.id)));
+                    .push(style::quiet_button(None, "Reject", style::quiet, Some(Msg::Decide(l.id, Status::Rejected))))
+                    .push(style::quiet_button(None, "Place on map", style::quiet, Some(Msg::PlaceMode(l.id))));
                 if l.coordinates.is_some() {
                     actions = actions
-                        .push(button(text("Go to").size(11)).style(button::secondary).on_press(Msg::CenterOn(l.id)))
-                        .push(button(text("Clear").size(11)).style(button::text).on_press(Msg::ClearCoordinates(l.id)));
+                        .push(style::quiet_button(None, "Go to", style::quiet, Some(Msg::CenterOn(l.id))))
+                        .push(style::quiet_button(None, "Clear", style::quiet, Some(Msg::ClearCoordinates(l.id))));
                 }
                 item = item.push(actions);
             }
-            col = col.push(container(item).padding(6).style(if selected {
-                container::bordered_box
-            } else {
-                container::transparent
-            }));
+            let card = container(item).padding(SPACE[1]).width(Fill);
+            col = col.push(if selected { card.style(style::card) } else { card });
         }
         scrollable(col).width(Length::FillPortion(1)).into()
     }
