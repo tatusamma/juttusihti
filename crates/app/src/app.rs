@@ -210,6 +210,8 @@ pub struct App {
     add_feed: String,
     refreshing: usize,
     status: Option<String>,
+    /// Session of an AI run whose result line is the status, for its "Review" button.
+    status_review: Option<i64>,
     label_input: String,
     feed_edit: Option<FeedEdit>,
     feeds_open: bool,
@@ -278,6 +280,7 @@ impl App {
             add_feed: String::new(),
             refreshing: 0,
             status,
+            status_review: None,
             label_input: String::new(),
             feed_edit: None,
             feeds_open: false,
@@ -359,6 +362,18 @@ impl App {
         }
     }
 
+    /// The AI popover title: the scope, plus the search when one is active.
+    fn quick_label(&self) -> String {
+        let scope = self.scope_label();
+        if self.active_search.is_empty() { scope } else { format!("{scope} matching “{}”", self.active_search) }
+    }
+
+    /// Replaces the status bar line.
+    fn show_status(&mut self, line: String) {
+        self.status = Some(line);
+        self.status_review = None;
+    }
+
     /// The query behind the article list being viewed.
     fn list_query(&self) -> SearchQuery {
         let filter = self.list_filter();
@@ -380,7 +395,7 @@ impl App {
         let query = self.list_query();
         // An open quick panel follows the list being viewed.
         let retarget = if self.quick.open && !self.quick.is_running() && !self.quick.targets(&query) {
-            self.quick.open(query.clone(), self.scope_label()).map(Message::Quick)
+            self.quick.open(query.clone(), self.quick_label()).map(Message::Quick)
         } else {
             Task::none()
         };
@@ -470,10 +485,11 @@ impl App {
         self.feed_edit = None;
     }
 
-    /// Closes the feeds dropdown and the ⋯ menu.
+    /// Closes the feeds dropdown, the ⋯ menu and the AI popover (an AI run keeps going).
     fn close_overlays(&mut self) {
         self.close_feeds_menu();
         self.list_menu_open = false;
+        let _ = self.quick.update(crate::quick::Msg::Close);
     }
 
     /// Unread articles in the current News scope.
@@ -579,7 +595,7 @@ impl App {
                     if juttusihti_core::feed::is_web_url(&url)
                         && let Err(e) = open::that_detached(&url)
                     {
-                        self.status = Some(format!("Could not open browser: {e}"));
+                        self.show_status(format!("Could not open browser: {e}"));
                     }
                 }
                 Task::none()
@@ -623,7 +639,7 @@ impl App {
                 if input.is_empty() {
                     return Task::none();
                 }
-                self.status = Some(format!("Looking for feeds at {input}…"));
+                self.show_status(format!("Looking for feeds at {input}…"));
                 let db = self.db.clone();
                 Task::perform(
                     async move {
@@ -641,7 +657,7 @@ impl App {
             }
             Message::FeedAdded(Ok((id, url))) => {
                 self.add_feed.clear();
-                self.status = Some(format!("Subscribed to {url}"));
+                self.show_status(format!("Subscribed to {url}"));
                 let refresh = self.load_sidebar().chain(Task::done(Message::SetScope(Scope::Feed(id))));
                 let feed = Feed {
                     id,
@@ -694,6 +710,7 @@ impl App {
                     self.close_feeds_menu();
                 } else {
                     self.list_menu_open = false;
+                    let _ = self.quick.update(crate::quick::Msg::Close);
                     self.feeds_open = true;
                 }
                 Task::none()
@@ -732,7 +749,7 @@ impl App {
                 if let Err(e) = &result {
                     let name = self.sidebar.feeds.iter().find(|f| f.id == id).map_or("feed", |f| f.title.as_str());
                     tracing::warn!(feed = id, error = %e, "refresh failed");
-                    self.status = Some(format!("{name}: {e}"));
+                    self.show_status(format!("{name}: {e}"));
                 }
                 if self.refreshing == 0 {
                     return Task::batch([self.load_sidebar(), self.load_list()]);
@@ -760,7 +777,7 @@ impl App {
             }
             Message::Imported(Ok((in_file, added))) => {
                 if in_file > 0 {
-                    self.status = Some(format!("Imported {added} new of {in_file} subscriptions"));
+                    self.show_status(format!("Imported {added} new of {in_file} subscriptions"));
                 }
                 self.load_sidebar().chain(Task::done(Message::RefreshAll))
             }
@@ -785,7 +802,7 @@ impl App {
             }
             Message::Exported(Ok(path)) => {
                 if let Some(p) = path {
-                    self.status = Some(format!("Exported subscriptions to {}", p.display()));
+                    self.show_status(format!("Exported subscriptions to {}", p.display()));
                 }
                 Task::none()
             }
@@ -862,7 +879,7 @@ impl App {
             }
             Message::HeadlineDecided(r) => {
                 if let Err(e) = r {
-                    self.status = Some(e);
+                    self.show_status(e);
                 }
                 Task::none()
             }
@@ -874,13 +891,16 @@ impl App {
             }
             Message::Providers(msg) => self.providers.update(msg).map(Message::Providers),
             Message::OpenQuick => {
-                if self.quick.open && !self.quick.is_running() {
-                    return self.quick.update(crate::quick::Msg::Close).map(Message::Quick);
+                let open = self.quick.open;
+                self.close_overlays();
+                if open {
+                    return Task::none();
                 }
-                self.quick.open(self.list_query(), self.scope_label()).map(Message::Quick)
+                self.quick.open(self.list_query(), self.quick_label()).map(Message::Quick)
             }
             Message::Quick(crate::quick::Msg::OpenSetup) => self.update(Message::ShowScreen(Screen::Providers)),
             Message::Quick(crate::quick::Msg::Review(id)) => {
+                self.close_overlays();
                 self.screen = Screen::Review;
                 self.review.open(id).map(Message::Review)
             }
@@ -892,6 +912,11 @@ impl App {
                         | crate::quick::Msg::Run(crate::research::RunEvent::Finished(_))
                 );
                 let task = self.quick.update(msg).map(Message::Quick);
+                // A run that finished while the popover was closed reports in the status bar.
+                if let Some((line, session)) = self.quick.take_finished() {
+                    self.show_status(line);
+                    self.status_review = session;
+                }
                 if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
             }
             Message::Settings(msg) => {
@@ -1005,6 +1030,7 @@ impl App {
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
             Message::DismissStatus => {
                 self.status = None;
+                self.status_review = None;
                 Task::none()
             }
             Message::SidebarLoaded(Err(e))
@@ -1018,7 +1044,7 @@ impl App {
             | Message::LabelsChanged(Err(e))
             | Message::FeedSaved(Err(e)) => {
                 tracing::warn!(error = %e, "operation failed");
-                self.status = Some(e);
+                self.show_status(e);
                 Task::none()
             }
         }
@@ -1077,19 +1103,24 @@ impl App {
         let body = row![rail::view(self.place, self.screen), rule::vertical(1), main].height(Fill);
         let mut layout = column![self.view_top_bar(), rule::horizontal(1), body];
         if let Some(status) = &self.status {
-            layout = layout.push(
-                container(
-                    row![
-                        text(status).size(13).width(Fill),
-                        button(text("✕").size(12)).style(button::text).on_press(Message::DismissStatus)
-                    ]
-                    .align_y(iced::Center),
-                )
-                .padding([4, 12])
-                .style(container::secondary),
+            let mut line = row![text(status).size(SIZE_SMALL).width(Fill)].spacing(SPACE[1]).align_y(Center);
+            if let Some(id) = self.status_review {
+                line = line.push(quiet_button(
+                    None,
+                    "Review",
+                    style::quiet,
+                    Some(Message::Quick(crate::quick::Msg::Review(id))),
+                ));
+            }
+            line = line.push(
+                button(icon(Icon::Close).size(SIZE_SMALL))
+                    .padding(SPACE[0])
+                    .style(style::icon)
+                    .on_press(Message::DismissStatus),
             );
+            layout = layout.push(container(line).padding([SPACE[0], SPACE[2]]).style(style::status));
         }
-        // Both menus open just under the list header.
+        // The menus and the AI popover open just under the list header.
         let below_header = TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT;
         if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
             // Under the dropdown button at the left of the list header.
@@ -1109,6 +1140,13 @@ impl App {
             let left = rail::WIDTH + 1.0;
             let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
             return style::overlay(layout, self.view_list_menu(), Point::new(x, below_header), Message::CloseOverlays);
+        }
+        if self.quick.open && self.screen == Screen::Reader {
+            // Right-aligned under the ✨ button, like the ⋯ menu.
+            let left = rail::WIDTH + 1.0;
+            let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
+            let panel = self.quick.view().map(Message::Quick);
+            return style::overlay(layout, panel, Point::new(x, below_header), Message::CloseOverlays);
         }
         layout.into()
     }
@@ -1193,19 +1231,32 @@ impl App {
                 header.push(container(text("Saved").size(SIZE_BODY).font(SEMIBOLD)).padding([0.0, SPACE[1]]))
             }
         };
-        header = header
-            .push(Space::new().width(Fill))
-            .push(header_icon(Icon::Sparkles, "AI for this list", self.quick.open, Message::OpenQuick))
-            .push(header_icon(Icon::More, "More", self.list_menu_open, Message::ToggleListMenu));
-        let mut col = column![container(header).padding([0.0, LIST_HEADER_PAD]).center_y(LIST_HEADER_HEIGHT)];
-        if self.quick.open {
-            col = col.push(container(self.quick.view().map(Message::Quick)).padding([SPACE[0], LIST_HEADER_PAD]));
-        }
-        col.push(rule::horizontal(1))
+        let more = header_icon(Icon::More, "More", self.list_menu_open, Message::ToggleListMenu);
+        header = header.push(Space::new().width(Fill)).push(self.view_quick_button()).push(more);
+        column![container(header).padding([0.0, LIST_HEADER_PAD]).center_y(LIST_HEADER_HEIGHT)]
+            .push(rule::horizontal(1))
             .push(scrollable(list).height(Fill))
             .push(rule::horizontal(1))
             .push(self.view_list_footer())
             .into()
+    }
+
+    /// The ✨ button; while an AI run goes on it also shows the run's progress.
+    fn view_quick_button(&self) -> Element<'_, Message> {
+        let mut content = row![icon(Icon::Sparkles)].spacing(SPACE[0]).align_y(Center);
+        if let Some(badge) = self.quick.badge() {
+            content = content.push(text(badge).size(SIZE_SMALL).style(style::accent));
+        }
+        let tip = if self.quick.is_running() { "AI run in progress" } else { "AI for this list" };
+        tooltip(
+            button(content)
+                .padding(SPACE[0] + 2.0)
+                .style(if self.quick.open { style::row_selected } else { style::icon })
+                .on_press(Message::OpenQuick),
+            style::tip(tip),
+            tooltip::Position::Bottom,
+        )
+        .into()
     }
 
     /// One article: unread dot, headline, "Source · time" and the search snippet.
@@ -1597,6 +1648,32 @@ mod tests {
         let _ = app.update(Message::ToggleListMenu);
         let _ = app.update(Message::GoPlace(Place::Saved));
         assert!(!app.list_menu_open);
+    }
+
+    #[test]
+    fn ai_popover_is_one_of_the_overlays() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::ToggleListMenu);
+        let _ = app.update(Message::OpenQuick);
+        assert!(app.quick.open);
+        assert!(!app.list_menu_open);
+        let _ = app.update(Message::ToggleFeedsMenu);
+        assert!(app.feeds_open);
+        assert!(!app.quick.open);
+        let _ = app.update(Message::OpenQuick);
+        let _ = app.update(Message::Key(Key::Named(keyboard::key::Named::Escape), Default::default()));
+        assert!(!app.quick.open);
+        let _ = app.update(Message::OpenQuick);
+        let _ = app.update(Message::OpenQuick);
+        assert!(!app.quick.open);
+    }
+
+    #[test]
+    fn ai_popover_title_names_the_search() {
+        let (mut app, _) = app_with_feed();
+        assert_eq!(app.quick_label(), "All feeds");
+        app.active_search = "vaalit".into();
+        assert_eq!(app.quick_label(), "All feeds matching “vaalit”");
     }
 
     #[test]

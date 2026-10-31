@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 
 use chrono::Local;
-use iced::widget::{button, checkbox, column, container, row, text};
-use iced::{Element, Fill, Font, Task as Cmd, font};
+use iced::widget::{button, checkbox, column, container, row, text, tooltip};
+use iced::{Center, Element, Fill, Font, Task as Cmd, Theme, font};
 use juttusihti_ai::{Control, Progress};
 use juttusihti_core::ai_defaults::{AiDefaults, task_hint};
 use juttusihti_core::analysis::{AnalysisConfig, Task};
@@ -17,7 +17,9 @@ use juttusihti_core::search::SearchQuery;
 
 use crate::ai_setup;
 use crate::db::Db;
+use crate::icons::{Icon, icon};
 use crate::research::{RunEvent, cost_text, run_session, thousands};
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
 
 /// Tasks offered in the panel; relevance needs a topic and lives in the
 /// custom analysis.
@@ -67,6 +69,8 @@ pub struct State {
     run: Option<Running>,
     /// Outcome of the last run (or an error), and its session.
     result: Option<(Result<String, String>, Option<i64>)>,
+    /// A run finished while the popover was closed and the app has not shown its result yet.
+    finished_unseen: bool,
 }
 
 impl State {
@@ -84,7 +88,21 @@ impl State {
             estimate: None,
             run: None,
             result: None,
+            finished_unseen: false,
         }
+    }
+
+    /// "done/total" of the stage being run, while a run is in progress.
+    pub fn badge(&self) -> Option<String> {
+        self.run.as_ref().map(|r| format!("{}/{}", r.done, r.total))
+    }
+
+    /// The result line and session of a run that finished while the popover was closed, once.
+    pub fn take_finished(&mut self) -> Option<(String, Option<i64>)> {
+        if !std::mem::take(&mut self.finished_unseen) {
+            return None;
+        }
+        self.result.as_ref().map(|(r, session)| (r.clone().unwrap_or_else(|e| e), *session))
     }
 
     pub fn is_running(&self) -> bool {
@@ -241,6 +259,7 @@ impl State {
                     }),
                     session,
                 ));
+                self.finished_unseen = !self.open;
                 // Articles are now cached for these tasks: refresh the numbers.
                 return self.estimate();
             }
@@ -254,32 +273,25 @@ impl State {
                     r.control.cancel();
                 }
             }
-            Msg::Close => {
-                if self.run.is_none() {
-                    self.open = false;
-                }
-            }
+            // Closing never stops a run; the ✨ button keeps showing its progress.
+            Msg::Close => self.open = false,
             Msg::OpenSetup | Msg::Review(_) => {}
         }
         Cmd::none()
     }
 
+    /// The popover: title, tasks, model and estimate, send, then progress or the last result.
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let mut col = column![
-            row![
-                text(format!("AI for: {}", self.scope_label)).size(13).font(bold).width(Fill),
-                button(text("Setup").size(12)).style(button::text).on_press(Msg::OpenSetup),
-                button(text("Close").size(12))
-                    .style(button::text)
-                    .on_press_maybe(self.run.is_none().then_some(Msg::Close)),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
+        let idle = self.run.is_none();
+        let header = row![
+            text(format!("AI for: {}", self.scope_label)).size(SIZE_TITLE).font(SEMIBOLD).width(Fill),
+            quiet("Setup", Msg::OpenSetup),
+            button(icon(Icon::Close)).padding(SPACE[0]).style(style::icon).on_press(Msg::Close),
         ]
-        .spacing(6);
+        .spacing(SPACE[1])
+        .align_y(Center);
 
-        let mut tasks = row![].spacing(12);
+        let mut tasks = column![].spacing(SPACE[1]);
         for t in QUICK_TASKS {
             let label = match t {
                 Task::Headlines => "Fix clickbait headlines",
@@ -288,72 +300,74 @@ impl State {
                 Task::Entities => "People & places",
                 _ => "Summary",
             };
-            tasks = tasks.push(iced::widget::tooltip(
+            tasks = tasks.push(tooltip(
                 checkbox(self.tasks.contains(&t))
                     .label(label)
-                    .size(14)
-                    .text_size(12)
-                    .on_toggle_maybe(self.run.is_none().then_some(move |on| Msg::ToggleTask(t, on))),
-                container(text(task_hint(t)).size(11)).padding(4).style(container::rounded_box),
-                iced::widget::tooltip::Position::Bottom,
+                    .size(SIZE_BODY)
+                    .text_size(SIZE_BODY)
+                    .on_toggle_maybe(idle.then_some(move |on| Msg::ToggleTask(t, on))),
+                style::tip(task_hint(t)),
+                tooltip::Position::Right,
             ));
         }
-        col = col.push(tasks);
 
+        let mut col = column![header, tasks].spacing(SPACE[2]);
         if let Some(d) = &self.defaults {
-            col = col.push(text(format!("Model: {}", ai_setup::describe(d))).size(11));
+            col = col.push(small(format!("Model: {}", ai_setup::describe(d))));
         }
+        col = col.push(self.view_send());
 
         if let Some(r) = &self.run {
+            let progress = format!(
+                "{}: {}/{} · {} tokens · {}",
+                r.stage,
+                r.done,
+                r.total,
+                thousands(r.tokens),
+                cost_text(self.estimate.as_ref().map(|(c, _)| c.billing), r.cost)
+            );
             col = col.push(
                 row![
-                    text(format!(
-                        "{}: {}/{} · {} tokens · {}",
-                        r.stage,
-                        r.done,
-                        r.total,
-                        thousands(r.tokens),
-                        cost_text(self.estimate.as_ref().map(|(c, _)| c.billing), r.cost)
-                    ))
-                    .size(12)
-                    .width(Fill),
-                    button(text("Pause").size(12)).style(button::secondary).on_press(Msg::Pause),
-                    button(text("Cancel").size(12)).style(button::danger).on_press(Msg::Cancel),
+                    text(progress).size(SIZE_SMALL).style(style::body).width(Fill),
+                    quiet("Pause", Msg::Pause),
+                    quiet("Cancel", Msg::Cancel),
                 ]
-                .spacing(6)
-                .align_y(iced::Center),
+                .spacing(SPACE[1])
+                .align_y(Center),
             );
-        } else {
-            col = col.push(self.view_send());
         }
 
         match &self.result {
             Some((Ok(m), session)) => {
-                let mut r = row![text(m).size(12).width(Fill)].spacing(6).align_y(iced::Center);
+                let mut line =
+                    row![text(m).size(SIZE_SMALL).style(style::body).width(Fill)].spacing(SPACE[1]).align_y(Center);
                 if let Some(id) = session {
-                    r = r.push(button(text("Review").size(12)).style(button::text).on_press(Msg::Review(*id)));
+                    line = line.push(quiet("Review", Msg::Review(*id)));
                 }
-                col = col.push(container(r).padding(6).style(container::success));
+                col = col.push(line);
             }
-            Some((Err(e), _)) => col = col.push(container(text(e).size(12)).padding(6).style(container::danger)),
+            Some((Err(e), _)) => col = col.push(text(e).size(SIZE_SMALL).style(danger)),
             None => {}
         }
-        container(col).padding(10).width(Fill).style(container::bordered_box).into()
+        container(col).padding(SPACE[3]).width(WIDTH).style(style::popover).into()
     }
 
+    /// The estimate line, the send button and the note on what is sent; or why there is nothing to send.
     fn view_send(&self) -> Element<'_, Msg> {
         if let Some(Err(problem)) = &self.ready {
-            return row![
-                text(problem).size(12).width(Fill),
-                button(text("Open AI setup").size(12)).on_press(Msg::OpenSetup),
+            return column![
+                text(problem).size(SIZE_SMALL).style(style::body),
+                button(text("Open AI setup").size(SIZE_BODY))
+                    .padding([SPACE[1], SPACE[2]])
+                    .style(style::main)
+                    .on_press(Msg::OpenSetup),
             ]
-            .spacing(6)
-            .align_y(iced::Center)
+            .spacing(SPACE[1])
             .into();
         }
-        let Some((config, e)) = &self.estimate else { return text("Estimating…").size(12).into() };
+        let Some((config, e)) = &self.estimate else { return small("Estimating…") };
         if self.tasks.is_empty() {
-            return text("Choose what the AI should do.").size(12).into();
+            return small("Choose what the AI should do.");
         }
         let s = &e.stats;
         if s.to_process == 0 {
@@ -362,31 +376,106 @@ impl State {
             } else {
                 format!("All {} articles here are already analyzed for these tasks.", s.selected)
             };
-            return text(msg).size(12).into();
+            return small(msg);
         }
         let expected = e.expected();
         let cost = cost_text(Some(config.billing), expected.cost);
         let over_limit = e.warnings.iter().find(|w| w.contains("limit") || w.contains("No price"));
-        let mut col = column![
-            text(format!(
-                "{} new of the newest {} articles · {} requests · about {} tokens · {}",
-                s.to_process,
-                s.selected,
-                e.requests,
-                thousands(expected.usage.total()),
-                cost
-            ))
-            .size(12),
-            button(text(format!("Send {} articles to {}", s.to_process, config.provider)).size(13))
-                .on_press_maybe((matches!(self.ready, Some(Ok(()))) && e.price_known).then_some(Msg::Start)),
-        ]
-        .spacing(6);
+        let can_send = self.run.is_none() && matches!(self.ready, Some(Ok(()))) && e.price_known;
+        let mut col = column![small(format!(
+            "{} new of the newest {} articles · {} requests · about {} tokens · {}",
+            s.to_process,
+            s.selected,
+            e.requests,
+            thousands(expected.usage.total()),
+            cost
+        ))]
+        .spacing(SPACE[2]);
         if let Some(w) = over_limit {
-            col = col.push(text(format!("⚠ {w}")).size(11));
+            col = col.push(small(format!("⚠ {w}")));
         }
-        col = col.push(
-            text("Sends the headline and description of each article. Results are suggestions you can undo.").size(11),
-        );
-        col.into()
+        col.push(
+            button(text(format!("Send {} articles to {}", s.to_process, config.provider)).size(SIZE_BODY))
+                .padding([SPACE[1], SPACE[2]])
+                .style(style::main)
+                .on_press_maybe(can_send.then_some(Msg::Start)),
+        )
+        .push(
+            text("Sends the headline and description of each article. Results are suggestions you can undo.")
+                .size(SIZE_SMALL)
+                .style(style::faint),
+        )
+        .into()
+    }
+}
+
+/// Popover width.
+pub const WIDTH: f32 = 340.0;
+
+const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
+
+/// A line of secondary text.
+fn small<'a>(line: impl text::IntoFragment<'a>) -> Element<'a, Msg> {
+    text(line).size(SIZE_SMALL).style(style::muted).into()
+}
+
+fn quiet(label: &str, msg: Msg) -> Element<'_, Msg> {
+    button(text(label).size(SIZE_SMALL)).padding([SPACE[0], SPACE[1] + 2.0]).style(style::quiet).on_press(msg).into()
+}
+
+fn danger(theme: &Theme) -> text::Style {
+    text::Style { color: Some(style::tokens(theme).danger) }
+}
+
+#[cfg(test)]
+mod tests {
+    use juttusihti_ai::RunSummary;
+    use juttusihti_core::store::Store;
+
+    use super::*;
+
+    fn test_db() -> Db {
+        Db::new(Store::open_in_memory().unwrap())
+    }
+
+    fn running(done: usize, total: usize) -> Running {
+        Running {
+            session: 1,
+            control: Control::default(),
+            stage: "Labels".into(),
+            done,
+            total,
+            tokens: 0,
+            cost: Some(0),
+        }
+    }
+
+    /// Ends the current run as session `session`.
+    fn finish(st: &mut State, session: i64) {
+        if let Some(r) = st.run.as_mut() {
+            r.session = session;
+        }
+        let _ = st.update(Msg::Run(RunEvent::Finished(Ok(RunSummary::default()))));
+    }
+
+    #[test]
+    fn closing_mid_run_keeps_the_run() {
+        let mut st = State::new(test_db());
+        st.open = true;
+        st.run = Some(running(3, 12));
+        let _ = st.update(Msg::Close);
+        assert!(!st.open);
+        assert!(st.is_running());
+        assert_eq!(st.badge().as_deref(), Some("3/12"));
+    }
+
+    #[test]
+    fn finished_while_closed_is_reported_once() {
+        let mut st = State::new(test_db());
+        st.run = Some(running(12, 12));
+        st.open = false;
+        finish(&mut st, 7); // drives Msg::Run(RunEvent::Finished…) for session 7
+        assert_eq!(st.take_finished().map(|(_, s)| s), Some(Some(7)));
+        assert!(st.take_finished().is_none());
     }
 }
