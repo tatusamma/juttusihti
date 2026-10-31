@@ -33,7 +33,7 @@ pub enum Icon {
     ChevronRight,
     Close,
     Star,
-    StarFilled,
+    Edit,
     External,
     Help,
 }
@@ -60,7 +60,7 @@ fn codepoint(i: Icon) -> char {
         Icon::ChevronRight => '\u{e06f}', // chevron-right
         Icon::Close => '\u{e1b2}',        // x
         Icon::Star => '\u{e176}',         // star
-        Icon::StarFilled => '\u{e707}',   // star-check (Lucide has no filled star)
+        Icon::Edit => '\u{e1f9}',         // pencil
         Icon::External => '\u{e0b9}',     // external-link
         Icon::Help => '\u{e082}',         // circle-question-mark
     }
@@ -94,7 +94,7 @@ mod tests {
         Icon::ChevronRight,
         Icon::Close,
         Icon::Star,
-        Icon::StarFilled,
+        Icon::Edit,
         Icon::External,
         Icon::Help,
     ];

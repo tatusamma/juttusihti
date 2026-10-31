@@ -14,10 +14,12 @@ use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 pub const WIDTH: f32 = 340.0;
 /// Height at which the feed list starts to scroll.
 const LIST_MAX_HEIGHT: f32 = 420.0;
+/// Longest scope name the dropdown button shows before cutting it with "…".
+const BUTTON_MAX_CHARS: usize = 28;
 
 /// The dropdown button: current scope, its unread count and a chevron.
 pub fn button<'a>(label: String, unread: u64, open: bool) -> Element<'a, Message> {
-    let mut content = row![text(label).size(SIZE_BODY)].spacing(SPACE[1]).align_y(Center);
+    let mut content = row![text(shorten(&label, BUTTON_MAX_CHARS)).size(SIZE_BODY)].spacing(SPACE[1]).align_y(Center);
     if unread > 0 {
         content = content.push(text(unread.to_string()).size(SIZE_SMALL).style(style::faint));
     }
@@ -29,20 +31,31 @@ pub fn button<'a>(label: String, unread: u64, open: bool) -> Element<'a, Message
         .into()
 }
 
+/// `label` cut to at most `max` characters, ending in "…" when cut.
+fn shorten(label: &str, max: usize) -> String {
+    if label.chars().count() <= max {
+        return label.to_string();
+    }
+    let mut cut: String = label.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// The dropdown panel. `edit` is the feed whose edit form is open; `confirm` the feed
-/// waiting for an "Unsubscribe from …?" answer.
+/// waiting for an "Unsubscribe from …?" answer; `can_add` is false without networking.
 pub fn panel<'a>(
     sidebar: &'a Sidebar,
     scope: Scope,
     add_feed: &'a str,
     edit: Option<&'a FeedEdit>,
     confirm: Option<FeedId>,
+    can_add: bool,
 ) -> Element<'a, Message> {
     let unread_of = |id: FeedId| sidebar.unread.iter().find(|(f, _)| *f == id).map_or(0, |(_, n)| *n);
     let feed_entry = |f: &'a Feed, indent: bool| -> Element<'a, Message> {
         let label = if f.last_error.is_some() { format!("⚠ {}", f.title) } else { f.title.clone() };
         let edit_button = tooltip(
-            Button::new(icon(Icon::Settings).size(SIZE_SMALL))
+            Button::new(icon(Icon::Edit).size(SIZE_SMALL))
                 .padding(SPACE[0])
                 .style(style::icon)
                 .on_press(Message::EditFeed(f.id)),
@@ -107,7 +120,7 @@ pub fn panel<'a>(
             Button::new(text("Add").size(SIZE_BODY))
                 .padding([SPACE[1], SPACE[2]])
                 .style(style::main)
-                .on_press(Message::AddFeed),
+                .on_press_maybe(can_add.then_some(Message::AddFeed)),
         ]
         .spacing(SPACE[1])
         .align_y(Center),
@@ -211,4 +224,15 @@ fn confirm_unsubscribe<'a>(feed: &'a Feed) -> Element<'a, Message> {
     )
     .padding([SPACE[1], SPACE[1]])
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_scope_names_are_shortened() {
+        assert_eq!(shorten("Yle Uutiset", 28), "Yle Uutiset");
+        assert_eq!(shorten("Helsingin Sanomat – Kotimaa", 10), "Helsingin…");
+    }
 }

@@ -131,6 +131,11 @@ pub fn quiet(theme: &Theme, status: button::Status) -> button::Style {
     outlined(theme, status, tokens(theme).body)
 }
 
+/// Outlined button in its on/saved state: accent text.
+pub fn quiet_active(theme: &Theme, status: button::Status) -> button::Style {
+    outlined(theme, status, tokens(theme).accent)
+}
+
 /// Outlined button for destructive actions.
 pub fn quiet_danger(theme: &Theme, status: button::Status) -> button::Style {
     outlined(theme, status, tokens(theme).danger)
@@ -180,6 +185,24 @@ pub fn popover(theme: &Theme) -> container::Style {
         border: border::rounded(10.0).width(1.0).color(t.line),
         shadow: Shadow { color: Color { a: 0.25, ..Color::BLACK }, offset: Vector::new(0.0, 4.0), blur_radius: 16.0 },
         ..pane(theme)
+    }
+}
+
+/// The thin accent edge marking the selected list row.
+pub fn accent_edge(theme: &Theme) -> container::Style {
+    container::Style {
+        background: fill(tokens(theme).accent),
+        border: border::rounded(1.0),
+        ..container::Style::default()
+    }
+}
+
+/// The small accent dot marking an unread article.
+pub fn unread_dot(theme: &Theme) -> container::Style {
+    container::Style {
+        background: fill(tokens(theme).accent),
+        border: border::rounded(3.0),
+        ..container::Style::default()
     }
 }
 
@@ -319,7 +342,7 @@ mod tests {
         let th = theme(true);
         let s = |f: fn(&Theme, button::Status) -> button::Style| f(&th, button::Status::Active);
         assert_eq!(s(main).background, Some(DARK.accent.into()));
-        for f in [quiet, quiet_danger, icon, row] {
+        for f in [quiet, quiet_active, quiet_danger, icon, row] {
             assert_ne!(s(f).background, Some(DARK.accent.into()));
         }
         assert_eq!(s(quiet).border.width, 1.0);
