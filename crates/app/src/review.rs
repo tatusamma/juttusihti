@@ -1,12 +1,14 @@
 //! Review screen: confirm or reject what an analysis session suggested.
 
-use iced::widget::{Space, button, checkbox, column, container, pick_list, row, scrollable, text};
-use iced::{Element, Fill, Font, Length, Task as Cmd, font};
+use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text};
+use iced::{Center, Element, Fill, Length, Task as Cmd};
 use juttusihti_core::analysis::SessionSummary;
 use juttusihti_core::review::{MentionRow, RelationshipRow, RelevanceRow, ReviewCounts, ReviewKind};
 use juttusihti_core::{ArticleId, RelationshipKind, Status};
 
 use crate::db::Db;
+use crate::icons::Icon;
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 const LIMIT: u32 = 300;
 
@@ -233,7 +235,6 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let choices: Vec<SessionChoice> = self
             .sessions
             .iter()
@@ -243,33 +244,33 @@ impl State {
             .collect();
         let selected = choices.iter().find(|c| Some(c.0) == self.session).cloned();
         let c = self.data.counts;
-        let tab = |t: Tab, label: String| {
-            button(text(label).size(13))
-                .style(if self.tab == t { button::primary } else { button::secondary })
-                .on_press(Msg::Tab(t))
-        };
+        let tabs = [
+            (Tab::Entities, format!("Entities ({})", c.entities)),
+            (Tab::Relationships, format!("Relationships ({})", c.relationships)),
+            (Tab::Relevance, format!("Relevance ({})", c.relevance)),
+            (Tab::Summary, if c.has_summary { "Summary".into() } else { "Summary (none)".into() }),
+        ];
         let header = column![
-            text("Review AI suggestions").size(24).font(bold),
-            text("Nothing here is treated as fact until you confirm it. Rejected items stay recorded but hidden.")
-                .size(12),
-            row![
-                pick_list(choices, selected, Msg::Select).placeholder("Choose a session"),
-                checkbox(self.show_all).label("Show decided items").on_toggle(Msg::ShowAll),
+            column![
+                style::title("Review AI suggestions"),
+                style::intro(
+                    "Nothing here is treated as fact until you confirm it.",
+                    "Nothing here is treated as fact until you confirm it. Rejected items stay recorded but hidden.",
+                ),
             ]
-            .spacing(12)
-            .align_y(iced::Center),
+            .spacing(SPACE[1]),
             row![
-                tab(Tab::Entities, format!("Entities ({})", c.entities)),
-                tab(Tab::Relationships, format!("Relationships ({})", c.relationships)),
-                tab(Tab::Relevance, format!("Relevance ({})", c.relevance)),
-                tab(Tab::Summary, if c.has_summary { "Summary".into() } else { "Summary (none)".into() }),
+                pick_list(choices, selected, Msg::Select).placeholder("Choose a session").text_size(SIZE_BODY),
+                style::check(self.show_all, "Show decided items").on_toggle(Msg::ShowAll),
             ]
-            .spacing(6),
+            .spacing(SPACE[2])
+            .align_y(Center),
+            style::segmented(tabs, self.tab, Msg::Tab),
         ]
-        .spacing(10);
+        .spacing(SPACE[3]);
 
         let body: Element<'_, Msg> = if self.session.is_none() {
-            text("Run an analysis first; its suggestions appear here.").size(14).into()
+            style::note("Run an analysis first; its suggestions appear here.").into()
         } else {
             match self.tab {
                 Tab::Entities => self.view_entities(),
@@ -278,19 +279,20 @@ impl State {
                 Tab::Summary => self.view_summary(),
             }
         };
-        let mut col = column![header, body].spacing(16).padding(24);
+        let mut col = column![header, body].spacing(SPACE[4]).padding(SPACE[4]);
         if let Some(e) = &self.error {
-            col = col.push(container(text(e).size(12)).padding(8).style(container::danger));
+            col = col.push(text(e).size(SIZE_SMALL).style(style::danger));
         }
         scrollable(col).height(Fill).into()
     }
 
     fn view_entities(&self) -> Element<'_, Msg> {
-        let mut col = column![bulk(ReviewKind::Entities, self.data.counts.entities)].spacing(4);
+        let mut col = column![bulk(ReviewKind::Entities, self.data.counts.entities)].spacing(SPACE[1]);
         for m in &self.data.mentions {
             col = col.push(item_row(
                 column![
-                    text(format!("{} · {} · {}", m.entity_name, m.kind.as_str(), m.role.replace('_', " "))).size(14),
+                    text(format!("{} · {} · {}", m.entity_name, m.kind.as_str(), m.role.replace('_', " ")))
+                        .size(SIZE_BODY),
                     article_link(m.article_id, &m.article_title),
                     evidence(m.evidence.as_deref()),
                 ]
@@ -305,17 +307,18 @@ impl State {
     }
 
     fn view_relationships(&self) -> Element<'_, Msg> {
-        let mut col = column![bulk(ReviewKind::Relationships, self.data.counts.relationships)].spacing(4);
+        let mut col = column![bulk(ReviewKind::Relationships, self.data.counts.relationships)].spacing(SPACE[1]);
         for r in &self.data.relationships {
             let conf = r.confidence.map(|c| format!(" · model confidence {:.0}%", c * 100.0)).unwrap_or_default();
             col = col.push(item_row(
                 column![
                     row![
-                        pick_list(&KindChoice::ALL[..], Some(KindChoice(r.kind)), move |k| Msg::Retype(r.id, k)),
-                        text(conf).size(11),
+                        pick_list(&KindChoice::ALL[..], Some(KindChoice(r.kind)), move |k| Msg::Retype(r.id, k))
+                            .text_size(SIZE_SMALL),
+                        style::note(conf),
                     ]
-                    .spacing(8)
-                    .align_y(iced::Center),
+                    .spacing(SPACE[1])
+                    .align_y(Center),
                     article_link(r.source_id, &r.source_title),
                     article_link(r.target_id, &r.target_title),
                     evidence(r.evidence.as_deref()),
@@ -333,14 +336,16 @@ impl State {
     fn view_relevance(&self) -> Element<'_, Msg> {
         let mut col = column![
             bulk(ReviewKind::Relevance, self.data.counts.relevance),
-            text("Confirmed unrelated, duplicate, low-information or clickbait articles can be hidden in the reader; they are never deleted.")
-                .size(11),
+            style::note(
+                "Confirmed unrelated, duplicate, low-information or clickbait articles can be hidden in the reader; \
+                 they are never deleted."
+            ),
         ]
-        .spacing(4);
+        .spacing(SPACE[1]);
         for r in &self.data.relevance {
             col = col.push(item_row(
                 column![
-                    text(r.class.replace('_', " ")).size(14),
+                    text(r.class.replace('_', " ")).size(SIZE_BODY),
                     article_link(r.article_id, &r.article_title),
                     evidence(r.reason.as_deref()),
                 ]
@@ -356,27 +361,26 @@ impl State {
 
     fn view_summary(&self) -> Element<'_, Msg> {
         let Some(s) = &self.data.summary else {
-            return text("This session has no summary.").size(13).into();
+            return style::note("This session has no summary.").into();
         };
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let mut col = column![
-            text("AI-generated summary. Check the cited articles before relying on any point.").size(11),
-            text(&s.text).size(15).line_height(1.5),
-            text("Key points").size(16).font(bold),
+            style::note("AI-generated summary. Check the cited articles before relying on any point."),
+            text(&s.text).size(SIZE_BODY).line_height(1.6).style(style::body),
+            style::heading("Key points"),
         ]
-        .spacing(8)
+        .spacing(SPACE[1])
         .max_width(820);
         for (point, sources) in &s.points {
-            let mut p = column![text(format!("• {point}")).size(14)].spacing(2);
+            let mut p = column![text(format!("• {point}")).size(SIZE_BODY).style(style::body)].spacing(2);
             for (id, title) in sources {
-                p = p.push(row![Space::new().width(16), article_link(*id, title)]);
+                p = p.push(row![Space::new().width(SPACE[3]), article_link(*id, title)]);
             }
             col = col.push(p);
         }
         if !s.open_questions.is_empty() {
-            col = col.push(text("Open questions").size(16).font(bold));
+            col = col.push(style::heading("Open questions"));
             for q in &s.open_questions {
-                col = col.push(text(format!("• {q}")).size(14));
+                col = col.push(text(format!("• {q}")).size(SIZE_BODY).style(style::body));
             }
         }
         col.into()
@@ -385,55 +389,62 @@ impl State {
 
 fn bulk<'a>(kind: ReviewKind, pending: u64) -> Element<'a, Msg> {
     row![
-        text(format!("{pending} pending")).size(12).width(Length::Fill),
-        button(text("Confirm all pending").size(12))
-            .style(button::success)
-            .on_press_maybe((pending > 0).then_some(Msg::Bulk(kind, Status::Confirmed))),
-        button(text("Reject all pending").size(12))
-            .style(button::secondary)
-            .on_press_maybe((pending > 0).then_some(Msg::Bulk(kind, Status::Rejected))),
+        style::note(format!("{pending} pending")).width(Length::Fill),
+        style::main_button("Confirm all pending", (pending > 0).then_some(Msg::Bulk(kind, Status::Confirmed))),
+        style::quiet_button(
+            None,
+            "Reject all pending",
+            style::quiet_danger,
+            (pending > 0).then_some(Msg::Bulk(kind, Status::Rejected))
+        ),
     ]
-    .spacing(8)
-    .align_y(iced::Center)
+    .spacing(SPACE[1])
+    .align_y(Center)
     .into()
 }
 
 fn item_row<'a>(content: Element<'a, Msg>, status: Status, yes: Msg, no: Msg) -> Element<'a, Msg> {
     let decision: Element<'a, Msg> = match status {
         Status::Suggested => row![
-            button(text("✓ Confirm").size(12)).style(button::success).on_press(yes),
-            button(text("✕ Reject").size(12)).style(button::secondary).on_press(no),
+            style::quiet_button(Some(Icon::Check), "Confirm", style::quiet, Some(yes)),
+            style::quiet_button(Some(Icon::Close), "Reject", style::quiet, Some(no)),
         ]
-        .spacing(6)
+        .spacing(SPACE[1])
         .into(),
         Status::Confirmed => {
-            row![text("Confirmed").size(12), button(text("Reject").size(11)).style(button::text).on_press(no)]
-                .spacing(6)
+            row![style::note("Confirmed"), style::quiet_button(None, "Reject", style::quiet, Some(no))]
+                .spacing(SPACE[1])
+                .align_y(Center)
                 .into()
         }
         Status::Rejected => {
-            row![text("Rejected").size(12), button(text("Confirm").size(11)).style(button::text).on_press(yes)]
-                .spacing(6)
+            row![style::note("Rejected"), style::quiet_button(None, "Confirm", style::quiet, Some(yes))]
+                .spacing(SPACE[1])
+                .align_y(Center)
                 .into()
         }
     };
-    container(row![container(content).width(Fill), decision].spacing(12).align_y(iced::Center))
-        .padding(8)
-        .style(container::bordered_box)
+    container(row![container(content).width(Fill), decision].spacing(SPACE[2]).align_y(Center))
+        .padding(SPACE[1])
+        .style(style::card)
         .into()
 }
 
 fn article_link<'a>(id: ArticleId, title: &str) -> Element<'a, Msg> {
-    button(text(title.to_string()).size(12)).style(button::text).padding(0).on_press(Msg::OpenArticle(id)).into()
+    button(text(title.to_string()).size(SIZE_SMALL).style(style::muted))
+        .style(style::row)
+        .padding(0)
+        .on_press(Msg::OpenArticle(id))
+        .into()
 }
 
 fn evidence<'a>(e: Option<&str>) -> Element<'a, Msg> {
     match e {
-        Some(e) => text(format!("“{e}”")).size(11).into(),
-        None => text("No quoted evidence").size(11).into(),
+        Some(e) => text(format!("“{e}”")).size(SIZE_SMALL).style(style::faint).into(),
+        None => text("No quoted evidence").size(SIZE_SMALL).style(style::faint).into(),
     }
 }
 
 fn empty_hint(col: iced::widget::Column<'_, Msg>, empty: bool) -> Element<'_, Msg> {
-    if empty { col.push(text("Nothing to review here.").size(13)).into() } else { col.into() }
+    if empty { col.push(style::note("Nothing to review here.")).into() } else { col.into() }
 }
