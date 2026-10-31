@@ -261,7 +261,7 @@ impl App {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.settings.values.dark { Theme::TokyoNight } else { Theme::Light }
+        crate::style::theme(self.settings.values.dark)
     }
 
     pub fn subscription(&self) -> Subscription<Message> {

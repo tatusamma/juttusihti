@@ -15,6 +15,7 @@ mod research;
 mod review;
 mod secrets;
 mod settings;
+mod style;
 mod timeline_view;
 
 use std::path::PathBuf;
