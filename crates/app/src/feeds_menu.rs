@@ -117,10 +117,7 @@ pub fn panel<'a>(
                 .on_submit(Message::AddFeed)
                 .size(SIZE_BODY)
                 .padding(SPACE[1]),
-            Button::new(text("Add").size(SIZE_BODY))
-                .padding([SPACE[1], SPACE[2]])
-                .style(style::main)
-                .on_press_maybe(can_add.then_some(Message::AddFeed)),
+            style::main_button("Add", can_add.then_some(Message::AddFeed)),
         ]
         .spacing(SPACE[1])
         .align_y(Center),
@@ -159,11 +156,7 @@ fn scope_row<'a>(label: String, unread: u64, selected: bool, indent: bool, targe
 }
 
 fn quiet<'a>(label: &'a str, target: Message) -> Element<'a, Message> {
-    Button::new(text(label).size(SIZE_SMALL))
-        .padding([SPACE[0], SPACE[1] + 2.0])
-        .style(style::quiet)
-        .on_press(target)
-        .into()
+    style::quiet_button(None, label, style::quiet, Some(target))
 }
 
 /// Title, folder and Unsubscribe for one feed, shown under its row.
@@ -193,10 +186,7 @@ fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> El
                 quiet("Save", Message::SaveFeed),
                 quiet("Cancel", Message::CancelEditFeed),
                 Space::new().width(Fill),
-                Button::new(text("Unsubscribe").size(SIZE_SMALL))
-                    .padding([SPACE[0], SPACE[1] + 2.0])
-                    .style(style::quiet_danger)
-                    .on_press(Message::RemoveFeed(feed.id)),
+                style::quiet_button(None, "Unsubscribe", style::quiet_danger, Some(Message::RemoveFeed(feed.id))),
             ]
             .spacing(SPACE[1]),
         ]
@@ -212,10 +202,7 @@ fn confirm_unsubscribe<'a>(feed: &'a Feed) -> Element<'a, Message> {
         column![
             text(format!("Unsubscribe from {}?", feed.title)).size(SIZE_SMALL),
             row![
-                Button::new(text("Unsubscribe").size(SIZE_SMALL))
-                    .padding([SPACE[0], SPACE[1] + 2.0])
-                    .style(style::quiet_danger)
-                    .on_press(Message::ConfirmUnsubscribe),
+                style::quiet_button(None, "Unsubscribe", style::quiet_danger, Some(Message::ConfirmUnsubscribe)),
                 quiet("Cancel", Message::CancelUnsubscribe),
             ]
             .spacing(SPACE[1]),
