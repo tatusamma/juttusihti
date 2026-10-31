@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use iced::widget::{Space, button, column, container, row, rule, scrollable, text};
-use iced::{Element, Fill, Font, Task as Cmd, font};
+use iced::widget::{Space, column, container, row, rule, scrollable, text};
+use iced::{Center, Element, Fill, Task as Cmd};
 use juttusihti_analytics::export::{Cell, to_csv};
 use juttusihti_analytics::{
     AnalyticsWorker, Bucket, CooccurrenceRow, CostRow, CrossRow, LabelRow, RelationshipStat, TrendRow, UsageRow,
@@ -13,6 +13,7 @@ use juttusihti_analytics::{
 use juttusihti_core::pricing::format_usd;
 
 use crate::format;
+use crate::style::{self, SIZE_SMALL, SPACE};
 
 #[derive(Debug, Clone, Default)]
 pub struct Data {
@@ -168,43 +169,41 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let range = |d: u32, label: &'static str| {
-            button(text(label).size(12))
-                .style(if self.days == d { button::primary } else { button::secondary })
-                .on_press(Msg::Days(d))
-        };
-        let mut header = row![
-            text("Reports").size(24).font(bold),
-            Space::new().width(Fill),
-            range(7, "7 days"),
-            range(30, "30 days"),
-            range(90, "90 days"),
-            range(365, "1 year"),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
-        header = if self.busy {
-            header.push(button(text("Cancel").size(12)).style(button::danger).on_press(Msg::Cancel))
+        let ranges = [(7, "7 days"), (30, "30 days"), (90, "90 days"), (365, "1 year")];
+        let rebuild = if self.busy {
+            style::quiet_button(None, "Cancel", style::quiet_danger, Some(Msg::Cancel))
         } else {
-            header.push(button(text("Rebuild").size(12)).style(button::secondary).on_press(Msg::Load))
+            style::quiet_button(None, "Rebuild", style::quiet, Some(Msg::Load))
         };
-        let mut col = column![
-            header,
-            text("Computed by DuckDB on a read-only snapshot of the local database. Only confirmed labels and entities are counted unless noted.")
-                .size(12),
+        let header = row![
+            style::title("Reports"),
+            Space::new().width(Fill),
+            style::segmented(ranges, self.days, Msg::Days),
+            rebuild,
         ]
-        .spacing(16)
-        .padding(24);
-        match &self.message {
-            Some(Ok(m)) => col = col.push(container(text(m).size(12)).padding(6).style(container::success)),
-            Some(Err(m)) => col = col.push(container(text(m).size(12)).padding(6).style(container::danger)),
-            None => {}
+        .spacing(SPACE[1])
+        .align_y(Center);
+        let mut col = column![
+            column![
+                header,
+                style::intro(
+                    "Computed by DuckDB on a read-only snapshot of the local database.",
+                    "Computed by DuckDB on a read-only snapshot of the local database. Only confirmed labels and \
+                     entities are counted unless noted.",
+                ),
+            ]
+            .spacing(SPACE[1]),
+        ]
+        .spacing(SPACE[4])
+        .padding(SPACE[4]);
+        if let Some(m) = &self.message {
+            col = col.push(style::message(m));
         }
         let Some(d) = &self.data else {
-            return scrollable(col.push(text(if self.busy { "Building snapshot…" } else { "No data yet." }))).into();
+            return scrollable(col.push(style::note(if self.busy { "Building snapshot…" } else { "No data yet." })))
+                .into();
         };
-        col = col.push(text(format!("Snapshot of {} articles; trends per {}.", d.articles, d.bucket_label)).size(12));
+        col = col.push(style::note(format!("Snapshot of {} articles; trends per {}.", d.articles, d.bucket_label)));
         col = col.push(section("Articles per source", Report::Volume, volume_view(&d.volume)));
         col = col.push(section(
             "Topic evolution (top labels)",
@@ -277,18 +276,17 @@ impl State {
 }
 
 fn section<'a>(title: &'a str, report: Report, body: Element<'a, Msg>) -> Element<'a, Msg> {
-    let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
     column![
         row![
-            text(title).size(17).font(bold),
+            style::heading(title),
             Space::new().width(Fill),
-            button(text("Export CSV").size(11)).style(button::text).on_press(Msg::Export(report)),
+            style::quiet_button(None, "Export CSV", style::quiet, Some(Msg::Export(report))),
         ]
-        .align_y(iced::Center),
+        .align_y(Center),
         body,
         rule::horizontal(1),
     ]
-    .spacing(6)
+    .spacing(SPACE[1])
     .into()
 }
 
@@ -297,10 +295,10 @@ fn lines<'a>(items: impl Iterator<Item = String>) -> Element<'a, Msg> {
     let mut any = false;
     for l in items {
         any = true;
-        col = col.push(text(l).size(13));
+        col = col.push(line(l));
     }
     if !any {
-        col = col.push(text("No data in this period.").size(12));
+        col = col.push(style::note("No data in this period."));
     }
     col.into()
 }
@@ -315,25 +313,25 @@ fn volume_view(rows: &[VolumeRow]) -> Element<'_, Msg> {
     }
     totals.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let max = totals.first().map_or(1, |(_, n)| *n).max(1);
-    let mut col = column![].spacing(4);
+    let mut col = column![].spacing(SPACE[0]);
     for (title, n) in totals {
         let w = (n as f32 / max as f32 * 320.0).max(2.0);
         col = col.push(
             row![
-                text(title).size(13).width(240),
+                line(title).width(240),
                 container(Space::new().width(w).height(12)).style(|theme: &iced::Theme| {
                     container::Style::default()
                         .background(crate::style::data_colors(theme).bar)
                         .border(iced::border::rounded(2))
                 }),
-                text(n.to_string()).size(13),
+                line(n.to_string()),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
+            .spacing(SPACE[1])
+            .align_y(Center),
         );
     }
     if rows.is_empty() {
-        col = col.push(text("No articles in this period.").size(12));
+        col = col.push(style::note("No articles in this period."));
     }
     col.into()
 }
@@ -360,12 +358,17 @@ fn trend_view(rows: &[TrendRow], bucket: &str, show_confirmed: bool) -> Element<
                 }
             })
             .collect();
-        col = col.push(text(format!("{} — {}", k.replace('_', " "), series.join(" · "))).size(13));
+        col = col.push(line(format!("{} — {}", k.replace('_', " "), series.join(" · "))));
     }
     if rows.is_empty() {
-        col = col.push(text(format!("No data in this period (per {bucket}).")).size(12));
+        col = col.push(style::note(format!("No data in this period (per {bucket}).")));
     }
     col.into()
+}
+
+/// One line of report data.
+fn line<'a>(l: impl text::IntoFragment<'a>) -> text::Text<'a> {
+    text(l).size(SIZE_SMALL).style(style::body)
 }
 
 fn iso_day(ts: i64) -> String {
