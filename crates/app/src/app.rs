@@ -1702,6 +1702,18 @@ mod tests {
     }
 
     #[test]
+    fn appearance_switch_sets_the_theme() {
+        let (mut app, _) = app_with_feed();
+        assert!(app.settings.values.dark);
+        let _ = app.update(Message::Settings(crate::settings::Msg::SetDark(false)));
+        assert!(!app.settings.values.dark);
+        let _ = app.update(Message::Settings(crate::settings::Msg::SetDark(false)));
+        assert!(!app.settings.values.dark);
+        let _ = app.update(Message::Settings(crate::settings::Msg::SetDark(true)));
+        assert!(app.settings.values.dark);
+    }
+
+    #[test]
     fn escape_closes_overlays() {
         let (mut app, _) = app_with_feed();
         let _ = app.update(Message::ToggleFeedsMenu);
