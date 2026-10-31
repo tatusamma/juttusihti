@@ -4,10 +4,8 @@
 use std::collections::BTreeSet;
 
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
-use iced::widget::{
-    Space, button, checkbox, column, container, pick_list, radio, row, rule, scrollable, text, text_input,
-};
-use iced::{Element, Fill, Font, Length, Task as Cmd, font};
+use iced::widget::{Space, button, column, container, pick_list, row, rule, scrollable, text, text_input};
+use iced::{Center, Element, Fill, Length, Task as Cmd};
 use juttusihti_ai::{Approval, Control, Progress, RunSummary};
 use juttusihti_core::analysis::{AnalysisConfig, Depth, SessionSummary, Task};
 use juttusihti_core::budget::Limits;
@@ -18,6 +16,7 @@ use juttusihti_core::{Feed, Folder, Label, SessionStatus};
 
 use crate::db::Db;
 use crate::format;
+use crate::style::{self, SEMIBOLD, SIZE_BODY, SIZE_SMALL, SPACE};
 
 #[derive(Debug, Clone)]
 pub struct Lists {
@@ -355,12 +354,7 @@ impl State {
             }
             Msg::QuickRange(days) => {
                 let today = Local::now().date_naive();
-                let from = if days == 0 {
-                    today.with_day(1).unwrap_or(today)
-                } else {
-                    today - Duration::days(i64::from(days) - 1)
-                };
-                self.from = show_date(from);
+                self.from = show_date(range_start(days, today));
                 self.to = show_date(today);
                 self.invalidate();
             }
@@ -589,52 +583,61 @@ impl State {
         Cmd::none()
     }
 
+    /// The quick range ("7 days", "30 days" or "This month") the dates match, if any.
+    fn current_range(&self) -> Option<u32> {
+        let today = Local::now().date_naive();
+        [7, 30, 0]
+            .into_iter()
+            .find(|&days| self.from == show_date(range_start(days, today)) && self.to == show_date(today))
+    }
+
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let heading = |s: &'static str| text(s).size(16).font(bold);
-
+        let ranges = [(Some(7), "7 days"), (Some(30), "30 days"), (Some(0), "This month")];
         let dates = column![
-            heading("Time range"),
             row![
-                text_input("From d.m.yyyy", &self.from).on_input(Msg::From).width(140),
-                text("–"),
-                text_input("To d.m.yyyy", &self.to).on_input(Msg::To).width(140),
-                button(text("7 days").size(12)).style(button::secondary).on_press(Msg::QuickRange(7)),
-                button(text("30 days").size(12)).style(button::secondary).on_press(Msg::QuickRange(30)),
-                button(text("This month").size(12)).style(button::secondary).on_press(Msg::QuickRange(0)),
+                style::heading("Time range"),
+                style::help(format!(
+                    "Both dates are inclusive, in local time{}. Articles without a publication date use their \
+                     fetch time unless excluded.",
+                    iana_hint()
+                )),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text(format!("Both dates are inclusive, in local time{}. Articles without a publication date use their fetch time unless excluded.", iana_hint())).size(12),
-            checkbox(self.require_date).label("Only articles with a publication date").on_toggle(Msg::RequireDate),
+            .spacing(SPACE[1])
+            .align_y(Center),
+            row![
+                input("From d.m.yyyy", &self.from, Msg::From).width(140),
+                text("–").size(SIZE_BODY),
+                input("To d.m.yyyy", &self.to, Msg::To).width(140),
+                style::segmented(ranges, self.current_range(), |d| Msg::QuickRange(d.unwrap_or(0))),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+            style::check(self.require_date, "Only articles with a publication date").on_toggle(Msg::RequireDate),
         ]
-        .spacing(8);
+        .spacing(SPACE[1]);
 
-        let mut sources = column![heading("Sources (none selected = all)")].spacing(4);
+        let mut sources = column![style::heading("Sources (none selected = all)")].spacing(SPACE[1]);
         if let Some(lists) = &self.lists {
-            let mut picks = column![].spacing(2);
+            let mut picks = column![].spacing(SPACE[0]);
             for f in &lists.folders {
                 picks = picks.push(
-                    checkbox(self.folders.contains(&f.id))
-                        .label(format!("Folder: {}", f.name))
+                    style::check(self.folders.contains(&f.id), format!("Folder: {}", f.name))
                         .on_toggle(move |on| Msg::ToggleFolder(f.id, on)),
                 );
             }
             for f in &lists.feeds {
                 let id = f.id;
                 picks = picks.push(
-                    checkbox(self.feeds.contains(&id))
-                        .label(f.title.clone())
+                    style::check(self.feeds.contains(&id), f.title.clone())
                         .on_toggle(move |on| Msg::ToggleFeed(id, on)),
                 );
             }
             if !lists.labels.is_empty() {
-                picks = picks.push(text("Only articles with confirmed labels:").size(12));
+                picks = picks.push(style::note("Only articles with confirmed labels:"));
                 for l in &lists.labels {
                     let id = l.id;
                     picks = picks.push(
-                        checkbox(self.labels.contains(&id))
-                            .label(l.name.clone())
+                        style::check(self.labels.contains(&id), l.name.clone())
                             .on_toggle(move |on| Msg::ToggleLabel(id, on)),
                     );
                 }
@@ -642,7 +645,10 @@ impl State {
             sources = sources.push(container(scrollable(picks).height(Length::Shrink)).max_height(180));
         }
         sources = sources.push(
-            text_input("Optional search query (same syntax as the search box)", &self.query).on_input(Msg::Query),
+            text_input("Optional search query (same syntax as the search box)", &self.query)
+                .on_input(Msg::Query)
+                .size(SIZE_BODY)
+                .padding(SPACE[1]),
         );
 
         let on_plan = self.provider == Provider::Openai && self.billing == Billing::ChatGptPlan;
@@ -652,103 +658,122 @@ impl State {
         };
         let selected_model = models.iter().find(|m| **m == self.model).cloned();
         let mut provider = column![
-            heading("AI provider and model"),
+            style::heading("AI provider and model"),
             row![
-                pick_list(&Provider::ALL[..], Some(self.provider), Msg::Provider),
-                pick_list(models, selected_model, Msg::ModelPicked).placeholder(if on_plan {
-                    "Plan models"
-                } else {
-                    "Known models"
-                }),
-                text_input("or any model id", &self.model).on_input(Msg::Model).width(220),
+                pick_list(&Provider::ALL[..], Some(self.provider), Msg::Provider).text_size(SIZE_BODY),
+                pick_list(models, selected_model, Msg::ModelPicked)
+                    .placeholder(if on_plan { "Plan models" } else { "Known models" })
+                    .text_size(SIZE_BODY),
+                text_input("or any model id", &self.model)
+                    .on_input(Msg::Model)
+                    .size(SIZE_BODY)
+                    .padding(SPACE[1])
+                    .width(220),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
+            .spacing(SPACE[1])
+            .align_y(Center),
         ]
-        .spacing(8);
+        .spacing(SPACE[1]);
         {
             use juttusihti_core::ai_defaults::{Tier, recommended};
             let fast = recommended(self.provider, Tier::Fast);
             let quality = recommended(self.provider, Tier::Quality);
-            provider = provider
-                .push(text(format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)).size(12));
+            provider =
+                provider.push(style::note(format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)));
         }
         if self.provider == Provider::Openai {
             provider = provider.push(
                 row![
-                    radio("API key (billed per token)", Billing::ApiKey, Some(self.billing), Msg::Billing),
-                    radio("My ChatGPT plan", Billing::ChatGptPlan, Some(self.billing), Msg::Billing),
+                    style::choice("API key (billed per token)", Billing::ApiKey, Some(self.billing), Msg::Billing),
+                    style::choice("My ChatGPT plan", Billing::ChatGptPlan, Some(self.billing), Msg::Billing),
                 ]
-                .spacing(16),
+                .spacing(SPACE[3]),
             );
         }
         if on_plan {
             provider = provider.push(
                 row![
-                    button(text("Load my plan's models").size(12))
-                        .style(button::secondary)
-                        .on_press_maybe((!self.busy).then_some(Msg::LoadPlanModels)),
-                    text("Asks OpenAI which models your plan offers. No articles are sent.").size(12),
+                    style::quiet_button(
+                        None,
+                        "Load my plan's models",
+                        style::quiet,
+                        (!self.busy).then_some(Msg::LoadPlanModels)
+                    ),
+                    style::note("Asks OpenAI which models your plan offers. No articles are sent."),
                 ]
-                .spacing(8)
-                .align_y(iced::Center),
+                .spacing(SPACE[1])
+                .align_y(Center),
             );
         }
 
-        let mut depth = column![heading("Content to analyze")].spacing(4);
+        let mut depth = column![style::heading("Content to analyze")].spacing(SPACE[1]);
         for d in Depth::ALL {
             let hint = match d {
                 Depth::Headlines => " — lowest token usage",
                 Depth::HeadlinesAndDescriptions => " — recommended",
                 Depth::FullText => " — highest usage; only locally archived text",
             };
-            depth = depth.push(radio(format!("{}{hint}", d.label()), d, Some(self.depth), Msg::Depth));
+            depth = depth.push(style::choice(format!("{}{hint}", d.label()), d, Some(self.depth), Msg::Depth));
         }
 
-        let mut tasks = column![heading("Analysis tasks")].spacing(4);
+        let mut tasks = column![style::heading("Analysis tasks")].spacing(SPACE[1]);
         for t in Task::ALL {
             tasks = tasks
-                .push(checkbox(self.tasks.contains(&t)).label(t.label()).on_toggle(move |on| Msg::ToggleTask(t, on)));
+                .push(style::check(self.tasks.contains(&t), t.label()).on_toggle(move |on| Msg::ToggleTask(t, on)));
         }
         if self.tasks.contains(&Task::Relevance) {
             tasks = tasks.push(
                 text_input("Investigation topic for relevance, e.g. \"energy prices in the Nordics\"", &self.criteria)
-                    .on_input(Msg::Criteria),
+                    .on_input(Msg::Criteria)
+                    .size(SIZE_BODY)
+                    .padding(SPACE[1]),
             );
         }
 
         let limits = column![
-            heading("Limits"),
+            style::heading("Limits"),
             row![
-                labeled("Max articles", text_input("500", &self.max_articles).on_input(Msg::MaxArticles).width(100)),
-                labeled("Max tokens", text_input("2000000", &self.max_tokens).on_input(Msg::MaxTokens).width(120)),
-                labeled("Max cost (USD)", text_input("1.00", &self.max_cost).on_input(Msg::MaxCost).width(100)),
+                labeled("Max articles", input("500", &self.max_articles, Msg::MaxArticles).width(100.0)),
+                labeled("Max tokens", input("2000000", &self.max_tokens, Msg::MaxTokens).width(120.0)),
+                labeled("Max cost (USD)", input("1.00", &self.max_cost, Msg::MaxCost).width(100.0)),
             ]
-            .spacing(16),
-            checkbox(self.reuse_cache).label("Reuse earlier compatible results").on_toggle(Msg::ReuseCache),
-            checkbox(self.accept_unknown_cost)
-                .label("I accept running with unknown pricing")
+            .spacing(SPACE[3]),
+            style::check(self.reuse_cache, "Reuse earlier compatible results").on_toggle(Msg::ReuseCache),
+            style::check(self.accept_unknown_cost, "I accept running with unknown pricing")
                 .on_toggle(Msg::AcceptUnknownCost),
         ]
-        .spacing(8);
+        .spacing(SPACE[1]);
 
-        let mut actions = row![
-            button(text(if self.busy { "Working…" } else { "Preview estimate" }))
-                .on_press_maybe((!self.busy).then_some(Msg::Preview)),
-        ]
-        .spacing(8);
+        // The main button is "Preview estimate" until a saved session can be started.
+        let preview_label = if self.busy { "Working…" } else { "Preview estimate" };
+        let preview_press = (!self.busy).then_some(Msg::Preview);
+        let mut actions = row![if self.session_startable() {
+            style::quiet_button(None, preview_label, style::quiet, preview_press)
+        } else {
+            style::main_button(preview_label, preview_press)
+        }]
+        .spacing(SPACE[1])
+        .align_y(Center);
         if self.preview.is_some() {
-            actions = actions.push(
-                button(text("Save session for approval"))
-                    .style(button::secondary)
-                    .on_press_maybe((!self.busy && self.saved.is_none()).then_some(Msg::Save)),
-            );
+            actions = actions.push(style::quiet_button(
+                None,
+                "Save session for approval",
+                style::quiet,
+                (!self.busy && self.saved.is_none()).then_some(Msg::Save),
+            ));
         }
 
         let mut form = column![
-            text("Custom analysis").size(24).font(bold),
-            text("For a quick run on the list you are reading, use the ✨ AI button above the article list.").size(13),
-            text("AI analysis only runs when you start it. The preview below is computed locally; no data leaves this computer.").size(13),
+            column![
+                style::title("Custom analysis"),
+                style::intro(
+                    "Nothing is sent until you start a run; the estimate is computed locally.",
+                    "For a quick run on the list you are reading, use the ✨ AI button above the article list. \
+                     AI analysis only runs when you start it. The preview below is computed locally; no data \
+                     leaves this computer.",
+                ),
+            ]
+            .spacing(SPACE[1]),
             dates,
             sources,
             provider,
@@ -757,24 +782,23 @@ impl State {
             limits,
             actions,
         ]
-        .spacing(20)
-        .padding(24)
+        .spacing(SPACE[4])
+        .padding(SPACE[4])
         .max_width(760);
         if let Some(e) = &self.error {
-            form = form.push(container(text(e).size(13)).padding(8).style(container::danger));
+            form = form.push(text(e).size(SIZE_SMALL).style(style::danger));
         }
         if let Some(id) = self.saved {
             form = form.push(
-                container(
-                    text(format!("Saved as session #{id}, awaiting approval. Select it under Sessions to start it."))
-                        .size(13),
-                )
-                .padding(8)
-                .style(container::success),
+                text(format!("Saved as session #{id}, awaiting approval. Select it under Sessions to start it."))
+                    .size(SIZE_SMALL)
+                    .style(style::body),
             );
         }
 
-        let right = column![self.view_estimate(), rule::horizontal(1), self.view_sessions()].spacing(20).padding(24);
+        let right = column![self.view_estimate(), rule::horizontal(1), self.view_sessions()]
+            .spacing(SPACE[4])
+            .padding(SPACE[4]);
         row![
             scrollable(form).width(Length::FillPortion(3)),
             rule::vertical(1),
@@ -784,27 +808,38 @@ impl State {
         .into()
     }
 
+    /// Whether the selected session shows the "Start analysis"/"Resume" button.
+    fn session_startable(&self) -> bool {
+        self.session.as_ref().is_some_and(|d| {
+            self.run.as_ref().is_none_or(|r| r.session != d.id)
+                && matches!(d.status, SessionStatus::AwaitingApproval | SessionStatus::Paused | SessionStatus::Failed)
+        })
+    }
+
     fn view_estimate(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let Some((config, e)) = &self.preview else {
             return column![
-                text("Pre-analysis estimate").size(18).font(bold),
-                text(
+                style::heading("Pre-analysis estimate"),
+                style::note(
                     "Press “Preview estimate” to count matching articles, cached results and projected tokens and cost."
-                )
-                .size(13),
+                ),
             ]
-            .spacing(8)
+            .spacing(SPACE[1])
             .into();
         };
         let s = &e.stats;
         let stat = |label: &str, value: String| {
-            row![text(label.to_string()).size(13).width(220), text(value).size(13).font(bold)]
+            row![
+                text(label.to_string()).size(SIZE_SMALL).style(style::muted).width(220),
+                text(value).size(SIZE_SMALL).font(SEMIBOLD)
+            ]
         };
         let mut col = column![
-            text("Pre-analysis estimate").size(18).font(bold),
-            text(format!("{} · {} · {} · {}", config.range_label, config.provider, config.model, config.billing))
-                .size(12),
+            style::heading("Pre-analysis estimate"),
+            style::note(format!(
+                "{} · {} · {} · {}",
+                config.range_label, config.provider, config.model, config.billing
+            )),
             stat("Articles matched", s.matched.to_string()),
             stat("Included (max limit)", s.selected.to_string()),
             stat("Distinct after dedup", format!("{} ({} duplicates found locally)", s.distinct, s.local_duplicates)),
@@ -813,23 +848,20 @@ impl State {
             stat("Candidate story pairs", e.candidate_pairs.to_string()),
             stat("Planned requests", e.requests.to_string()),
         ]
-        .spacing(4);
+        .spacing(SPACE[0]);
 
-        col = col.push(Space::new().height(8)).push(text("By stage (expected)").size(14).font(bold));
+        col = col.push(Space::new().height(SPACE[1])).push(style::heading("By stage (expected)"));
         for st in &e.stages {
-            col = col.push(
-                text(format!(
-                    "{}: {} requests, {} in / {} out tokens",
-                    st.stage.label(),
-                    st.requests,
-                    thousands(st.expected_input),
-                    thousands(st.expected_output)
-                ))
-                .size(12),
-            );
+            col = col.push(style::note(format!(
+                "{}: {} requests, {} in / {} out tokens",
+                st.stage.label(),
+                st.requests,
+                thousands(st.expected_input),
+                thousands(st.expected_output)
+            )));
         }
 
-        col = col.push(Space::new().height(8)).push(text("Tokens and cost").size(14).font(bold));
+        col = col.push(Space::new().height(SPACE[1])).push(style::heading("Tokens and cost"));
         for (sc, name) in [
             (Scenario::Optimistic, "Optimistic"),
             (Scenario::Expected, "Expected"),
@@ -837,32 +869,27 @@ impl State {
         ] {
             let t = &e.scenarios[&sc];
             let cost = cost_text(Some(config.billing), t.cost);
+            let cell = |s: String| text(s).size(SIZE_SMALL).style(style::body);
             col = col.push(
                 row![
-                    text(name).size(13).width(110),
-                    text(format!("{} in", thousands(t.usage.prompt_tokens()))).size(13).width(120),
-                    text(format!("{} out", thousands(t.usage.output))).size(13).width(110),
-                    text(cost).size(13).font(bold),
+                    cell(name.into()).width(110),
+                    cell(format!("{} in", thousands(t.usage.prompt_tokens()))).width(120),
+                    cell(format!("{} out", thousands(t.usage.output))).width(110),
+                    text(cost).size(SIZE_SMALL).font(SEMIBOLD),
                 ]
-                .spacing(6),
+                .spacing(SPACE[1]),
             );
         }
-        col = col.push(
-            text(format!(
-                "Worst case if every call uses its full output limit: {} tokens",
-                thousands(e.worst_case_tokens)
-            ))
-            .size(12),
-        );
+        col = col.push(style::note(format!(
+            "Worst case if every call uses its full output limit: {} tokens",
+            thousands(e.worst_case_tokens)
+        )));
         let limits = &config.limits;
-        col = col.push(
-            text(format!(
-                "Limits: {} tokens, {}",
-                limits.max_tokens.map(thousands).unwrap_or_else(|| "no token limit".into()),
-                limits.max_cost.map(format_usd).unwrap_or_else(|| "no cost limit".into())
-            ))
-            .size(12),
-        );
+        col = col.push(style::note(format!(
+            "Limits: {} tokens, {}",
+            limits.max_tokens.map(thousands).unwrap_or_else(|| "no token limit".into()),
+            limits.max_cost.map(format_usd).unwrap_or_else(|| "no cost limit".into())
+        )));
         col = col.push(
             text(match &e.price_source {
                 Some(src) => {
@@ -870,17 +897,21 @@ impl State {
                 }
                 None => "No price on record for this model.".into(),
             })
-            .size(11),
+            .size(SIZE_SMALL)
+            .style(style::faint),
         );
         for w in &e.warnings {
-            col = col.push(container(text(format!("⚠ {w}")).size(12)).padding(6).style(container::warning));
+            col = col.push(
+                container(text(format!("⚠ {w}")).size(SIZE_SMALL).style(style::body))
+                    .padding(SPACE[1])
+                    .style(style::card),
+            );
         }
         col.into()
     }
 
     fn view_sessions(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let mut col = column![text("Sessions").size(18).font(bold)].spacing(4);
+        let mut col = column![style::heading("Sessions")].spacing(SPACE[0]);
         match &self.lists {
             Some(l) if !l.sessions.is_empty() => {
                 for s in &l.sessions {
@@ -895,111 +926,104 @@ impl State {
                                 s.range_label,
                                 s.model
                             ))
-                            .size(12),
+                            .size(SIZE_SMALL),
                         )
                         .width(Fill)
-                        .style(if selected { button::secondary } else { button::text })
+                        .padding([SPACE[0], SPACE[1]])
+                        .style(if selected { style::row_selected } else { style::row })
                         .on_press(Msg::SelectSession(s.id)),
                     );
                 }
             }
-            _ => col = col.push(text("No sessions yet.").size(12)),
+            _ => col = col.push(style::note("No sessions yet.")),
         }
         if let Some(d) = &self.session {
-            col = col.push(Space::new().height(8)).push(self.view_session(d));
+            col = col.push(Space::new().height(SPACE[1])).push(self.view_session(d));
         }
         col.into()
     }
 
     fn view_session<'a>(&'a self, d: &'a SessionDetail) -> Element<'a, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let c = &d.config;
         let mut col = column![
-            text(format!("Session #{} — {}", d.id, d.status.as_str())).size(16).font(bold),
-            text(format!("{} · {} · {} · {}", c.range_label, c.provider, c.model, c.billing)).size(12),
-            text(format!(
+            style::heading(format!("Session #{} — {}", d.id, d.status.as_str())),
+            style::note(format!("{} · {} · {} · {}", c.range_label, c.provider, c.model, c.billing)),
+            style::note(format!(
                 "Content sent: {}. Tasks: {}.",
                 c.depth,
                 c.tasks.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ")
-            ))
-            .size(12),
+            )),
         ]
-        .spacing(6);
+        .spacing(SPACE[1]);
         if let Some(e) = &d.estimate {
-            col = col.push(
-                text(format!(
-                    "Estimate: {} articles, {} requests, expected {} (conservative {}).",
-                    e.stats.to_process,
-                    e.requests,
-                    cost_text(Some(c.billing), e.expected().cost),
-                    cost_text(Some(c.billing), e.conservative().cost)
-                ))
-                .size(12),
-            );
+            col = col.push(style::note(format!(
+                "Estimate: {} articles, {} requests, expected {} (conservative {}).",
+                e.stats.to_process,
+                e.requests,
+                cost_text(Some(c.billing), e.expected().cost),
+                cost_text(Some(c.billing), e.conservative().cost)
+            )));
         }
         if d.spent.calls > 0 {
-            col = col.push(
-                text(format!(
-                    "Already used: {} calls, {} tokens, {}{}.",
-                    d.spent.calls,
-                    thousands(d.spent.tokens),
-                    cost_text(Some(c.billing), Some(d.spent.cost)),
-                    if d.spent.cost_unknown { " + unknown" } else { "" }
-                ))
-                .size(12),
-            );
+            col = col.push(style::note(format!(
+                "Already used: {} calls, {} tokens, {}{}.",
+                d.spent.calls,
+                thousands(d.spent.tokens),
+                cost_text(Some(c.billing), Some(d.spent.cost)),
+                if d.spent.cost_unknown { " + unknown" } else { "" }
+            )));
         }
         if let Some(e) = &d.error {
-            col = col.push(container(text(e).size(12)).padding(6).style(container::warning));
+            col = col.push(text(e).size(SIZE_SMALL).style(style::danger));
         }
         let running_here = self.run.as_ref().is_some_and(|r| r.session == d.id);
-        let runnable =
-            matches!(d.status, SessionStatus::AwaitingApproval | SessionStatus::Paused | SessionStatus::Failed);
         if running_here {
             let r = self.run.as_ref().expect("checked");
             col = col.push(
                 text(format!("Running… {} tokens so far, {}", thousands(r.tokens), cost_text(Some(c.billing), r.cost)))
-                    .size(13)
-                    .font(bold),
+                    .size(SIZE_SMALL)
+                    .font(SEMIBOLD),
             );
             col = col.push(
                 row![
-                    button(text("Pause")).style(button::secondary).on_press(Msg::PauseRun),
-                    button(text("Cancel")).style(button::danger).on_press(Msg::CancelRun),
+                    style::quiet_button(None, "Pause", style::quiet, Some(Msg::PauseRun)),
+                    style::quiet_button(None, "Cancel", style::quiet_danger, Some(Msg::CancelRun)),
                 ]
-                .spacing(8),
+                .spacing(SPACE[1]),
             );
             col = col.push(
                 text("Cancelling stops new requests at once. A request already accepted by the provider may still be charged.")
-                    .size(11),
+                    .size(SIZE_SMALL)
+                    .style(style::faint),
             );
-        } else if runnable {
+        } else if self.session_startable() {
             col = col.push(
-                checkbox(self.consent)
-                    .label(format!(
+                style::check(
+                    self.consent,
+                    format!(
                         "I agree to send the content of these articles ({}) to {}{}.",
                         c.depth.label().to_lowercase(),
                         c.provider,
                         if c.billing == Billing::ChatGptPlan { ", using my ChatGPT plan" } else { "" }
-                    ))
-                    .on_toggle(Msg::Consent),
+                    ),
+                )
+                .on_toggle(Msg::Consent),
             );
             let label = if d.status == SessionStatus::AwaitingApproval { "Start analysis" } else { "Resume" };
-            col = col.push(
-                button(text(label)).on_press_maybe((self.consent && self.run.is_none()).then_some(Msg::StartRun)),
-            );
+            col = col.push(style::main_button(label, (self.consent && self.run.is_none()).then_some(Msg::StartRun)));
             col = col.push(
                 text("Limits are enforced by Juttusihti before each request; they are estimates, not provider billing caps.")
-                    .size(11),
+                    .size(SIZE_SMALL)
+                    .style(style::faint),
             );
         }
         if !running_here && d.spent.calls > 0 {
-            col = col
-                .push(button(text("Review suggestions")).style(button::secondary).on_press(Msg::ReviewSession(d.id)));
+            col =
+                col.push(style::quiet_button(None, "Review suggestions", style::quiet, Some(Msg::ReviewSession(d.id))));
         }
         let log = self.run.as_ref().filter(|r| r.session == d.id).map(|r| &r.log).unwrap_or(&self.last_log);
         for line in log.iter().rev().take(12) {
-            col = col.push(text(line).size(11));
+            col = col.push(text(line).size(SIZE_SMALL).style(style::faint));
         }
         col.into()
     }
@@ -1060,7 +1084,17 @@ pub fn cost_text(billing: Option<Billing>, cost: Option<Micros>) -> String {
 }
 
 fn labeled<'a>(label: &'a str, field: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
-    column![text(label).size(12), field.into()].spacing(4).into()
+    column![style::note(label), field.into()].spacing(SPACE[0]).into()
+}
+
+/// A text field in the screen's size.
+fn input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> iced::widget::TextInput<'a, Msg> {
+    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1])
+}
+
+/// First day of a quick range ending `today`: the last `days` days, or this month for 0.
+fn range_start(days: u32, today: NaiveDate) -> NaiveDate {
+    if days == 0 { today.with_day(1).unwrap_or(today) } else { today - Duration::days(i64::from(days) - 1) }
 }
 
 fn toggle(set: &mut BTreeSet<i64>, id: i64, on: bool) {
@@ -1098,6 +1132,15 @@ mod tests {
         assert_eq!(parse_date("01.10.2026"), NaiveDate::from_ymd_opt(2026, 10, 1));
         assert_eq!(parse_date("2026-10-01"), NaiveDate::from_ymd_opt(2026, 10, 1));
         assert_eq!(parse_date("31.2.2026"), None);
+    }
+
+    #[test]
+    fn quick_range_is_highlighted_until_the_dates_change() {
+        let mut st = State::new(Db::new(juttusihti_core::store::Store::open_in_memory().unwrap()));
+        let _ = st.update(Msg::QuickRange(30));
+        assert_eq!(st.current_range(), Some(30));
+        let _ = st.update(Msg::From("1.1.2020".into()));
+        assert_eq!(st.current_range(), None);
     }
 
     #[test]

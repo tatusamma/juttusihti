@@ -322,6 +322,21 @@ pub fn radio(theme: &Theme, status: rd::Status) -> rd::Style {
     }
 }
 
+/// A labelled checkbox in the neutral [`checkbox`] style.
+pub fn check<'a, M: 'a>(on: bool, label: impl text::IntoFragment<'a>) -> iced::widget::Checkbox<'a, M> {
+    cb(on).label(label).size(SIZE_BODY).text_size(SIZE_BODY).style(checkbox)
+}
+
+/// A radio button in the neutral [`radio`] style.
+pub fn choice<'a, M: Clone + 'a, V: Copy + Eq>(
+    label: impl Into<String>,
+    value: V,
+    selected: Option<V>,
+    on: impl FnOnce(V) -> M,
+) -> iced::widget::Radio<'a, M> {
+    rd(label, value, selected, on).size(SIZE_BODY).text_size(SIZE_BODY).style(radio)
+}
+
 /// Semibold, for titles and headings.
 pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
 
