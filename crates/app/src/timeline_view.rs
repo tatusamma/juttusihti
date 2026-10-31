@@ -4,16 +4,16 @@ use std::collections::{BTreeMap, HashMap};
 
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{
-    button, canvas as canvas_widget, checkbox, column, container, pick_list, row, scrollable, text, text_input,
-};
-use iced::{Color, Element, Fill, Font, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, font};
+use iced::widget::{canvas as canvas_widget, column, container, pick_list, row, scrollable, text, text_input};
+use iced::{Center, Color, Element, Fill, Point, Rectangle, Renderer, Size, Task as Cmd, Theme};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::timeline::Timeline;
 use juttusihti_core::{ArticleId, Feed, Label};
 
 use crate::db::Db;
 use crate::format;
+use crate::icons::Icon;
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 const LIMIT: u32 = 2_000;
 const DAY: i64 = 86_400;
@@ -160,12 +160,6 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let zoom = |d: i64, l: &'static str| {
-            button(text(l).size(12))
-                .style(if self.days == d { button::primary } else { button::secondary })
-                .on_press(Msg::Days(d))
-        };
         let mut labels = vec![Choice(None, "All labels".into())];
         labels.extend(self.labels.iter().map(|l| Choice(Some(l.id), l.name.clone())));
         let mut sources = vec![Choice(None, "All sources".into())];
@@ -173,42 +167,47 @@ impl State {
         let sel_label = labels.iter().find(|c| c.0 == self.label).cloned();
         let sel_source = sources.iter().find(|c| c.0 == self.source).cloned();
         let (from, to) = self.range();
+        let zooms = [(7, "Week"), (30, "Month"), (90, "Quarter"), (365, "Year")];
         let controls = column![
             row![
-                text("Timeline").size(22).font(bold),
-                text(format!("{} – {}", format::full_date(from), format::full_date(to - 1))).size(12),
+                style::title("Timeline"),
+                style::note(format!("{} – {}", format::full_date(from), format::full_date(to - 1))),
             ]
-            .spacing(12)
-            .align_y(iced::Center),
+            .spacing(SPACE[2])
+            .align_y(Center),
             row![
-                button(text("◀").size(12)).style(button::secondary).on_press(Msg::Shift(-1)),
-                zoom(7, "Week"),
-                zoom(30, "Month"),
-                zoom(90, "Quarter"),
-                zoom(365, "Year"),
-                button(text("▶").size(12)).style(button::secondary).on_press(Msg::Shift(1)),
-                button(text("Today").size(12)).style(button::text).on_press(Msg::Today),
-                pick_list(labels, sel_label, Msg::Label),
-                pick_list(sources, sel_source, Msg::Source),
-                text_input("Filter by search query", &self.query).on_input(Msg::Query).on_submit(Msg::Submit).width(200),
-                checkbox(self.only_threads).label("Only story threads").on_toggle(Msg::OnlyThreads),
+                style::icon_button(Icon::ChevronLeft, "Earlier", SIZE_BODY, Some(Msg::Shift(-1))),
+                style::segmented(zooms, self.days, Msg::Days),
+                style::icon_button(Icon::ChevronRight, "Later", SIZE_BODY, Some(Msg::Shift(1))),
+                style::quiet_button(None, "Today", style::quiet, Some(Msg::Today)),
+                pick_list(labels, sel_label, Msg::Label).text_size(SIZE_SMALL),
+                pick_list(sources, sel_source, Msg::Source).text_size(SIZE_SMALL),
+                text_input("Filter by search query", &self.query)
+                    .on_input(Msg::Query)
+                    .on_submit(Msg::Submit)
+                    .size(SIZE_SMALL)
+                    .padding(SPACE[1])
+                    .width(200),
+                style::check(self.only_threads, "Only story threads").on_toggle(Msg::OnlyThreads),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
-            text("● published date   ○ no date in feed (fetch time)   lines join linked stories; the ringed dot is the first mention   ◆ events with a known date")
-                .size(11),
+            .spacing(SPACE[1])
+            .align_y(Center),
+            style::note(
+                "● published date   ○ no date in feed (fetch time)   lines join linked stories; the ringed dot \
+                 is the first mention   ◆ events with a known date"
+            ),
         ]
-        .spacing(8)
-        .padding(16);
+        .spacing(SPACE[2])
+        .padding(SPACE[3]);
         let mut col = column![controls].height(Fill);
         if let Some(e) = &self.error {
-            col = col.push(container(text(e).size(12)).padding([4, 16]).style(container::danger));
+            col = col.push(container(text(e).size(SIZE_SMALL).style(style::danger)).padding([SPACE[0], SPACE[3]]));
         }
-        let Some(t) = &self.data else { return col.push(container(text("Loading…")).center(Fill)).into() };
+        let Some(t) = &self.data else { return col.push(container(style::note("Loading…")).center(Fill)).into() };
         if t.truncated {
             col = col.push(
-                container(text(format!("Showing the newest {LIMIT} articles; zoom in for more detail.")).size(12))
-                    .padding([0, 16]),
+                container(style::note(format!("Showing the newest {LIMIT} articles; zoom in for more detail.")))
+                    .padding([0.0, SPACE[3]]),
             );
         }
         let program =
@@ -216,13 +215,12 @@ impl State {
         col = col.push(canvas_widget(program).width(Fill).height(Fill));
         if !t.undated_events.is_empty() {
             let mut list =
-                column![text("Events without a date in this range (not placed on the axis)").size(12).font(bold)]
-                    .spacing(2);
+                column![style::heading("Events without a date in this range (not placed on the axis)")].spacing(2);
             for e in &t.undated_events {
                 let when = e.starts_at.map(|s| format!(" — dated {}", format::full_date(s))).unwrap_or_default();
-                list = list.push(text(format!("◇ {}{when}", e.title)).size(12));
+                list = list.push(text(format!("◇ {}{when}", e.title)).size(SIZE_SMALL).style(style::body));
             }
-            col = col.push(container(scrollable(list).height(90)).padding([4, 16]));
+            col = col.push(container(scrollable(list).height(90)).padding([SPACE[0], SPACE[3]]));
         }
         col.into()
     }
