@@ -5,6 +5,7 @@ mod app;
 mod db;
 mod format;
 mod graph_view;
+mod icons;
 mod labels;
 mod map_view;
 mod plan;
@@ -61,6 +62,7 @@ fn main() -> iced::Result {
     let db = db::Db::new(store);
 
     iced::application(move || app::App::boot(db.clone(), db_path.clone()), app::App::update, app::App::view)
+        .font(icons::FONT_BYTES)
         .title(app::App::title)
         .theme(app::App::theme)
         .subscription(app::App::subscription)
