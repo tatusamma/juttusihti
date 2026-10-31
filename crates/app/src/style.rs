@@ -2,10 +2,12 @@
 //! and the shared text, button and container styles of every screen.
 
 use iced::theme::Palette;
+use iced::widget::overlay::menu;
 use iced::widget::{
     Space, Text, button, checkbox as cb, container, mouse_area, opaque, pin, radio as rd, row as ui_row, stack, text,
     tooltip,
 };
+use iced::widget::{pick_list as pl, text_input as ti};
 use iced::{Background, Border, Center, Color, Element, Fill, Font, Point, Shadow, Theme, Vector, border, font};
 
 use crate::icons::{self, Icon};
@@ -141,14 +143,14 @@ fn base(text_color: Color, background: Option<Background>, border: Border) -> bu
     button::Style { background, text_color, border, shadow: Shadow::default(), snap: false }
 }
 
-/// The one amber-filled button of a screen.
+/// The one amber-filled button of a screen. Disabled, it keeps a faint outline so it still reads as a button.
 pub fn main(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let border = border::rounded(RADIUS);
     match status {
         button::Status::Active => base(t.background, fill(t.accent), border),
         button::Status::Hovered | button::Status::Pressed => base(t.background, fill(darken(t.accent, 0.08)), border),
-        button::Status::Disabled => base(t.faint, None, border),
+        button::Status::Disabled => base(t.faint, None, border.width(1.0).color(t.line)),
     }
 }
 
@@ -291,6 +293,55 @@ pub fn danger(theme: &Theme) -> text::Style {
 pub fn card(theme: &Theme) -> container::Style {
     let t = tokens(theme);
     container::Style { border: border::rounded(RADIUS).width(1.0).color(t.line), ..container::Style::default() }
+}
+
+/// Neutral text field: `line` border on the pane colour, `muted` border on hover, accent while focused.
+pub fn text_input(theme: &Theme, status: ti::Status) -> ti::Style {
+    let t = tokens(theme);
+    let edge = match status {
+        ti::Status::Active | ti::Status::Disabled => t.line,
+        ti::Status::Hovered => t.muted,
+        ti::Status::Focused { .. } => t.accent,
+    };
+    let disabled = status == ti::Status::Disabled;
+    ti::Style {
+        background: Background::Color(t.pane),
+        border: border::rounded(RADIUS).width(1.0).color(edge),
+        icon: t.muted,
+        placeholder: t.faint,
+        value: if disabled { t.faint } else { t.text },
+        selection: Color { a: 0.35, ..t.accent },
+    }
+}
+
+/// Neutral drop-down: like [`text_input`], with the accent border while its menu is open.
+pub fn pick_list(theme: &Theme, status: pl::Status) -> pl::Style {
+    let t = tokens(theme);
+    let edge = match status {
+        pl::Status::Active => t.line,
+        pl::Status::Hovered => t.muted,
+        pl::Status::Opened { .. } => t.accent,
+    };
+    pl::Style {
+        text_color: t.text,
+        placeholder_color: t.faint,
+        handle_color: t.muted,
+        background: Background::Color(t.pane),
+        border: border::rounded(RADIUS).width(1.0).color(edge),
+    }
+}
+
+/// The open menu of a [`pick_list`]: popover surface, the hovered entry on the selection colour.
+pub fn menu(theme: &Theme) -> menu::Style {
+    let t = tokens(theme);
+    menu::Style {
+        background: Background::Color(t.pane),
+        border: border::rounded(RADIUS).width(1.0).color(t.line),
+        text_color: t.body,
+        selected_text_color: t.text,
+        selected_background: Background::Color(t.selection),
+        shadow: Shadow::default(),
+    }
 }
 
 /// Neutral checkbox: text-coloured check on the pane colour with a border; never amber.
@@ -531,27 +582,37 @@ mod tests {
             assert_ne!(s(f).background, Some(DARK.accent.into()));
         }
         assert_eq!(s(quiet).border.width, 1.0);
+        assert_eq!(main(&th, button::Status::Disabled).border.width, 1.0);
     }
 
     #[test]
     fn no_literal_text_sizes_in_views() {
         let sources = [
-            include_str!("app.rs"),
-            include_str!("reports.rs"),
-            include_str!("research.rs"),
-            include_str!("review.rs"),
-            include_str!("labels.rs"),
-            include_str!("providers.rs"),
-            include_str!("settings.rs"),
-            include_str!("timeline_view.rs"),
-            include_str!("graph_view.rs"),
-            include_str!("map_view.rs"),
-            include_str!("quick.rs"),
-            include_str!("rail.rs"),
-            include_str!("feeds_menu.rs"),
+            ("app.rs", include_str!("app.rs")),
+            ("reports.rs", include_str!("reports.rs")),
+            ("research.rs", include_str!("research.rs")),
+            ("review.rs", include_str!("review.rs")),
+            ("labels.rs", include_str!("labels.rs")),
+            ("providers.rs", include_str!("providers.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("timeline_view.rs", include_str!("timeline_view.rs")),
+            ("graph_view.rs", include_str!("graph_view.rs")),
+            ("map_view.rs", include_str!("map_view.rs")),
+            ("quick.rs", include_str!("quick.rs")),
+            ("rail.rs", include_str!("rail.rs")),
+            ("feeds_menu.rs", include_str!("feeds_menu.rs")),
         ];
-        for src in sources {
-            assert!(!src.contains(".size(1") && !src.contains(".size(2"), "use style::SIZE_* constants");
+        // Widget sizes and canvas text sizes alike: a digit right after the opener is a literal.
+        let openers = [".size(", ".text_size(", "size: "];
+        for (name, src) in sources {
+            for (n, line) in src.lines().enumerate() {
+                for opener in openers {
+                    let literal = line
+                        .match_indices(opener)
+                        .any(|(i, _)| line[i + opener.len()..].starts_with(|c: char| c.is_ascii_digit()));
+                    assert!(!literal, "{name}:{}: literal text size; use style::SIZE_* constants", n + 1);
+                }
+            }
         }
     }
 

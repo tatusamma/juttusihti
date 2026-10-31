@@ -1170,6 +1170,7 @@ impl App {
     fn view_top_bar(&self) -> Element<'_, Message> {
         let brand = text("Juttusihti").size(SIZE_TITLE).font(Font { weight: font::Weight::Bold, ..Font::DEFAULT });
         let search = text_input("Search news…", &self.search)
+            .style(style::text_input)
             .id(SEARCH_ID)
             .on_input(Message::SearchInput)
             .on_submit(Message::SearchSubmit)
@@ -1536,6 +1537,7 @@ impl App {
         }
         labels = labels.push(
             text_input("+ label", &self.label_input)
+                .style(style::text_input)
                 .on_input(Message::LabelInput)
                 .on_submit(Message::AddLabel)
                 .size(SIZE_SMALL)

@@ -646,6 +646,7 @@ impl State {
         }
         sources = sources.push(
             text_input("Optional search query (same syntax as the search box)", &self.query)
+                .style(style::text_input)
                 .on_input(Msg::Query)
                 .size(SIZE_BODY)
                 .padding(SPACE[1]),
@@ -660,11 +661,17 @@ impl State {
         let mut provider = column![
             style::heading("AI provider and model"),
             row![
-                pick_list(&Provider::ALL[..], Some(self.provider), Msg::Provider).text_size(SIZE_BODY),
+                pick_list(&Provider::ALL[..], Some(self.provider), Msg::Provider)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_BODY),
                 pick_list(models, selected_model, Msg::ModelPicked)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
                     .placeholder(if on_plan { "Plan models" } else { "Known models" })
                     .text_size(SIZE_BODY),
                 text_input("or any model id", &self.model)
+                    .style(style::text_input)
                     .on_input(Msg::Model)
                     .size(SIZE_BODY)
                     .padding(SPACE[1])
@@ -724,6 +731,7 @@ impl State {
         if self.tasks.contains(&Task::Relevance) {
             tasks = tasks.push(
                 text_input("Investigation topic for relevance, e.g. \"energy prices in the Nordics\"", &self.criteria)
+                    .style(style::text_input)
                     .on_input(Msg::Criteria)
                     .size(SIZE_BODY)
                     .padding(SPACE[1]),
@@ -1089,7 +1097,7 @@ fn labeled<'a>(label: &'a str, field: impl Into<Element<'a, Msg>>) -> Element<'a
 
 /// A text field in the screen's size.
 fn input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> iced::widget::TextInput<'a, Msg> {
-    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1])
+    text_input(placeholder, value).style(style::text_input).on_input(on).size(SIZE_BODY).padding(SPACE[1])
 }
 
 /// First day of a quick range ending `today`: the last `days` days, or this month for 0.

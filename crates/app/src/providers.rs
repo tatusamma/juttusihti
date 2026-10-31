@@ -240,6 +240,7 @@ impl State {
             style::note(state),
             row![
                 text_input(placeholder, &self.inputs[idx(p)])
+                    .style(style::text_input)
                     .secure(true)
                     .on_input(move |s| Msg::Input(p, s))
                     .on_submit(Msg::Save(p))
@@ -268,7 +269,10 @@ impl State {
             style::note("Used by the ✨ AI button above every article list. Set once; change any time."),
             row![
                 label("Provider"),
-                pick_list(&Provider::ALL[..], Some(d.provider), Msg::SetProvider).text_size(SIZE_BODY),
+                pick_list(&Provider::ALL[..], Some(d.provider), Msg::SetProvider)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_BODY),
             ]
             .spacing(SPACE[1])
             .align_y(Center),
@@ -466,5 +470,11 @@ fn link<'a>(label: &'static str, url: &'static str) -> Element<'a, Msg> {
 
 /// A short number field.
 fn small_input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> Element<'a, Msg> {
-    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1]).width(70).into()
+    text_input(placeholder, value)
+        .style(style::text_input)
+        .on_input(on)
+        .size(SIZE_BODY)
+        .padding(SPACE[1])
+        .width(70)
+        .into()
 }

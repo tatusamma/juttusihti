@@ -113,6 +113,7 @@ pub fn panel<'a>(
     let add = column![
         row![
             text_input("Add a site or feed", add_feed)
+                .style(style::text_input)
                 .on_input(Message::AddFeedInput)
                 .on_submit(Message::AddFeed)
                 .size(SIZE_BODY)
@@ -168,13 +169,19 @@ fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> El
         column![
             text(&feed.url).size(SIZE_SMALL).style(style::faint),
             text_input("Title", &edit.title)
+                .style(style::text_input)
                 .on_input(Message::FeedTitle)
                 .on_submit(Message::SaveFeed)
                 .size(SIZE_BODY)
                 .padding(SPACE[1]),
             row![
-                pick_list(choices, selected, Message::FeedFolder).text_size(SIZE_SMALL).width(Fill),
+                pick_list(choices, selected, Message::FeedFolder)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL)
+                    .width(Fill),
                 text_input("or new folder", &edit.new_folder)
+                    .style(style::text_input)
                     .on_input(Message::NewFolder)
                     .size(SIZE_SMALL)
                     .padding(SPACE[1])

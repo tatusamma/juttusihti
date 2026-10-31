@@ -250,15 +250,20 @@ impl State {
             style::title("Relationship map"),
             row![
                 pick_list(sessions, selected_session, Msg::Session)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
                     .placeholder("Links from a session…")
                     .text_size(SIZE_SMALL),
                 text_input("or find an entity", &self.entity_query)
+                    .style(style::text_input)
                     .on_input(Msg::EntityQuery)
                     .on_submit(Msg::FindEntity)
                     .size(SIZE_SMALL)
                     .padding(SPACE[1])
                     .width(200),
                 pick_list(self.entity_results.clone(), None::<EntityChoice>, Msg::EntityPicked)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
                     .placeholder("Matches")
                     .text_size(SIZE_SMALL),
             ]
@@ -266,11 +271,18 @@ impl State {
             .align_y(Center),
             row![
                 style::note("Hops"),
-                pick_list(&[1u8, 2, 3][..], Some(self.hops), Msg::Hops).text_size(SIZE_SMALL),
+                pick_list(&[1u8, 2, 3][..], Some(self.hops), Msg::Hops)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL),
                 style::check(self.suggested, "Show AI suggestions").on_toggle(Msg::Suggested),
                 style::check(self.entities, "Show entities").on_toggle(Msg::Entities),
-                pick_list(highlights, Some(self.highlight), Msg::Highlight).text_size(SIZE_SMALL),
+                pick_list(highlights, Some(self.highlight), Msg::Highlight)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL),
                 text_input("Search in map", &self.search)
+                    .style(style::text_input)
                     .on_input(Msg::Search)
                     .size(SIZE_SMALL)
                     .padding(SPACE[1])
@@ -542,7 +554,7 @@ impl canvas::Program<Msg> for GraphCanvas<'_> {
                         content: label,
                         position: Point::new(p.x + r + 4.0, p.y - 7.0),
                         color: palette.text,
-                        size: 12.0.into(),
+                        size: SIZE_SMALL.into(),
                         ..Text::default()
                     });
                 }

@@ -260,7 +260,11 @@ impl State {
             ]
             .spacing(SPACE[1]),
             row![
-                pick_list(choices, selected, Msg::Select).placeholder("Choose a session").text_size(SIZE_BODY),
+                pick_list(choices, selected, Msg::Select)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .placeholder("Choose a session")
+                    .text_size(SIZE_BODY),
                 style::check(self.show_all, "Show decided items").on_toggle(Msg::ShowAll),
             ]
             .spacing(SPACE[2])
@@ -314,6 +318,8 @@ impl State {
                 column![
                     row![
                         pick_list(&KindChoice::ALL[..], Some(KindChoice(r.kind)), move |k| Msg::Retype(r.id, k))
+                            .style(style::pick_list)
+                            .menu_style(style::menu)
                             .text_size(SIZE_SMALL),
                         style::note(conf),
                     ]

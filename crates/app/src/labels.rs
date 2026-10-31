@@ -205,6 +205,8 @@ impl State {
                     .align_y(Center),
                     row![
                         pick_list(targets, self.merge_target.clone(), Msg::MergeTarget)
+                            .style(style::pick_list)
+                            .menu_style(style::menu)
                             .placeholder("Merge into…")
                             .text_size(SIZE_BODY),
                         style::quiet_button(
@@ -258,5 +260,5 @@ impl State {
 
 /// A text field in the screen's size.
 fn input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> iced::widget::TextInput<'a, Msg> {
-    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1])
+    text_input(placeholder, value).style(style::text_input).on_input(on).size(SIZE_BODY).padding(SPACE[1])
 }

@@ -180,9 +180,16 @@ impl State {
                 style::segmented(zooms, self.days, Msg::Days),
                 style::icon_button(Icon::ChevronRight, "Later", SIZE_BODY, Some(Msg::Shift(1))),
                 style::quiet_button(None, "Today", style::quiet, Some(Msg::Today)),
-                pick_list(labels, sel_label, Msg::Label).text_size(SIZE_SMALL),
-                pick_list(sources, sel_source, Msg::Source).text_size(SIZE_SMALL),
+                pick_list(labels, sel_label, Msg::Label)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL),
+                pick_list(sources, sel_source, Msg::Source)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL),
                 text_input("Filter by search query", &self.query)
+                    .style(style::text_input)
                     .on_input(Msg::Query)
                     .on_submit(Msg::Submit)
                     .size(SIZE_SMALL)
@@ -354,7 +361,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     content: title.chars().take(24).collect(),
                     position: Point::new(8.0, y - 7.0),
                     color: pal.text,
-                    size: 12.0.into(),
+                    size: SIZE_SMALL.into(),
                     ..Text::default()
                 });
             }
@@ -378,7 +385,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     content: format::local(t).map(|d| d.format(fmt).to_string()).unwrap_or_default(),
                     position: Point::new(x + 2.0, axis_y + 6.0),
                     color: muted,
-                    size: 11.0.into(),
+                    size: SIZE_SMALL.into(),
                     ..Text::default()
                 });
                 let n = self.t.articles.iter().filter(|a| a.at >= t && a.at < t + tick).count();
@@ -422,7 +429,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     content: e.title.chars().take(30).collect(),
                     position: Point::new(x + 8.0, 26.0),
                     color: pal.text,
-                    size: 11.0.into(),
+                    size: SIZE_SMALL.into(),
                     ..Text::default()
                 });
             }
@@ -475,7 +482,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     content: label,
                     position: Point::new(x, p.y - 24.0),
                     color: pal.text,
-                    size: 12.0.into(),
+                    size: SIZE_SMALL.into(),
                     ..Text::default()
                 });
             }

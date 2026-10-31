@@ -241,7 +241,13 @@ impl State {
 
     pub fn view(&self) -> Element<'_, Msg> {
         fn field<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg, width: f32) -> Element<'a, Msg> {
-            text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1]).width(width).into()
+            text_input(placeholder, value)
+                .style(style::text_input)
+                .on_input(on)
+                .size(SIZE_BODY)
+                .padding(SPACE[1])
+                .width(width)
+                .into()
         }
         let label = |s: &'static str| text(s).size(SIZE_BODY);
         let storage = column![
@@ -295,6 +301,7 @@ impl State {
             style::heading("Map"),
             row![
                 text_input(juttusihti_fetch::tiles::OSM_TILE_URL, &self.tile_url)
+                    .style(style::text_input)
                     .on_input(Msg::TileUrl)
                     .on_submit(Msg::SaveTileUrl)
                     .size(SIZE_BODY)

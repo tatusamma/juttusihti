@@ -297,7 +297,10 @@ impl State {
         let mut top = column![
             row![
                 style::title("Map"),
-                pick_list(sessions, selected_session, Msg::Session).text_size(SIZE_SMALL),
+                pick_list(sessions, selected_session, Msg::Session)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL),
                 style::check(self.tiles_enabled, format!("Load map tiles from {host}")).on_toggle(Msg::EnableTiles),
             ]
             .spacing(SPACE[2])
@@ -559,7 +562,7 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                         content: format!("{lat}°"),
                         position: Point::new(4.0, a.y - 14.0),
                         color: Color { a: 0.5, ..pal.text },
-                        size: 10.0.into(),
+                        size: SIZE_SMALL.into(),
                         ..Text::default()
                     });
                     lat += step;
@@ -588,24 +591,24 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                         content: l.place_name.clone(),
                         position: Point::new(p.x + 9.0, p.y - 7.0),
                         color: pal.text,
-                        size: 12.0.into(),
+                        size: SIZE_SMALL.into(),
                         ..Text::default()
                     });
                 }
             }
             if s.tiles_enabled {
                 // Attribution on the map itself, bottom-right.
-                let w = 190.0;
+                let w = 214.0;
                 frame.fill_rectangle(
-                    Point::new(size.width - w, size.height - 18.0),
-                    Size::new(w, 18.0),
+                    Point::new(size.width - w, size.height - 20.0),
+                    Size::new(w, 20.0),
                     Color::from_rgba(1.0, 1.0, 1.0, 0.8),
                 );
                 frame.fill_text(Text {
                     content: ATTRIBUTION.into(),
-                    position: Point::new(size.width - w + 6.0, size.height - 16.0),
+                    position: Point::new(size.width - w + 6.0, size.height - 18.0),
                     color: Color::from_rgb(0.1, 0.1, 0.1),
-                    size: 12.0.into(),
+                    size: SIZE_SMALL.into(),
                     ..Text::default()
                 });
             }
