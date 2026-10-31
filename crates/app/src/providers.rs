@@ -2,12 +2,14 @@
 //! fast or quality model, limits), Sign in with ChatGPT, API keys in the OS
 //! secret store, and how to get a key from each provider.
 
-use iced::widget::{Space, button, column, container, pick_list, radio, row, rule, scrollable, text, text_input};
-use iced::{Element, Font, Task as Cmd, font};
+use iced::widget::{column, container, pick_list, row, rule, scrollable, text, text_input};
+use iced::{Center, Element, Task as Cmd};
 use juttusihti_core::ai_defaults::{AiDefaults, Tier, recommended};
 use juttusihti_core::pricing::{Billing, Provider, format_usd, usd_to_micros};
 
 use crate::db::Db;
+use crate::icons::Icon;
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 use crate::{ai_setup, plan, secrets};
 
 const CLAUDE_CONSOLE: &str = "https://platform.claude.com/";
@@ -235,210 +237,234 @@ impl State {
             None => "…".to_string(),
         };
         column![
-            text(state).size(13),
+            style::note(state),
             row![
                 text_input(placeholder, &self.inputs[idx(p)])
                     .secure(true)
                     .on_input(move |s| Msg::Input(p, s))
-                    .on_submit(Msg::Save(p)),
-                button(text("Save")).on_press_maybe((!self.inputs[idx(p)].trim().is_empty()).then_some(Msg::Save(p))),
-                button(text("Remove")).style(button::danger).on_press_maybe(has_key.then_some(Msg::Remove(p))),
+                    .on_submit(Msg::Save(p))
+                    .size(SIZE_BODY)
+                    .padding(SPACE[1]),
+                style::quiet_button(
+                    None,
+                    "Save",
+                    style::quiet,
+                    (!self.inputs[idx(p)].trim().is_empty()).then_some(Msg::Save(p))
+                ),
+                style::quiet_button(None, "Remove", style::quiet_danger, has_key.then_some(Msg::Remove(p))),
             ]
-            .spacing(8),
+            .spacing(SPACE[1])
+            .align_y(Center),
         ]
-        .spacing(6)
+        .spacing(SPACE[1])
         .into()
     }
 
     fn view_defaults(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let Some(d) = &self.defaults else { return text("…").into() };
+        let Some(d) = &self.defaults else { return style::note("…").into() };
+        let label = |s: &'static str| text(s).size(SIZE_BODY).width(120);
         let mut col = column![
-            text("AI defaults").size(18).font(bold),
-            text("Used by the ✨ AI button above every article list. Set once; change any time.").size(13),
+            style::heading("AI defaults"),
+            style::note("Used by the ✨ AI button above every article list. Set once; change any time."),
             row![
-                text("Provider").size(13).width(120),
-                pick_list(&Provider::ALL[..], Some(d.provider), Msg::SetProvider),
+                label("Provider"),
+                pick_list(&Provider::ALL[..], Some(d.provider), Msg::SetProvider).text_size(SIZE_BODY),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
+            .spacing(SPACE[1])
+            .align_y(Center),
         ]
-        .spacing(8);
+        .spacing(SPACE[1]);
         if d.provider == Provider::Openai {
             col = col.push(
                 row![
-                    text("Pay with").size(13).width(120),
-                    radio("My ChatGPT plan", Billing::ChatGptPlan, Some(d.billing), Msg::SetBilling),
-                    radio("API key", Billing::ApiKey, Some(d.billing), Msg::SetBilling),
+                    label("Pay with"),
+                    style::choice("My ChatGPT plan", Billing::ChatGptPlan, Some(d.billing), Msg::SetBilling),
+                    style::choice("API key", Billing::ApiKey, Some(d.billing), Msg::SetBilling),
                 ]
-                .spacing(16)
-                .align_y(iced::Center),
+                .spacing(SPACE[3])
+                .align_y(Center),
             );
         }
-        let mut tiers = column![].spacing(4);
+        let mut tiers = column![].spacing(SPACE[0]);
         for t in Tier::ALL {
-            tiers = tiers
-                .push(radio(recommended(d.provider, t).note, t, Some(d.tier), Msg::SetTier).size(14).text_size(13));
+            tiers = tiers.push(style::choice(recommended(d.provider, t).note, t, Some(d.tier), Msg::SetTier));
         }
-        col = col.push(row![text("Model").size(13).width(120), tiers].spacing(8));
-        if d.model.is_some() {
-            col = col.push(text(format!("Using model {}", d.model())).size(12));
-        }
-        col = col.push(
-            text(
-                "Fast models handle headlines, labels, people & places and related stories well and use the \
-                 fewest tokens. Pick Quality when you mostly want research summaries.",
-            )
-            .size(12),
-        );
         col = col.push(
             row![
-                text("Per quick run").size(13).width(120),
-                text_input("50", &self.max_articles).on_input(Msg::MaxArticles).width(70),
-                text("newest articles, at most").size(13),
-                text_input("0.25", &self.max_cost).on_input(Msg::MaxCost).width(70),
-                text("USD").size(13),
+                row![
+                    text("Model").size(SIZE_BODY),
+                    style::help(
+                        "Fast models handle headlines, labels, people & places and related stories well and use \
+                         the fewest tokens. Pick Quality when you mostly want research summaries."
+                    ),
+                ]
+                .spacing(SPACE[0])
+                .width(120),
+                tiers
             ]
-            .spacing(8)
-            .align_y(iced::Center),
+            .spacing(SPACE[1]),
+        );
+        if d.model.is_some() {
+            col = col.push(style::note(format!("Using model {}", d.model())));
+        }
+        col = col.push(
+            row![
+                label("Per quick run"),
+                small_input("50", &self.max_articles, Msg::MaxArticles),
+                text("newest articles, at most").size(SIZE_BODY),
+                small_input("0.25", &self.max_cost, Msg::MaxCost),
+                text("USD").size(SIZE_BODY),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
         );
         col.into()
     }
 
     fn view_chatgpt(&self) -> Element<'_, Msg> {
-        let mut col = column![
-            text(
-                "With a ChatGPT Plus or Pro plan you can sign in instead of using an API key. Analysis runs \
-                 then count against your plan's usage, not API credit. You can set a weekly limit for \
-                 Juttusihti in ChatGPT's settings."
-            )
-            .size(13),
-        ]
-        .spacing(8);
+        let mut col = column![style::intro(
+            "With a ChatGPT Plus or Pro plan you can sign in instead of using an API key.",
+            "With a ChatGPT Plus or Pro plan you can sign in instead of using an API key. Analysis runs then \
+             count against your plan's usage, not API credit. You can set a weekly limit for Juttusihti in \
+             ChatGPT's settings.",
+        )]
+        .spacing(SPACE[1]);
         col = col.push(match &self.chatgpt {
-            ChatGpt::Unknown => Element::from(text("…").size(13)),
+            ChatGpt::Unknown => Element::from(style::note("…")),
             ChatGpt::SignedOut => {
-                row![button(text("Sign in with ChatGPT")).on_press(Msg::SignIn), text("Not signed in").size(13),]
-                    .spacing(12)
-                    .align_y(iced::Center)
+                row![style::main_button("Sign in with ChatGPT", Some(Msg::SignIn)), style::note("Not signed in"),]
+                    .spacing(SPACE[2])
+                    .align_y(Center)
                     .into()
             }
-            ChatGpt::Starting => text("Starting sign-in…").size(13).into(),
+            ChatGpt::Starting => style::note("Starting sign-in…").into(),
             ChatGpt::Waiting { url, .. } => column![
-                text("Finish signing in in your browser. Juttusihti is waiting for it to come back.").size(13),
+                text("Finish signing in in your browser. Juttusihti is waiting for it to come back.")
+                    .size(SIZE_SMALL)
+                    .style(style::body),
                 row![
-                    button(text("Copy sign-in link")).style(button::secondary).on_press(Msg::CopyLink),
-                    button(text("Cancel")).style(button::secondary).on_press(Msg::CancelSignIn),
+                    style::quiet_button(None, "Copy sign-in link", style::quiet, Some(Msg::CopyLink)),
+                    style::quiet_button(None, "Cancel", style::quiet, Some(Msg::CancelSignIn)),
                 ]
-                .spacing(8),
-                text(format!(
+                .spacing(SPACE[1]),
+                style::note(format!(
                     "If no browser opened, paste the link into one: {}…",
                     url.chars().take(60).collect::<String>()
-                ))
-                .size(11),
+                )),
             ]
-            .spacing(6)
+            .spacing(SPACE[1])
             .into(),
             ChatGpt::SignedIn(email) => row![
-                text(format!("Signed in as {email}")).size(13),
-                button(text("Sign out")).style(button::secondary).on_press(Msg::SignOut),
+                text(format!("Signed in as {email}")).size(SIZE_SMALL).style(style::body),
+                style::quiet_button(None, "Sign out", style::quiet, Some(Msg::SignOut)),
             ]
-            .spacing(12)
-            .align_y(iced::Center)
+            .spacing(SPACE[2])
+            .align_y(Center)
             .into(),
         });
         col.push(link("How ChatGPT plan usage in other apps works", CHATGPT_HELP)).into()
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let heading = |s: &'static str| text(s).size(18).font(bold);
-        let sub = |s: &'static str| text(s).size(14).font(bold);
         let mut col = column![
-            text("AI setup").size(24).font(bold),
-            text(
-                "Credentials are kept in your operating system's secret store, not in Juttusihti's database. \
-                 Nothing is sent to a provider until you start an analysis and agree to send its articles."
-            )
-            .size(13),
+            column![
+                style::title("AI setup"),
+                style::intro(
+                    "Keys stay in your system's secret store; nothing is sent until you start a run.",
+                    "Credentials are kept in your operating system's secret store, not in Juttusihti's database. \
+                     Nothing is sent to a provider until you start an analysis and agree to send its articles.",
+                ),
+            ]
+            .spacing(SPACE[1]),
         ]
-        .spacing(16)
-        .padding(24)
+        .spacing(SPACE[4])
+        .padding(SPACE[4])
         .max_width(760);
-        match &self.message {
-            Some(Ok(m)) => col = col.push(container(text(m).size(13)).padding(8).style(container::success)),
-            Some(Err(m)) => col = col.push(container(text(m).size(13)).padding(8).style(container::danger)),
-            None => {}
+        if let Some(m) = &self.message {
+            col = col.push(style::message(m));
         }
 
         col = col.push(self.view_defaults());
-        col = col
-            .push(rule::horizontal(1))
-            .push(heading("OpenAI"))
-            .push(sub("Sign in with ChatGPT"))
-            .push(self.view_chatgpt());
-        col = col
-            .push(sub("Or an OpenAI API key (billed per token)"))
-            .push(self.key_row(Provider::Openai, "Paste API key (sk-…)"));
-        col = col.push(link("Create an OpenAI API key", OPENAI_KEYS));
-
-        col = col.push(rule::horizontal(1)).push(heading("Anthropic Claude")).push(steps(&[
-            "Open the Claude Console and sign in, or create an account. A Claude Pro or Max subscription \
-             does not include API use; the API is billed separately, so add credits under Billing first.",
-            "Open the API keys page and press “Create key”. Name it “Juttusihti”, choose a workspace \
-             (keys scoped to a workspace work without extra settings) and an expiry date.",
-            "Copy the key. It starts with “sk-ant-” and is shown only once.",
-            "Paste it below and press Save.",
-        ]));
-        col = col.push(
-            row![
-                button(text("Open Claude Console")).style(button::secondary).on_press(Msg::Open(CLAUDE_CONSOLE)),
-                button(text("Open API keys page")).style(button::secondary).on_press(Msg::Open(CLAUDE_KEYS)),
+        col = col.push(rule::horizontal(1)).push(
+            column![
+                style::title("OpenAI"),
+                style::heading("Sign in with ChatGPT"),
+                self.view_chatgpt(),
+                style::heading("Or an OpenAI API key (billed per token)"),
+                self.key_row(Provider::Openai, "Paste API key (sk-…)"),
+                link("Create an OpenAI API key", OPENAI_KEYS),
             ]
-            .spacing(8),
+            .spacing(SPACE[2]),
         );
-        col = col
-            .push(text("Tip: you can also set a monthly spend limit for your organization in the Console.").size(12));
-        col = col.push(self.key_row(Provider::Anthropic, "Paste API key (sk-ant-…)"));
 
-        col = col.push(rule::horizontal(1)).push(heading("Google Gemini")).push(steps(&[
-            "Open Google AI Studio and sign in with your Google account.",
-            "Press “Create API key”. Pick an existing Google Cloud project or let AI Studio create one.",
-            "Copy the key, paste it below and press Save.",
-        ]));
-        col = col.push(
-            container(
-                text(
-                    "Privacy: on Gemini's free tier, Google may use what you send to improve its products, and \
-                     human reviewers may read it. With billing set up for the key's project (paid tier), it \
-                     does not. Set up billing in AI Studio before analyzing material you do not want reviewed.",
+        col = col.push(rule::horizontal(1)).push(
+            column![
+                style::title("Anthropic Claude"),
+                steps(&[
+                    "Open the Claude Console and sign in, or create an account. A Claude Pro or Max subscription \
+                     does not include API use; the API is billed separately, so add credits under Billing first.",
+                    "Open the API keys page and press “Create key”. Name it “Juttusihti”, choose a workspace \
+                     (keys scoped to a workspace work without extra settings) and an expiry date.",
+                    "Copy the key. It starts with “sk-ant-” and is shown only once.",
+                    "Paste it below and press Save.",
+                ]),
+                row![link("Open Claude Console", CLAUDE_CONSOLE), link("Open API keys page", CLAUDE_KEYS)]
+                    .spacing(SPACE[1]),
+                style::note("Tip: you can also set a monthly spend limit for your organization in the Console."),
+                self.key_row(Provider::Anthropic, "Paste API key (sk-ant-…)"),
+            ]
+            .spacing(SPACE[2]),
+        );
+
+        col = col.push(rule::horizontal(1)).push(
+            column![
+                style::title("Google Gemini"),
+                steps(&[
+                    "Open Google AI Studio and sign in with your Google account.",
+                    "Press “Create API key”. Pick an existing Google Cloud project or let AI Studio create one.",
+                    "Copy the key, paste it below and press Save.",
+                ]),
+                container(
+                    text(
+                        "Privacy: on Gemini's free tier, Google may use what you send to improve its products, and \
+                         human reviewers may read it. With billing set up for the key's project (paid tier), it \
+                         does not. Set up billing in AI Studio before analyzing material you do not want reviewed.",
+                    )
+                    .size(SIZE_SMALL)
+                    .style(style::body),
                 )
-                .size(12),
-            )
-            .padding(8)
-            .style(container::warning),
-        );
-        col = col.push(
-            row![
-                button(text("Open Google AI Studio")).style(button::secondary).on_press(Msg::Open(GEMINI_KEYS)),
-                button(text("Gemini API terms")).style(button::secondary).on_press(Msg::Open(GEMINI_TERMS)),
+                .padding(SPACE[2])
+                .style(style::card),
+                row![link("Open Google AI Studio", GEMINI_KEYS), link("Gemini API terms", GEMINI_TERMS)]
+                    .spacing(SPACE[1]),
+                self.key_row(Provider::Gemini, "Paste API key"),
             ]
-            .spacing(8),
+            .spacing(SPACE[2]),
         );
-        col = col.push(self.key_row(Provider::Gemini, "Paste API key"));
-        col = col.push(Space::new().height(24));
         scrollable(col).into()
     }
 }
 
 fn steps<'a>(items: &[&'static str]) -> Element<'a, Msg> {
-    let mut col = column![].spacing(4);
+    let mut col = column![].spacing(SPACE[0]);
     for (i, s) in items.iter().enumerate() {
-        col = col.push(row![text(format!("{}.", i + 1)).size(13).width(20), text(*s).size(13)].spacing(4));
+        col = col.push(
+            row![
+                text(format!("{}.", i + 1)).size(SIZE_SMALL).style(style::muted).width(20),
+                text(*s).size(SIZE_SMALL).style(style::body)
+            ]
+            .spacing(SPACE[0]),
+        );
     }
     col.into()
 }
 
+/// A quiet button that opens `url` in the browser.
 fn link<'a>(label: &'static str, url: &'static str) -> Element<'a, Msg> {
-    button(text(label).size(12)).style(button::text).padding(0).on_press(Msg::Open(url)).into()
+    style::quiet_button(Some(Icon::External), label, style::quiet, Some(Msg::Open(url)))
+}
+
+/// A short number field.
+fn small_input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) -> Element<'a, Msg> {
+    text_input(placeholder, value).on_input(on).size(SIZE_BODY).padding(SPACE[1]).width(70).into()
 }
