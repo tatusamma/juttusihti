@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 
 use iced::theme::Palette;
-use iced::{Color, Theme};
+use iced::widget::{button, container, row as ui_row, text};
+use iced::{Background, Border, Color, Element, Shadow, Theme, Vector, border};
 
 const DARK_NAME: &str = "Juttusihti Dark";
 const LIGHT_NAME: &str = "Juttusihti Light";
@@ -58,7 +59,7 @@ pub const LIGHT: Tokens = Tokens {
 
 /// The tokens matching an Iced theme: light for "Juttusihti Light", dark otherwise.
 pub fn tokens(theme: &Theme) -> &'static Tokens {
-    if theme.to_string() == LIGHT_NAME { &LIGHT } else { &DARK }
+    if theme.palette().background == LIGHT.background { &LIGHT } else { &DARK }
 }
 
 /// The custom Iced theme for the dark or light token set.
@@ -75,6 +76,185 @@ pub fn theme(dark: bool) -> Theme {
             danger: t.danger,
         },
     )
+}
+
+/// Article title size.
+pub const SIZE_ARTICLE_TITLE: f32 = 24.0;
+/// Screen title size.
+pub const SIZE_TITLE: f32 = 17.0;
+/// Body and list headline size.
+pub const SIZE_BODY: f32 = 15.0;
+/// Secondary text size; dimmer rather than smaller.
+pub const SIZE_SMALL: f32 = 12.5;
+/// Maximum article text width.
+pub const READ_WIDTH: f32 = 680.0;
+/// Spacing scale.
+pub const SPACE: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
+
+const RADIUS: f32 = 6.0;
+
+fn darken(c: Color, amount: f32) -> Color {
+    Color { r: c.r * (1.0 - amount), g: c.g * (1.0 - amount), b: c.b * (1.0 - amount), a: c.a }
+}
+
+fn fill(c: Color) -> Option<Background> {
+    Some(Background::Color(c))
+}
+
+fn base(text_color: Color, background: Option<Background>, border: Border) -> button::Style {
+    button::Style { background, text_color, border, shadow: Shadow::default(), snap: false }
+}
+
+/// The one amber-filled button of a screen.
+pub fn main(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let border = border::rounded(RADIUS);
+    match status {
+        button::Status::Active => base(t.background, fill(t.accent), border),
+        button::Status::Hovered | button::Status::Pressed => base(t.background, fill(darken(t.accent, 0.08)), border),
+        button::Status::Disabled => base(t.faint, None, border),
+    }
+}
+
+fn outlined(theme: &Theme, status: button::Status, text_color: Color) -> button::Style {
+    let t = tokens(theme);
+    let border = border::rounded(RADIUS).width(1.0).color(t.line);
+    match status {
+        button::Status::Active => base(text_color, None, border),
+        button::Status::Hovered | button::Status::Pressed => base(text_color, fill(t.selection), border),
+        button::Status::Disabled => base(t.faint, None, border),
+    }
+}
+
+/// Outlined secondary button.
+pub fn quiet(theme: &Theme, status: button::Status) -> button::Style {
+    outlined(theme, status, tokens(theme).body)
+}
+
+/// Outlined button for destructive actions.
+pub fn quiet_danger(theme: &Theme, status: button::Status) -> button::Style {
+    outlined(theme, status, tokens(theme).danger)
+}
+
+fn bare(theme: &Theme, status: button::Status, text_color: Color) -> button::Style {
+    let t = tokens(theme);
+    let border = border::rounded(RADIUS);
+    match status {
+        button::Status::Active => base(text_color, None, border),
+        button::Status::Hovered | button::Status::Pressed => base(text_color, fill(t.selection), border),
+        button::Status::Disabled => base(t.faint, None, border),
+    }
+}
+
+/// Borderless icon button.
+pub fn icon(theme: &Theme, status: button::Status) -> button::Style {
+    bare(theme, status, tokens(theme).muted)
+}
+
+/// Icon button in its on/saved state.
+pub fn icon_active(theme: &Theme, status: button::Status) -> button::Style {
+    bare(theme, status, tokens(theme).accent)
+}
+
+/// Unselected list row.
+pub fn row(theme: &Theme, status: button::Status) -> button::Style {
+    bare(theme, status, tokens(theme).text)
+}
+
+/// Selected list row.
+pub fn row_selected(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let disabled = status == button::Status::Disabled;
+    base(if disabled { t.faint } else { t.text }, fill(t.selection), border::rounded(RADIUS))
+}
+
+/// Plain pane surface.
+pub fn pane(theme: &Theme) -> container::Style {
+    container::Style { background: fill(tokens(theme).pane), ..container::Style::default() }
+}
+
+/// Floating surface: pane with a line border, rounded corners and a soft shadow.
+pub fn popover(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        border: border::rounded(10.0).width(1.0).color(t.line),
+        shadow: Shadow { color: Color { a: 0.25, ..Color::BLACK }, offset: Vector::new(0.0, 4.0), blur_radius: 16.0 },
+        ..pane(theme)
+    }
+}
+
+/// Status bar surface.
+pub fn status(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style { text_color: Some(t.muted), border: border::width(1.0).color(t.line), ..pane(theme) }
+}
+
+/// Small tag/chip surface.
+pub fn chip(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        text_color: Some(t.muted),
+        background: fill(t.selection),
+        border: border::rounded(RADIUS),
+        ..container::Style::default()
+    }
+}
+
+fn colored(color: Color) -> text::Style {
+    text::Style { color: Some(color) }
+}
+
+/// Secondary text.
+pub fn muted(theme: &Theme) -> text::Style {
+    colored(tokens(theme).muted)
+}
+
+/// Tertiary text.
+pub fn faint(theme: &Theme) -> text::Style {
+    colored(tokens(theme).faint)
+}
+
+/// Reading text.
+pub fn body(theme: &Theme) -> text::Style {
+    colored(tokens(theme).body)
+}
+
+/// Accent-coloured text.
+pub fn accent(theme: &Theme) -> text::Style {
+    colored(tokens(theme).accent)
+}
+
+/// A row of joined quiet buttons; the selected one has the selection background and accent text.
+pub fn segmented<'a, T: Copy + PartialEq + 'a, M: Clone + 'a>(
+    options: &[(T, &'a str)],
+    selected: T,
+    on: impl Fn(T) -> M,
+) -> Element<'a, M> {
+    let last = options.len().saturating_sub(1);
+    let buttons = options.iter().enumerate().map(|(i, &(value, label))| {
+        let is_selected = value == selected;
+        let radius = border::Radius {
+            top_left: if i == 0 { RADIUS } else { 0.0 },
+            bottom_left: if i == 0 { RADIUS } else { 0.0 },
+            top_right: if i == last { RADIUS } else { 0.0 },
+            bottom_right: if i == last { RADIUS } else { 0.0 },
+        };
+        button::Button::new(text(label).size(SIZE_SMALL))
+            .padding([4.0, 12.0])
+            .on_press(on(value))
+            .style(move |theme: &Theme, status| {
+                let t = tokens(theme);
+                let mut style = quiet(theme, status);
+                style.border = Border { radius, ..style.border };
+                if is_selected {
+                    style.background = fill(t.selection);
+                    style.text_color = t.accent;
+                }
+                style
+            })
+            .into()
+    });
+    ui_row(buttons).spacing(-1.0).into()
 }
 
 fn luminance(c: Color) -> f32 {
@@ -112,5 +292,22 @@ mod tests {
         assert_eq!(tokens(&theme(true)).background, DARK.background);
         assert_eq!(tokens(&theme(false)).background, LIGHT.background);
         assert_eq!(theme(true).palette().primary, DARK.accent);
+    }
+
+    #[test]
+    fn only_main_buttons_fill_with_accent() {
+        let th = theme(true);
+        let s = |f: fn(&Theme, button::Status) -> button::Style| f(&th, button::Status::Active);
+        assert_eq!(s(main).background, Some(DARK.accent.into()));
+        for f in [quiet, quiet_danger, icon, row] {
+            assert_ne!(s(f).background, Some(DARK.accent.into()));
+        }
+        assert_eq!(s(quiet).border.width, 1.0);
+    }
+
+    #[test]
+    fn text_sizes_are_four_and_readable() {
+        let sizes = [SIZE_ARTICLE_TITLE, SIZE_TITLE, SIZE_BODY, SIZE_SMALL];
+        assert!(sizes.iter().all(|s| *s >= 12.0));
     }
 }
