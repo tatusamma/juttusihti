@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, pick_list, rich_text, row, rule, scrollable, span, text, text_input,
+    Space, button, column, container, operation, rich_text, row, rule, scrollable, span, text, text_input, tooltip,
 };
-use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font};
+use iced::{Element, Fill, Font, Length, Point, Subscription, Task, Theme, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::ListFilter;
@@ -19,11 +19,18 @@ use juttusihti_fetch::{Fetcher, Policy};
 use tokio::sync::Semaphore;
 
 use crate::db::Db;
-use crate::format;
+use crate::icons::{Icon, icon};
+use crate::style::{self, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
+use crate::{feeds_menu, format, rail};
 
 const PAGE_SIZE: u32 = 50;
 const MAX_PARALLEL_FETCHES: usize = 4;
 const SEARCH_ID: &str = "search";
+/// Fixed heights, so the feeds dropdown can be anchored under its button.
+const TOP_BAR_HEIGHT: f32 = 52.0;
+const LIST_HEADER_HEIGHT: f32 = 44.0;
+/// Left padding of the list header.
+const LIST_HEADER_PAD: f32 = 12.0;
 
 /// Which list the reader shows: the news stream or the saved articles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +63,9 @@ pub enum Screen {
 
 #[derive(Debug, Clone)]
 pub struct Sidebar {
-    feeds: Vec<Feed>,
-    folders: Vec<Folder>,
-    unread: Vec<(FeedId, u64)>,
+    pub(crate) feeds: Vec<Feed>,
+    pub(crate) folders: Vec<Folder>,
+    pub(crate) unread: Vec<(FeedId, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,18 +79,18 @@ pub struct Listing {
     headlines: std::collections::HashMap<ArticleId, String>,
 }
 
-/// Feed being edited in the list header.
+/// Feed being edited in the feeds dropdown.
 #[derive(Debug, Clone)]
 pub struct FeedEdit {
-    id: FeedId,
-    title: String,
-    folder: Option<FolderId>,
-    new_folder: String,
+    pub(crate) id: FeedId,
+    pub(crate) title: String,
+    pub(crate) folder: Option<FolderId>,
+    pub(crate) new_folder: String,
 }
 
 /// Pick-list entry for a feed's folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FolderChoice(Option<FolderId>, String);
+pub struct FolderChoice(pub(crate) Option<FolderId>, pub(crate) String);
 
 impl std::fmt::Display for FolderChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,7 +129,13 @@ pub enum Message {
     AddFeedInput(String),
     AddFeed,
     FeedAdded(Result<(FeedId, String), String>),
+    /// Asks "Unsubscribe from …?"; `ConfirmUnsubscribe` removes the feed.
     RemoveFeed(FeedId),
+    ConfirmUnsubscribe,
+    CancelUnsubscribe,
+    ToggleFeedsMenu,
+    /// Closes any open dropdown (click outside, Esc).
+    CloseOverlays,
     MarkAllRead,
     RefreshAll,
     Refreshed(FeedId, Result<usize, String>),
@@ -131,6 +144,8 @@ pub enum Message {
     Imported(Result<(usize, usize), String>),
     ExportOpml,
     Exported(Result<Option<PathBuf>, String>),
+    // No theme switch in the UI until it moves into Settings.
+    #[allow(dead_code)]
     ToggleTheme,
     ShowScreen(Screen),
     Research(crate::research::Msg),
@@ -188,6 +203,9 @@ pub struct App {
     status: Option<String>,
     label_input: String,
     feed_edit: Option<FeedEdit>,
+    feeds_open: bool,
+    /// Feed waiting for the "Unsubscribe from …?" answer.
+    confirm_unsubscribe: Option<FeedId>,
     reports: crate::reports::State,
     research: crate::research::State,
     labels: crate::labels::State,
@@ -251,6 +269,8 @@ impl App {
             status,
             label_input: String::new(),
             feed_edit: None,
+            feeds_open: false,
+            confirm_unsubscribe: None,
             reports: crate::reports::State::new(analytics.clone()),
         };
         let task = Task::batch([app.load_sidebar(), app.load_list(), app.settings.load().map(Message::Settings)]);
@@ -431,6 +451,24 @@ impl App {
         self.update(Message::Open(id))
     }
 
+    /// Closes the feeds dropdown, dropping an unanswered unsubscribe question and an unsaved edit.
+    fn close_feeds_menu(&mut self) {
+        self.feeds_open = false;
+        self.confirm_unsubscribe = None;
+        self.feed_edit = None;
+    }
+
+    /// Unread articles in the current News scope.
+    fn scope_unread(&self) -> u64 {
+        let feeds = &self.sidebar.feeds;
+        let in_scope = |f: FeedId| match self.scope {
+            Scope::All => true,
+            Scope::Feed(id) => f == id,
+            Scope::Folder(id) => feeds.iter().any(|x| x.id == f && x.folder_id == Some(id)),
+        };
+        self.sidebar.unread.iter().filter(|(f, _)| in_scope(*f)).map(|(_, n)| n).sum()
+    }
+
     /// Back to the first page of the reader list after a place/scope change.
     fn show_list(&mut self) -> Task<Message> {
         self.screen = Screen::Reader;
@@ -450,11 +488,15 @@ impl App {
                 self.show_list()
             }
             Message::SetScope(scope) => {
+                self.close_feeds_menu();
                 self.place = Place::News;
                 self.scope = scope;
                 self.show_list()
             }
             Message::ToggleUnreadOnly => {
+                if self.place != Place::News {
+                    return Task::none();
+                }
                 self.unread_only = !self.unread_only;
                 self.show_list()
             }
@@ -598,13 +640,46 @@ impl App {
                 Task::batch([refresh, fetch])
             }
             Message::RemoveFeed(id) => {
+                self.confirm_unsubscribe = Some(id);
+                self.feeds_open = true;
+                Task::none()
+            }
+            Message::CancelUnsubscribe => {
+                self.confirm_unsubscribe = None;
+                Task::none()
+            }
+            Message::ConfirmUnsubscribe => {
+                let Some(id) = self.confirm_unsubscribe.take() else { return Task::none() };
+                if self.feed_edit.as_ref().is_some_and(|e| e.id == id) {
+                    self.feed_edit = None;
+                }
                 let db = self.db.clone();
+                let remove =
+                    Task::perform(async move { db.call(move |s| s.remove_feed(id)).await }, Message::StateChanged)
+                        .chain(self.load_sidebar());
+                if self.scope != Scope::Feed(id) {
+                    // Another feed: stay where we are, minus that feed's articles.
+                    if self.preview.as_ref().is_some_and(|p| p.article.feed_id == id) {
+                        self.preview = None;
+                    }
+                    return remove.chain(self.load_list());
+                }
                 self.place = Place::News;
                 self.scope = Scope::All;
                 self.preview = None;
-                Task::perform(async move { db.call(move |s| s.remove_feed(id)).await }, Message::StateChanged)
-                    .chain(self.load_sidebar())
-                    .chain(Task::done(Message::SetScope(Scope::All)))
+                remove.chain(Task::done(Message::SetScope(Scope::All)))
+            }
+            Message::ToggleFeedsMenu => {
+                if self.feeds_open {
+                    self.close_feeds_menu();
+                } else {
+                    self.feeds_open = true;
+                }
+                Task::none()
+            }
+            Message::CloseOverlays => {
+                self.close_feeds_menu();
+                Task::none()
             }
             Message::MarkAllRead => {
                 let db = self.db.clone();
@@ -846,6 +921,8 @@ impl App {
                 Task::none()
             }
             Message::EditFeed(id) => {
+                self.feeds_open = true;
+                self.confirm_unsubscribe = None;
                 if let Some(f) = self.sidebar.feeds.iter().find(|f| f.id == id) {
                     self.feed_edit =
                         Some(FeedEdit { id, title: f.title.clone(), folder: f.folder_id, new_folder: String::new() });
@@ -932,6 +1009,7 @@ impl App {
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
             Key::Character("p") => self.update(Message::PrevPage),
+            Key::Named(keyboard::key::Named::Escape) => self.update(Message::CloseOverlays),
             _ => Task::none(),
         }
     }
@@ -957,8 +1035,8 @@ impl App {
             Screen::Providers => self.providers.view().map(Message::Providers),
             Screen::Settings => self.settings.view().map(Message::Settings),
         };
-        let body = row![container(self.view_sidebar()).width(260), rule::vertical(1), main].height(Fill);
-        let mut layout = column![self.view_toolbar(), rule::horizontal(1), body];
+        let body = row![rail::view(self.place, self.screen), rule::vertical(1), main].height(Fill);
+        let mut layout = column![self.view_top_bar(), rule::horizontal(1), body];
         if let Some(status) = &self.status {
             layout = layout.push(
                 container(
@@ -972,141 +1050,65 @@ impl App {
                 .style(container::secondary),
             );
         }
+        if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
+            // Just under the dropdown button at the left of the list header.
+            let anchor = Point::new(rail::WIDTH + 1.0 + LIST_HEADER_PAD, TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT);
+            let panel = feeds_menu::panel(
+                &self.sidebar,
+                self.scope,
+                &self.add_feed,
+                self.feed_edit.as_ref(),
+                self.confirm_unsubscribe,
+            );
+            return style::overlay(layout, panel, anchor, Message::CloseOverlays);
+        }
         layout.into()
     }
 
-    fn view_toolbar(&self) -> Element<'_, Message> {
-        let search = text_input("Search: words, \"phrases\", OR, -exclude, prefix*, title:…", &self.search)
+    fn view_top_bar(&self) -> Element<'_, Message> {
+        let brand = text("Juttusihti").size(SIZE_TITLE).font(Font { weight: font::Weight::Bold, ..Font::DEFAULT });
+        let search = text_input("Search news…", &self.search)
             .id(SEARCH_ID)
             .on_input(Message::SearchInput)
             .on_submit(Message::SearchSubmit)
-            .padding(8)
+            .size(SIZE_BODY)
+            .padding(SPACE[1])
             .width(Fill);
-        let clear = (!self.active_search.is_empty())
-            .then(|| button(text("Clear")).style(button::secondary).on_press(Message::ClearSearch));
-        let refresh_label =
-            if self.refreshing > 0 { format!("Refreshing ({})", self.refreshing) } else { "Refresh".into() };
-        let refresh = button(text(refresh_label))
-            .on_press_maybe((self.refreshing == 0 && self.fetcher.is_some()).then_some(Message::RefreshAll));
-        let theme = button(text(if self.settings.values.dark { "Light" } else { "Dark" }))
-            .style(button::secondary)
-            .on_press(Message::ToggleTheme);
-        row![text("Juttusihti").size(20).font(Font { weight: font::Weight::Bold, ..Font::DEFAULT }), search]
-            .push(clear)
-            .push(refresh)
-            .push(theme)
-            .spacing(12)
-            .padding(10)
-            .align_y(iced::Center)
-            .into()
-    }
-
-    fn nav_button<'a>(
-        &self,
-        label: String,
-        count: Option<u64>,
-        selected: bool,
-        target: Message,
-    ) -> Element<'a, Message> {
-        let content = row![text(label).size(14).width(Fill)]
-            .push(count.filter(|c| *c > 0).map(|c| text(c.to_string()).size(12)))
-            .align_y(iced::Center);
-        button(content)
-            .width(Fill)
-            .padding([6, 10])
-            .style(if selected { button::primary } else { button::text })
-            .on_press(target)
-            .into()
-    }
-
-    fn view_sidebar(&self) -> Element<'_, Message> {
-        let unread_of = |id: FeedId| self.sidebar.unread.iter().find(|(f, _)| *f == id).map(|(_, n)| *n);
-        let total_unread: u64 = self.sidebar.unread.iter().map(|(_, n)| n).sum();
-        let in_news = self.place == Place::News && self.screen == Screen::Reader;
-        let mut nav = column![
-            self.nav_button(
-                "All articles".into(),
-                None,
-                in_news && self.scope == Scope::All && !self.unread_only,
-                Message::SetScope(Scope::All),
-            ),
-            self.nav_button(
-                "Unread".into(),
-                Some(total_unread),
-                in_news && self.unread_only,
-                Message::ToggleUnreadOnly
-            ),
-            self.nav_button(
-                "Saved".into(),
-                None,
-                self.place == Place::Saved && self.screen == Screen::Reader,
-                Message::GoPlace(Place::Saved),
-            ),
-            button(text("Reports").size(14))
-                .width(Fill)
-                .padding([6, 10])
-                .style(if self.screen == Screen::Reports { button::primary } else { button::text })
-                .on_press(Message::ShowScreen(Screen::Reports)),
-            button(text("Custom analysis").size(14))
-                .width(Fill)
-                .padding([6, 10])
-                .style(if self.screen == Screen::Research { button::primary } else { button::text })
-                .on_press(Message::ShowScreen(Screen::Research)),
-            self.screen_button("Review", Screen::Review),
-            self.screen_button("Relationship map", Screen::Graph),
-            self.screen_button("Timeline", Screen::Timeline),
-            self.screen_button("Map", Screen::Map),
-            self.screen_button("Labels", Screen::Labels),
-            self.screen_button("AI setup", Screen::Providers),
-            self.screen_button("Settings", Screen::Settings),
-            rule::horizontal(1),
-        ]
-        .spacing(2);
-
-        for folder in &self.sidebar.folders {
-            let feeds: Vec<&Feed> = self.sidebar.feeds.iter().filter(|f| f.folder_id == Some(folder.id)).collect();
-            let unread: u64 = feeds.iter().filter_map(|f| unread_of(f.id)).sum();
-            nav = nav.push(self.nav_button(
-                format!("▾ {}", folder.name),
-                Some(unread),
-                in_news && self.scope == Scope::Folder(folder.id),
-                Message::SetScope(Scope::Folder(folder.id)),
-            ));
-            for f in feeds {
-                nav = nav.push(
-                    container(self.feed_button(f, unread_of(f.id)))
-                        .padding(iced::Padding { left: 12.0, ..Default::default() }),
-                );
-            }
-        }
-        for f in self.sidebar.feeds.iter().filter(|f| f.folder_id.is_none()) {
-            nav = nav.push(self.feed_button(f, unread_of(f.id)));
-        }
-        if self.sidebar.feeds.is_empty() {
-            nav = nav.push(text("No subscriptions yet. Add a site or feed URL below, or import OPML.").size(13));
-        }
-
-        let add = column![
-            text_input("Site or feed URL", &self.add_feed)
-                .on_input(Message::AddFeedInput)
-                .on_submit(Message::AddFeed)
-                .padding(6),
-            row![
-                button(text("Add").size(13)).on_press_maybe(self.fetcher.as_ref().map(|_| Message::AddFeed)),
-                button(text("Import").size(13)).style(button::secondary).on_press(Message::ImportOpml),
-                button(text("Export").size(13)).style(button::secondary).on_press(Message::ExportOpml),
-            ]
-            .spacing(6),
-        ]
-        .spacing(6);
-
-        column![scrollable(nav.padding(8)).height(Fill), rule::horizontal(1), container(add).padding(8)].into()
-    }
-
-    fn feed_button<'a>(&self, f: &Feed, unread: Option<u64>) -> Element<'a, Message> {
-        let label = if f.last_error.is_some() { format!("⚠ {}", f.title) } else { f.title.clone() };
-        let selected = self.place == Place::News && self.screen == Screen::Reader && self.scope == Scope::Feed(f.id);
-        self.nav_button(label, unread, selected, Message::SetScope(Scope::Feed(f.id)))
+        let help = tooltip(
+            icon(Icon::Help).style(style::faint),
+            style::tip("Search: words, \"phrases\", OR, -exclude, prefix*, title:…"),
+            tooltip::Position::Bottom,
+        );
+        let clear = (!self.active_search.is_empty()).then(|| {
+            button(text("Clear").size(SIZE_SMALL))
+                .padding([SPACE[0], SPACE[1] + 2.0])
+                .style(style::quiet)
+                .on_press(Message::ClearSearch)
+        });
+        let refresh_tip =
+            if self.refreshing > 0 { format!("Refreshing {}", self.refreshing) } else { "Refresh all feeds".into() };
+        let refresh = tooltip(
+            button(icon(Icon::Refresh))
+                .padding(SPACE[1])
+                .style(style::icon)
+                .on_press_maybe((self.refreshing == 0 && self.fetcher.is_some()).then_some(Message::RefreshAll)),
+            style::tip(refresh_tip),
+            tooltip::Position::Bottom,
+        );
+        let settings = tooltip(
+            button(icon(Icon::Settings))
+                .padding(SPACE[1])
+                .style(style::icon)
+                .on_press(Message::ShowScreen(Screen::Settings)),
+            style::tip("Settings"),
+            tooltip::Position::Bottom,
+        );
+        container(
+            row![brand, search, help].push(clear).push(refresh).push(settings).spacing(SPACE[2]).align_y(iced::Center),
+        )
+        .padding([0.0, SPACE[2]])
+        .center_y(TOP_BAR_HEIGHT)
+        .into()
     }
 
     fn view_list(&self) -> Element<'_, Message> {
@@ -1157,8 +1159,22 @@ impl App {
             );
         }
         if self.listing.items.is_empty() {
-            let msg = if self.active_search.is_empty() { "No articles." } else { "No matches." };
-            list = list.push(container(text(msg)).padding(16));
+            if self.place == Place::News && self.sidebar.feeds.is_empty() && self.active_search.is_empty() {
+                list = list.push(
+                    column![
+                        text("No feeds yet.").size(SIZE_BODY).style(style::muted),
+                        button(text("Add a site or feed").size(SIZE_BODY))
+                            .padding([SPACE[1], SPACE[2]])
+                            .style(style::main)
+                            .on_press(Message::ToggleFeedsMenu),
+                    ]
+                    .spacing(SPACE[2])
+                    .padding(SPACE[3]),
+                );
+            } else {
+                let msg = if self.active_search.is_empty() { "No articles." } else { "No matches." };
+                list = list.push(container(text(msg)).padding(16));
+            }
         }
 
         let first = self.page.offset + 1;
@@ -1169,7 +1185,17 @@ impl App {
             let plus = if self.listing.total_is_exact { "" } else { "+" };
             format!("{first}–{last} of {}{plus}", self.listing.total)
         };
-        let mut header = row![text(range).size(12).width(Fill)].spacing(6).align_y(iced::Center);
+        let mut header = row![].spacing(6).align_y(iced::Center);
+        header = match self.place {
+            Place::News => header
+                .push(feeds_menu::button(self.scope_label(), self.scope_unread(), self.feeds_open))
+                .push(style::segmented(&[(false, "All"), (true, "Unread")], self.unread_only, |unread| {
+                    // The segment already shown does nothing.
+                    if unread == self.unread_only { Message::CloseOverlays } else { Message::ToggleUnreadOnly }
+                })),
+            Place::Saved => header.push(text("Saved").size(SIZE_BODY)),
+        };
+        header = header.push(text(range).size(SIZE_SMALL).width(Fill));
         if self.listing.ranked_window {
             header = header.push(
                 text("Very many matches: ranked among the 10,000 newest. Add words or filters to narrow.").size(11),
@@ -1213,51 +1239,11 @@ impl App {
                 .push(button(text("Edit").size(12)).style(button::text).on_press(Message::EditFeed(id)))
                 .push(button(text("Unsubscribe").size(12)).style(button::danger).on_press(Message::RemoveFeed(id)));
         }
-        let mut col = column![container(header).padding([6, 12])];
-        if let Some(edit) =
-            self.feed_edit.as_ref().filter(|e| self.place == Place::News && self.scope == Scope::Feed(e.id))
-        {
-            col = col.push(self.view_feed_edit(edit));
-        }
+        let mut col = column![container(header).padding([0.0, LIST_HEADER_PAD]).center_y(LIST_HEADER_HEIGHT)];
         if self.quick.open {
             col = col.push(container(self.quick.view().map(Message::Quick)).padding([4, 12]));
         }
         col.push(rule::horizontal(1)).push(scrollable(list).height(Fill)).into()
-    }
-
-    fn screen_button<'a>(&self, label: &'a str, screen: Screen) -> Element<'a, Message> {
-        button(text(label).size(14))
-            .width(Fill)
-            .padding([6, 10])
-            .style(if self.screen == screen { button::primary } else { button::text })
-            .on_press(Message::ShowScreen(screen))
-            .into()
-    }
-
-    fn view_feed_edit<'a>(&'a self, edit: &'a FeedEdit) -> Element<'a, Message> {
-        let mut choices = vec![FolderChoice(None, "No folder".into())];
-        choices.extend(self.sidebar.folders.iter().map(|f| FolderChoice(Some(f.id), f.name.clone())));
-        let selected = choices.iter().find(|c| c.0 == edit.folder).cloned();
-        let url = self.sidebar.feeds.iter().find(|f| f.id == edit.id).map(|f| f.url.as_str()).unwrap_or_default();
-        container(
-            column![
-                text(url).size(11),
-                row![
-                    text_input("Title", &edit.title).on_input(Message::FeedTitle).on_submit(Message::SaveFeed),
-                    pick_list(choices, selected, Message::FeedFolder),
-                    text_input("or new folder", &edit.new_folder).on_input(Message::NewFolder).width(140),
-                ]
-                .spacing(6),
-                row![
-                    button(text("Save").size(12)).on_press(Message::SaveFeed),
-                    button(text("Cancel").size(12)).style(button::secondary).on_press(Message::CancelEditFeed),
-                ]
-                .spacing(6),
-            ]
-            .spacing(6),
-        )
-        .padding([6, 12])
-        .into()
     }
 
     fn label_change(
@@ -1411,6 +1397,47 @@ mod tests {
             .unwrap();
         let (app, _task) = App::boot(Db::new(store), PathBuf::from("test.db"));
         (app, feed)
+    }
+
+    impl App {
+        fn db_has_feed(&self, id: FeedId) -> bool {
+            self.db.shared().lock().unwrap().feeds().unwrap().iter().any(|f| f.id == id)
+        }
+    }
+
+    #[test]
+    fn unsubscribe_asks_first() {
+        let (mut app, feed) = app_with_feed();
+        let _ = app.update(Message::RemoveFeed(feed));
+        assert_eq!(app.confirm_unsubscribe, Some(feed));
+        assert!(app.db_has_feed(feed));
+        let _ = app.update(Message::CancelUnsubscribe);
+        assert_eq!(app.confirm_unsubscribe, None);
+    }
+
+    #[test]
+    fn unsubscribing_current_feed_falls_back_to_all() {
+        let (mut app, feed) = app_with_feed();
+        let _ = app.update(Message::SetScope(Scope::Feed(feed)));
+        let _ = app.update(Message::RemoveFeed(feed));
+        let _ = app.update(Message::ConfirmUnsubscribe);
+        assert_eq!(app.scope, Scope::All);
+    }
+
+    #[test]
+    fn unread_toggle_is_news_only() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::GoPlace(Place::Saved));
+        let _ = app.update(Message::ToggleUnreadOnly);
+        assert!(!app.unread_only);
+    }
+
+    #[test]
+    fn escape_closes_overlays() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::ToggleFeedsMenu);
+        let _ = app.update(Message::Key(Key::Named(keyboard::key::Named::Escape), Default::default()));
+        assert!(!app.feeds_open);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 mod ai_setup;
 mod app;
 mod db;
+mod feeds_menu;
 mod format;
 mod graph_view;
 mod icons;
@@ -11,6 +12,7 @@ mod map_view;
 mod plan;
 mod providers;
 mod quick;
+mod rail;
 mod reports;
 mod research;
 mod review;

@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 
 use iced::theme::Palette;
-use iced::widget::{button, container, row as ui_row, text};
-use iced::{Background, Border, Color, Element, Shadow, Theme, Vector, border};
+use iced::widget::{Space, button, container, mouse_area, opaque, pin, row as ui_row, stack, text};
+use iced::{Background, Border, Color, Element, Fill, Point, Shadow, Theme, Vector, border};
 
 const DARK_NAME: &str = "Juttusihti Dark";
 const LIGHT_NAME: &str = "Juttusihti Light";
@@ -255,6 +255,26 @@ pub fn segmented<'a, T: Copy + PartialEq + 'a, M: Clone + 'a>(
             .into()
     });
     ui_row(buttons).spacing(-1.0).into()
+}
+
+/// Tooltip content: one line of small text on a popover surface.
+pub fn tip<'a, M: 'a>(label: impl text::IntoFragment<'a>) -> Element<'a, M> {
+    container(text(label).size(SIZE_SMALL)).padding([SPACE[0], SPACE[1]]).style(popover).into()
+}
+
+/// Floats `panel` over `base` with its top-left corner at `anchor`, measured from `base`'s top-left.
+///
+/// A transparent backdrop covers all of `base` while the panel is shown: pressing anywhere outside
+/// the panel emits `on_close` and does not reach `base`. Presses inside the panel stay in the panel.
+/// Give `panel` its own surface (usually [`popover`]) and size; the result takes `base`'s size.
+pub fn overlay<'a, M: Clone + 'a>(
+    base: impl Into<Element<'a, M>>,
+    panel: impl Into<Element<'a, M>>,
+    anchor: Point,
+    on_close: M,
+) -> Element<'a, M> {
+    let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).on_press(on_close);
+    stack![base.into(), opaque(backdrop), pin(opaque(panel)).position(anchor)].into()
 }
 
 fn luminance(c: Color) -> f32 {
