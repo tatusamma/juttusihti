@@ -25,21 +25,19 @@ const PAGE_SIZE: u32 = 50;
 const MAX_PARALLEL_FETCHES: usize = 4;
 const SEARCH_ID: &str = "search";
 
+/// Which list the reader shows: the news stream or the saved articles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Selection {
-    View(View),
-    Feed(FeedId),
-    Folder(FolderId),
+pub enum Place {
+    News,
+    Saved,
 }
 
-impl Selection {
-    fn filter(self) -> ListFilter {
-        match self {
-            Selection::View(view) => ListFilter { view, ..Default::default() },
-            Selection::Feed(id) => ListFilter { feed_id: Some(id), ..Default::default() },
-            Selection::Folder(id) => ListFilter { folder_id: Some(id), ..Default::default() },
-        }
-    }
+/// Which feeds News shows. Saved has no scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    Folder(FolderId),
+    Feed(FeedId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +103,9 @@ pub struct Preview {
 #[derive(Debug, Clone)]
 pub enum Message {
     SidebarLoaded(Result<Sidebar, String>),
-    Select(Selection),
+    GoPlace(Place),
+    SetScope(Scope),
+    ToggleUnreadOnly,
     ListLoaded(u64, Result<Listing, String>),
     Open(ArticleId),
     PreviewLoaded(Result<Box<Preview>, String>),
@@ -172,7 +172,9 @@ pub struct App {
     fetcher: Option<Fetcher>,
     fetch_slots: Arc<Semaphore>,
     sidebar: Sidebar,
-    selection: Selection,
+    place: Place,
+    scope: Scope,
+    unread_only: bool,
     screen: Screen,
     search: String,
     active_search: String,
@@ -227,7 +229,9 @@ impl App {
             fetcher,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
             sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![] },
-            selection: Selection::View(View::All),
+            place: Place::News,
+            scope: Scope::All,
+            unread_only: false,
             screen: Screen::Reader,
             search: String::new(),
             active_search: String::new(),
@@ -291,9 +295,41 @@ impl App {
         )
     }
 
+    /// What the article list shows: Saved is one fixed list, News combines
+    /// the remembered scope with the Unread choice.
+    fn list_filter(&self) -> ListFilter {
+        match self.place {
+            Place::Saved => ListFilter { view: View::Saved, ..Default::default() },
+            Place::News => {
+                let view = if self.unread_only { View::Unread } else { View::All };
+                match self.scope {
+                    Scope::All => ListFilter { view, ..Default::default() },
+                    Scope::Feed(id) => ListFilter { view, feed_id: Some(id), ..Default::default() },
+                    Scope::Folder(id) => ListFilter { view, folder_id: Some(id), ..Default::default() },
+                }
+            }
+        }
+    }
+
+    /// "All feeds", a folder or feed name, or "Saved".
+    fn scope_label(&self) -> String {
+        if self.place == Place::Saved {
+            return "Saved".into();
+        }
+        match self.scope {
+            Scope::All => "All feeds".into(),
+            Scope::Feed(id) => {
+                self.sidebar.feeds.iter().find(|f| f.id == id).map_or("Feed".into(), |f| f.title.clone())
+            }
+            Scope::Folder(id) => {
+                self.sidebar.folders.iter().find(|f| f.id == id).map_or("Folder".into(), |f| f.name.clone())
+            }
+        }
+    }
+
     /// The query behind the article list being viewed.
     fn list_query(&self) -> SearchQuery {
-        let filter = self.selection.filter();
+        let filter = self.list_filter();
         SearchQuery {
             text: self.active_search.clone(),
             view: filter.view,
@@ -304,22 +340,6 @@ impl App {
         }
     }
 
-    /// "Yle Uutiset", "Unread matching “sähkö”", …
-    fn list_label(&self) -> String {
-        let base = match self.selection {
-            Selection::View(View::All) => "All articles".to_string(),
-            Selection::View(View::Unread) => "Unread".to_string(),
-            Selection::View(View::Saved) => "Saved".to_string(),
-            Selection::Feed(id) => {
-                self.sidebar.feeds.iter().find(|f| f.id == id).map_or("Feed".into(), |f| f.title.clone())
-            }
-            Selection::Folder(id) => {
-                self.sidebar.folders.iter().find(|f| f.id == id).map_or("Folder".into(), |f| f.name.clone())
-            }
-        };
-        if self.active_search.is_empty() { base } else { format!("{base} matching “{}”", self.active_search) }
-    }
-
     fn load_list(&mut self) -> Task<Message> {
         self.list_generation += 1;
         let generation = self.list_generation;
@@ -328,7 +348,7 @@ impl App {
         let query = self.list_query();
         // An open quick panel follows the list being viewed.
         let retarget = if self.quick.open && !self.quick.is_running() && !self.quick.targets(&query) {
-            self.quick.open(query.clone(), self.list_label()).map(Message::Quick)
+            self.quick.open(query.clone(), self.scope_label()).map(Message::Quick)
         } else {
             Task::none()
         };
@@ -411,18 +431,32 @@ impl App {
         self.update(Message::Open(id))
     }
 
+    /// Back to the first page of the reader list after a place/scope change.
+    fn show_list(&mut self) -> Task<Message> {
+        self.screen = Screen::Reader;
+        self.page = Page::first(PAGE_SIZE);
+        self.preview = None;
+        self.load_list()
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SidebarLoaded(Ok(sidebar)) => {
                 self.sidebar = sidebar;
                 Task::none()
             }
-            Message::Select(selection) => {
-                self.selection = selection;
-                self.screen = Screen::Reader;
-                self.page = Page::first(PAGE_SIZE);
-                self.preview = None;
-                self.load_list()
+            Message::GoPlace(place) => {
+                self.place = place;
+                self.show_list()
+            }
+            Message::SetScope(scope) => {
+                self.place = Place::News;
+                self.scope = scope;
+                self.show_list()
+            }
+            Message::ToggleUnreadOnly => {
+                self.unread_only = !self.unread_only;
+                self.show_list()
             }
             Message::ListLoaded(generation, Ok(listing)) => {
                 if generation == self.list_generation {
@@ -547,7 +581,7 @@ impl App {
             Message::FeedAdded(Ok((id, url))) => {
                 self.add_feed.clear();
                 self.status = Some(format!("Subscribed to {url}"));
-                let refresh = self.load_sidebar().chain(Task::done(Message::Select(Selection::Feed(id))));
+                let refresh = self.load_sidebar().chain(Task::done(Message::SetScope(Scope::Feed(id))));
                 let feed = Feed {
                     id,
                     url,
@@ -565,15 +599,16 @@ impl App {
             }
             Message::RemoveFeed(id) => {
                 let db = self.db.clone();
-                self.selection = Selection::View(View::All);
+                self.place = Place::News;
+                self.scope = Scope::All;
                 self.preview = None;
                 Task::perform(async move { db.call(move |s| s.remove_feed(id)).await }, Message::StateChanged)
                     .chain(self.load_sidebar())
-                    .chain(Task::done(Message::Select(Selection::View(View::All))))
+                    .chain(Task::done(Message::SetScope(Scope::All)))
             }
             Message::MarkAllRead => {
                 let db = self.db.clone();
-                let filter = self.selection.filter();
+                let filter = self.list_filter();
                 for item in &mut self.listing.items {
                     item.is_read = true;
                 }
@@ -736,7 +771,7 @@ impl App {
                 if self.quick.open && !self.quick.is_running() {
                     return self.quick.update(crate::quick::Msg::Close).map(Message::Quick);
                 }
-                self.quick.open(self.list_query(), self.list_label()).map(Message::Quick)
+                self.quick.open(self.list_query(), self.scope_label()).map(Message::Quick)
             }
             Message::Quick(crate::quick::Msg::OpenSetup) => self.update(Message::ShowScreen(Screen::Providers)),
             Message::Quick(crate::quick::Msg::Review(id)) => {
@@ -966,8 +1001,13 @@ impl App {
             .into()
     }
 
-    fn nav_button<'a>(&self, label: String, count: Option<u64>, target: Selection) -> Element<'a, Message> {
-        let selected = self.selection == target && self.screen == Screen::Reader;
+    fn nav_button<'a>(
+        &self,
+        label: String,
+        count: Option<u64>,
+        selected: bool,
+        target: Message,
+    ) -> Element<'a, Message> {
         let content = row![text(label).size(14).width(Fill)]
             .push(count.filter(|c| *c > 0).map(|c| text(c.to_string()).size(12)))
             .align_y(iced::Center);
@@ -975,17 +1015,33 @@ impl App {
             .width(Fill)
             .padding([6, 10])
             .style(if selected { button::primary } else { button::text })
-            .on_press(Message::Select(target))
+            .on_press(target)
             .into()
     }
 
     fn view_sidebar(&self) -> Element<'_, Message> {
         let unread_of = |id: FeedId| self.sidebar.unread.iter().find(|(f, _)| *f == id).map(|(_, n)| *n);
         let total_unread: u64 = self.sidebar.unread.iter().map(|(_, n)| n).sum();
+        let in_news = self.place == Place::News && self.screen == Screen::Reader;
         let mut nav = column![
-            self.nav_button("All articles".into(), None, Selection::View(View::All)),
-            self.nav_button("Unread".into(), Some(total_unread), Selection::View(View::Unread)),
-            self.nav_button("Saved".into(), None, Selection::View(View::Saved)),
+            self.nav_button(
+                "All articles".into(),
+                None,
+                in_news && self.scope == Scope::All && !self.unread_only,
+                Message::SetScope(Scope::All),
+            ),
+            self.nav_button(
+                "Unread".into(),
+                Some(total_unread),
+                in_news && self.unread_only,
+                Message::ToggleUnreadOnly
+            ),
+            self.nav_button(
+                "Saved".into(),
+                None,
+                self.place == Place::Saved && self.screen == Screen::Reader,
+                Message::GoPlace(Place::Saved),
+            ),
             button(text("Reports").size(14))
                 .width(Fill)
                 .padding([6, 10])
@@ -1010,7 +1066,12 @@ impl App {
         for folder in &self.sidebar.folders {
             let feeds: Vec<&Feed> = self.sidebar.feeds.iter().filter(|f| f.folder_id == Some(folder.id)).collect();
             let unread: u64 = feeds.iter().filter_map(|f| unread_of(f.id)).sum();
-            nav = nav.push(self.nav_button(format!("▾ {}", folder.name), Some(unread), Selection::Folder(folder.id)));
+            nav = nav.push(self.nav_button(
+                format!("▾ {}", folder.name),
+                Some(unread),
+                in_news && self.scope == Scope::Folder(folder.id),
+                Message::SetScope(Scope::Folder(folder.id)),
+            ));
             for f in feeds {
                 nav = nav.push(
                     container(self.feed_button(f, unread_of(f.id)))
@@ -1044,7 +1105,8 @@ impl App {
 
     fn feed_button<'a>(&self, f: &Feed, unread: Option<u64>) -> Element<'a, Message> {
         let label = if f.last_error.is_some() { format!("⚠ {}", f.title) } else { f.title.clone() };
-        self.nav_button(label, unread, Selection::Feed(f.id))
+        let selected = self.place == Place::News && self.screen == Screen::Reader && self.scope == Scope::Feed(f.id);
+        self.nav_button(label, unread, selected, Message::SetScope(Scope::Feed(f.id)))
     }
 
     fn view_list(&self) -> Element<'_, Message> {
@@ -1146,13 +1208,15 @@ impl App {
             .push(button(text("›").size(14)).style(button::text).on_press_maybe(
                 (u64::from(self.page.offset + self.page.limit) < self.listing.total).then_some(Message::NextPage),
             ));
-        if let Selection::Feed(id) = self.selection {
+        if let (Place::News, Scope::Feed(id)) = (self.place, self.scope) {
             header = header
                 .push(button(text("Edit").size(12)).style(button::text).on_press(Message::EditFeed(id)))
                 .push(button(text("Unsubscribe").size(12)).style(button::danger).on_press(Message::RemoveFeed(id)));
         }
         let mut col = column![container(header).padding([6, 12])];
-        if let Some(edit) = self.feed_edit.as_ref().filter(|e| self.selection == Selection::Feed(e.id)) {
+        if let Some(edit) =
+            self.feed_edit.as_ref().filter(|e| self.place == Place::News && self.scope == Scope::Feed(e.id))
+        {
             col = col.push(self.view_feed_edit(edit));
         }
         if self.quick.open {
@@ -1327,5 +1391,44 @@ impl App {
         )
         .height(Fill)
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use juttusihti_core::store::Store;
+
+    use super::*;
+
+    fn app_with_feed() -> (App, FeedId) {
+        let store = Store::open_in_memory().unwrap();
+        let feed = store
+            .add_feed(&NewFeed {
+                url: "https://example.com/feed.xml".into(),
+                title: "Example".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let (app, _task) = App::boot(Db::new(store), PathBuf::from("test.db"));
+        (app, feed)
+    }
+
+    #[test]
+    fn news_combines_scope_and_unread() {
+        let (mut app, feed) = app_with_feed();
+        let _ = app.update(Message::SetScope(Scope::Feed(feed)));
+        let _ = app.update(Message::ToggleUnreadOnly);
+        assert_eq!(app.list_filter(), ListFilter { view: View::Unread, feed_id: Some(feed), folder_id: None });
+    }
+
+    #[test]
+    fn saved_ignores_scope_and_news_remembers_it() {
+        let (mut app, feed) = app_with_feed();
+        let _ = app.update(Message::SetScope(Scope::Feed(feed)));
+        let _ = app.update(Message::GoPlace(Place::Saved));
+        assert_eq!(app.list_filter(), ListFilter { view: View::Saved, ..Default::default() });
+        let _ = app.update(Message::ShowScreen(Screen::Reports));
+        let _ = app.update(Message::GoPlace(Place::News));
+        assert_eq!(app.list_filter().feed_id, Some(feed));
     }
 }
