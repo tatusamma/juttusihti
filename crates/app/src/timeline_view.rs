@@ -339,6 +339,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
         _c: mouse::Cursor,
     ) -> Vec<Geometry> {
         let pal = theme.palette();
+        let data = crate::style::data_colors(theme);
         let geometry = self.cache.draw(renderer, bounds.size(), |frame: &mut Frame| {
             let size = bounds.size();
             let muted = Color { a: 0.35, ..pal.text };
@@ -395,7 +396,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     frame.fill_rectangle(
                         Point::new(x0 + 1.0, size.height - 4.0 - bh),
                         Size::new((x1 - x0 - 2.0).max(1.0), bh),
-                        Color { a: 0.35, ..pal.primary },
+                        Color { a: 0.35, ..data.amber },
                     );
                 }
             }
@@ -408,7 +409,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     frame.fill_rectangle(
                         Point::new(x, 14.0),
                         Size::new((x2 - x).max(2.0), 6.0),
-                        Color { a: 0.5, ..pal.danger },
+                        Color { a: 0.5, ..data.clay },
                     );
                 }
                 let d = Path::new(|b| {
@@ -418,7 +419,7 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                     b.line_to(Point::new(x - 6.0, 17.0));
                     b.close();
                 });
-                frame.fill(&d, pal.danger);
+                frame.fill(&d, data.clay);
                 frame.fill_text(Text {
                     content: e.title.chars().take(30).collect(),
                     position: Point::new(x + 8.0, 26.0),
@@ -440,20 +441,20 @@ impl canvas::Program<Msg> for TimelineCanvas<'_> {
                 for w in pts.windows(2) {
                     frame.stroke(
                         &Path::line(w[0], w[1]),
-                        Stroke::default().with_width(1.5).with_color(Color { a: 0.6, ..pal.success }),
+                        Stroke::default().with_width(1.5).with_color(Color { a: 0.6, ..data.sage }),
                     );
                 }
                 if let Some(first) = pts.first() {
-                    frame.stroke(&Path::circle(*first, 8.0), Stroke::default().with_width(2.0).with_color(pal.success));
+                    frame.stroke(&Path::circle(*first, 8.0), Stroke::default().with_width(2.0).with_color(data.sage));
                 }
             }
             for (i, a) in self.t.articles.iter().enumerate() {
                 let Some(p) = points[i] else { continue };
                 let dot = Path::circle(p, if self.hover == Some(i) { 6.0 } else { 4.0 });
                 if a.dated {
-                    frame.fill(&dot, pal.primary);
+                    frame.fill(&dot, data.amber);
                 } else {
-                    frame.stroke(&dot, Stroke::default().with_width(1.5).with_color(pal.primary));
+                    frame.stroke(&dot, Stroke::default().with_width(1.5).with_color(data.amber));
                 }
             }
             if let Some(i) = self.hover

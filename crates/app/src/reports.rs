@@ -321,7 +321,11 @@ fn volume_view(rows: &[VolumeRow]) -> Element<'_, Msg> {
         col = col.push(
             row![
                 text(title).size(13).width(240),
-                container(Space::new().width(w).height(12)).style(container::primary),
+                container(Space::new().width(w).height(12)).style(|theme: &iced::Theme| {
+                    container::Style::default()
+                        .background(crate::style::data_colors(theme).bar)
+                        .border(iced::border::rounded(2))
+                }),
                 text(n.to_string()).size(13),
             ]
             .spacing(8)

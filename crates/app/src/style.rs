@@ -62,6 +62,38 @@ pub fn tokens(theme: &Theme) -> &'static Tokens {
     if theme.palette().background == LIGHT.background { &LIGHT } else { &DARK }
 }
 
+/// Muted category colours for the Map, Relationship map, Timeline and report bars.
+/// Used only inside visualisations, never for UI chrome.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataColors {
+    pub amber: Color,
+    pub sage: Color,
+    pub clay: Color,
+    pub slate: Color,
+    pub bar: Color,
+}
+
+const DATA_DARK: DataColors = DataColors {
+    amber: hex(0xc9a063),
+    sage: hex(0x8aa27a),
+    clay: hex(0xc7745f),
+    slate: hex(0x7f9bb0),
+    bar: hex(0x9a7a4c),
+};
+
+const DATA_LIGHT: DataColors = DataColors {
+    amber: hex(0xa8742f),
+    sage: hex(0x5f7a3e),
+    clay: hex(0xb04a38),
+    slate: hex(0x4f6f8a),
+    bar: hex(0xb08850),
+};
+
+/// The visualisation category colours matching an Iced theme.
+pub fn data_colors(theme: &Theme) -> DataColors {
+    if tokens(theme).background == LIGHT.background { DATA_LIGHT } else { DATA_DARK }
+}
+
 /// The custom Iced theme for the dark or light token set.
 pub fn theme(dark: bool) -> Theme {
     let (name, t) = if dark { (DARK_NAME, &DARK) } else { (LIGHT_NAME, &LIGHT) };
@@ -327,6 +359,22 @@ mod tests {
             assert!(contrast(t.accent, t.background) >= 3.0);
             assert!(contrast(t.success, t.background) >= 3.0);
             assert!(contrast(t.danger, t.background) >= 3.0);
+        }
+    }
+
+    #[test]
+    fn data_colours_are_distinct_and_visible() {
+        for (dark, t) in [(true, &DARK), (false, &LIGHT)] {
+            let d = data_colors(&theme(dark));
+            let all = [d.amber, d.sage, d.clay, d.slate];
+            for (i, a) in all.iter().enumerate() {
+                assert!(contrast(*a, t.background) >= 3.0, "{a:?} on {:?}", t.background);
+                for b in &all[i + 1..] {
+                    let dist = ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt();
+                    assert!(dist > 0.15, "{a:?} vs {b:?}: {dist}");
+                }
+            }
+            assert!(contrast(d.bar, t.background) >= 3.0);
         }
     }
 

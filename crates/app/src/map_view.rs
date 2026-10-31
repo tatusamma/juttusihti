@@ -533,6 +533,7 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
         _c: mouse::Cursor,
     ) -> Vec<Geometry> {
         let pal = theme.palette();
+        let data = crate::style::data_colors(theme);
         let s = self.state;
         let geometry = s.cache.draw(renderer, bounds.size(), |frame: &mut Frame| {
             let size = bounds.size();
@@ -573,9 +574,9 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                 let Some((lat, lon)) = l.coordinates else { continue };
                 let p = self.to_screen(size, lat, lon);
                 let color = match l.role {
-                    LocationRole::Event => pal.danger,
-                    LocationRole::Publisher => pal.primary,
-                    LocationRole::EntityAssociated => pal.success,
+                    LocationRole::Event => data.clay,
+                    LocationRole::Publisher => data.amber,
+                    LocationRole::EntityAssociated => data.sage,
                     LocationRole::Mentioned => Color::from_rgb(0.5, 0.5, 0.5),
                 };
                 let selected = s.selected == Some(l.id);

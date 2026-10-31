@@ -449,6 +449,7 @@ impl canvas::Program<Msg> for GraphCanvas<'_> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let palette = theme.palette();
+        let data = crate::style::data_colors(theme);
         let geometry = self.cache.draw(renderer, bounds.size(), |frame: &mut Frame| {
             let size = bounds.size();
             let faded = |c: Color| Color { a: 0.18, ..c };
@@ -467,10 +468,10 @@ impl canvas::Program<Msg> for GraphCanvas<'_> {
                     (self.to_screen(cam, size, self.positions[e.a]), self.to_screen(cam, size, self.positions[e.b]));
                 let mut color = match e.kind {
                     EdgeKind::Link(juttusihti_core::RelationshipKind::Duplicate) => Color::from_rgb(0.55, 0.55, 0.55),
-                    EdgeKind::Link(juttusihti_core::RelationshipKind::ConflictingClaim) => palette.danger,
-                    EdgeKind::Link(_) => palette.primary,
+                    EdgeKind::Link(juttusihti_core::RelationshipKind::ConflictingClaim) => data.clay,
+                    EdgeKind::Link(_) => data.amber,
                     EdgeKind::Mentions => Color { a: 0.5, ..palette.text },
-                    EdgeKind::InEvent => palette.success,
+                    EdgeKind::InEvent => data.sage,
                 };
                 let mut width = if matches!(e.kind, EdgeKind::Link(_)) { 2.0 } else { 1.0 };
                 if let Some(h) = self.highlight {
@@ -501,9 +502,9 @@ impl canvas::Program<Msg> for GraphCanvas<'_> {
                 let matches = !self.search.is_empty() && n.label.to_lowercase().contains(&self.search);
                 let is_sel = self.selected == Some(i);
                 let color = match n.id {
-                    NodeRef::Article(_) => palette.primary,
-                    NodeRef::Entity(_) => palette.success,
-                    NodeRef::Event(_) => palette.danger,
+                    NodeRef::Article(_) => data.amber,
+                    NodeRef::Entity(_) => data.sage,
+                    NodeRef::Event(_) => data.clay,
                 };
                 let r = if is_sel || matches { 8.0 } else { 5.5 };
                 let shape = match n.id {
