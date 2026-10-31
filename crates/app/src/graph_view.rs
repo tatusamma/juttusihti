@@ -467,7 +467,7 @@ impl canvas::Program<Msg> for GraphCanvas<'_> {
                 let (a, b) =
                     (self.to_screen(cam, size, self.positions[e.a]), self.to_screen(cam, size, self.positions[e.b]));
                 let mut color = match e.kind {
-                    EdgeKind::Link(juttusihti_core::RelationshipKind::Duplicate) => Color::from_rgb(0.55, 0.55, 0.55),
+                    EdgeKind::Link(juttusihti_core::RelationshipKind::Duplicate) => data.slate,
                     EdgeKind::Link(juttusihti_core::RelationshipKind::ConflictingClaim) => data.clay,
                     EdgeKind::Link(_) => data.amber,
                     EdgeKind::Mentions => Color { a: 0.5, ..palette.text },

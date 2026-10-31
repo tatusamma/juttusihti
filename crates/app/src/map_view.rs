@@ -577,7 +577,7 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                     LocationRole::Event => data.clay,
                     LocationRole::Publisher => data.amber,
                     LocationRole::EntityAssociated => data.sage,
-                    LocationRole::Mentioned => Color::from_rgb(0.5, 0.5, 0.5),
+                    LocationRole::Mentioned => data.slate,
                 };
                 let selected = s.selected == Some(l.id);
                 let dot = Path::circle(p, if selected { 8.0 } else { 6.0 });
