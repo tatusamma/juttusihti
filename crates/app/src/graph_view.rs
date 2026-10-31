@@ -3,15 +3,16 @@
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text, stroke};
 use iced::widget::{
-    button, canvas as canvas_widget, checkbox, column, container, pick_list, row, rule, scrollable, text, text_input,
+    button, canvas as canvas_widget, column, container, pick_list, row, rule, scrollable, text, text_input,
 };
-use iced::{Color, Element, Fill, Font, Length, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, Vector, font};
+use iced::{Center, Color, Element, Fill, Length, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, Vector};
 use juttusihti_core::analysis::SessionSummary;
 use juttusihti_core::graph::{EdgeKind, Graph, GraphQuery, NodeRef, layout};
 use juttusihti_core::{ArticleId, Entity, Origin, Status};
 
 use crate::db::Db;
 use crate::review::{KindChoice, SessionChoice, kind_label};
+use crate::style::{self, SIZE_SMALL, SPACE};
 
 const MAX_NODES: usize = 150;
 
@@ -237,7 +238,6 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
         let sessions: Vec<SessionChoice> = self
             .sessions
             .iter()
@@ -247,51 +247,60 @@ impl State {
         let mut highlights = vec![HighlightChoice(None)];
         highlights.extend(KindChoice::ALL.iter().map(|k| HighlightChoice(Some(*k))));
         let controls = column![
-            text("Relationship map").size(22).font(bold),
+            style::title("Relationship map"),
             row![
-                pick_list(sessions, selected_session, Msg::Session).placeholder("Links from a session…"),
+                pick_list(sessions, selected_session, Msg::Session)
+                    .placeholder("Links from a session…")
+                    .text_size(SIZE_SMALL),
                 text_input("or find an entity", &self.entity_query)
                     .on_input(Msg::EntityQuery)
                     .on_submit(Msg::FindEntity)
+                    .size(SIZE_SMALL)
+                    .padding(SPACE[1])
                     .width(200),
-                pick_list(self.entity_results.clone(), None::<EntityChoice>, Msg::EntityPicked).placeholder("Matches"),
+                pick_list(self.entity_results.clone(), None::<EntityChoice>, Msg::EntityPicked)
+                    .placeholder("Matches")
+                    .text_size(SIZE_SMALL),
             ]
-            .spacing(8)
-            .align_y(iced::Center),
+            .spacing(SPACE[1])
+            .align_y(Center),
             row![
-                text("Hops").size(12),
-                pick_list(&[1u8, 2, 3][..], Some(self.hops), Msg::Hops),
-                checkbox(self.suggested).label("Show AI suggestions").on_toggle(Msg::Suggested),
-                checkbox(self.entities).label("Show entities").on_toggle(Msg::Entities),
-                pick_list(highlights, Some(self.highlight), Msg::Highlight),
-                text_input("Search in map", &self.search).on_input(Msg::Search).width(160),
+                style::note("Hops"),
+                pick_list(&[1u8, 2, 3][..], Some(self.hops), Msg::Hops).text_size(SIZE_SMALL),
+                style::check(self.suggested, "Show AI suggestions").on_toggle(Msg::Suggested),
+                style::check(self.entities, "Show entities").on_toggle(Msg::Entities),
+                pick_list(highlights, Some(self.highlight), Msg::Highlight).text_size(SIZE_SMALL),
+                text_input("Search in map", &self.search)
+                    .on_input(Msg::Search)
+                    .size(SIZE_SMALL)
+                    .padding(SPACE[1])
+                    .width(160),
             ]
-            .spacing(10)
-            .align_y(iced::Center),
-            text(if self.seed_label.is_empty() {
+            .spacing(SPACE[2])
+            .align_y(Center),
+            style::note(if self.seed_label.is_empty() {
                 "Choose a session or entity, or use “Map” on an article.".into()
             } else {
                 self.seed_label.clone()
-            })
-            .size(12),
+            }),
         ]
-        .spacing(8)
-        .padding(16);
+        .spacing(SPACE[2])
+        .padding(SPACE[3]);
 
         let mut layout_col = column![controls].height(Fill);
         if let Some(e) = &self.error {
-            layout_col = layout_col.push(container(text(e).size(12)).padding([4, 16]).style(container::danger));
+            layout_col =
+                layout_col.push(container(text(e).size(SIZE_SMALL).style(style::danger)).padding([SPACE[0], SPACE[3]]));
         }
         let Some(graph) = &self.graph else {
-            return layout_col.push(container(text("No map yet.")).center(Fill)).into();
+            return layout_col.push(container(style::note("No map yet.")).center(Fill)).into();
         };
         if graph.truncated {
             layout_col = layout_col.push(
-                container(
-                    text(format!("Showing the first {MAX_NODES} nodes; narrow the map with fewer hops or filters."))
-                        .size(12),
-                )
-                .padding([0, 16]),
+                container(style::note(format!(
+                    "Showing the first {MAX_NODES} nodes; narrow the map with fewer hops or filters."
+                )))
+                .padding([0.0, SPACE[3]]),
             );
         }
         let program = GraphCanvas {
@@ -312,21 +321,21 @@ impl State {
     }
 
     fn view_details<'a>(&'a self, g: &'a Graph) -> Element<'a, Msg> {
-        let bold = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-        let mut col =
-            column![text(format!("{} nodes, {} links", g.nodes.len(), g.edges.len())).size(12)].spacing(6).padding(12);
-        col = col.push(text("Solid: confirmed · dashed: AI suggestion · ● article · ■ entity · ◆ event").size(11));
+        let mut col = column![style::note(format!("{} nodes, {} links", g.nodes.len(), g.edges.len()))]
+            .spacing(SPACE[1])
+            .padding(SPACE[2]);
+        col = col.push(style::note("Solid: confirmed · dashed: AI suggestion · ● article · ■ entity · ◆ event"));
         if let Some(i) = self.selected
             && let Some(n) = g.nodes.get(i)
         {
-            col = col.push(text(&n.label).size(15).font(bold)).push(text(&n.detail).size(12));
+            col = col.push(style::heading(&n.label)).push(text(&n.detail).size(SIZE_SMALL).style(style::body));
             if let Some(t) = n.time {
-                col = col.push(text(crate::format::full_date(t)).size(12));
+                col = col.push(style::note(crate::format::full_date(t)));
             }
             if let NodeRef::Article(id) = n.id {
-                col = col.push(button(text("Open in reader").size(12)).on_press(Msg::OpenArticle(id)));
+                col = col.push(style::quiet_button(None, "Open in reader", style::quiet, Some(Msg::OpenArticle(id))));
             }
-            col = col.push(text("Links").size(13).font(bold));
+            col = col.push(style::heading("Links"));
             for e in g.edges.iter().filter(|e| e.a == i || e.b == i) {
                 let other = if e.a == i { e.b } else { e.a };
                 let kind = match e.kind {
@@ -340,14 +349,14 @@ impl State {
                     _ => "pending",
                 };
                 col = col.push(
-                    button(text(format!("{kind} ({status}) → {}", g.nodes[other].label)).size(11))
-                        .style(button::text)
-                        .padding(0)
+                    button(text(format!("{kind} ({status}) → {}", g.nodes[other].label)).size(SIZE_SMALL))
+                        .style(style::row)
+                        .padding([2.0, SPACE[0]])
                         .on_press(Msg::Select(Some(other))),
                 );
             }
         } else {
-            col = col.push(text("Click a node to see its links. Scroll to zoom, drag to pan.").size(12));
+            col = col.push(style::note("Click a node to see its links. Scroll to zoom, drag to pan."));
         }
         scrollable(col).width(Length::FillPortion(1)).into()
     }
