@@ -26,7 +26,8 @@ after showing what it will send and what it will cost. Written in Rust with
   consent and stays within spending limits. Sign in with ChatGPT, or use your own OpenAI,
   Anthropic or Gemini API key (kept in the system's secret store).
 - **Clickbait headlines rewritten** from the article text, shown with an AI tag and the
-  original underneath.
+  original underneath. With an OpenAI API key, a cheap clickbait check picks out the headlines
+  worth rewriting first.
 - **Review**: everything AI produces is a suggestion until you confirm it.
 - **Reports**: volume per source, topics, labels, co-occurring entities, relevance and AI cost,
   with CSV export.
@@ -372,7 +373,9 @@ tokenizer, or AI-assisted query expansion.
       grounded in the text (every number and most longer words must occur there). Rewrites are
       stored apart from the article; the reader shows them with an "AI" tag and the original
       underneath, and each can be kept or switched back to the original. A button in the list
-      header shows all original headlines.
+      header shows all original headlines. With an OpenAI API key, a clickbait check on the
+      Decisions API (`gpt-6-luna`) rates headlines in batches first, and only those at or above
+      the threshold in AI setup (70% by default) are rewritten.
     - Quick AI: a "✨ AI" button above every article list opens a small panel for that list
       (feed, folder, view or search). It offers task checkboxes, a local estimate (new articles, requests,
       tokens, cost) and one "Send N articles to <provider>" button, which is the consent for

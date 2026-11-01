@@ -7,7 +7,7 @@
 # `name` must be set: cargo-packager 0.11.8 otherwise tries to chdir into this file.
 name = "juttusihti"
 productName = "Juttusihti"
-version = "0.1.1"
+version = "0.2.0"
 # Same identifier as the OS secret-store service name used for API keys.
 identifier = "fi.juttusihti.Juttusihti"
 description = "Local-first RSS reader and news research desktop app"
