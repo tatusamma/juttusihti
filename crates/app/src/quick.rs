@@ -98,11 +98,14 @@ impl State {
     }
 
     /// The result line and session of a run that finished while the popover was closed, once.
-    pub fn take_finished(&mut self) -> Option<(String, Option<i64>)> {
+    pub fn take_finished(&mut self) -> Option<(String, Option<i64>, bool)> {
         if !std::mem::take(&mut self.finished_unseen) {
             return None;
         }
-        self.result.as_ref().map(|(r, session)| (r.clone().unwrap_or_else(|e| e), *session))
+        self.result.as_ref().map(|(r, session)| match r {
+            Ok(line) => (line.clone(), *session, false),
+            Err(e) => (e.clone(), *session, true),
+        })
     }
 
     /// Pretends a run of `session` has started, for tests outside this module.
@@ -487,7 +490,7 @@ mod tests {
         st.run = Some(running(12, 12));
         st.open = false;
         finish(&mut st, 7); // drives Msg::Run(RunEvent::Finished…) for session 7
-        assert_eq!(st.take_finished().map(|(_, s)| s), Some(Some(7)));
+        assert_eq!(st.take_finished().map(|(_, s, _)| s), Some(Some(7)));
         assert!(st.take_finished().is_none());
     }
 }

@@ -997,7 +997,7 @@ impl State {
             col = col.push(
                 row![
                     style::quiet_button(None, "Pause", style::quiet, Some(Msg::PauseRun)),
-                    style::quiet_button(None, "Cancel", style::quiet_danger, Some(Msg::CancelRun)),
+                    style::quiet_button(None, "Cancel", style::quiet, Some(Msg::CancelRun)),
                 ]
                 .spacing(SPACE[1]),
             );

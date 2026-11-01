@@ -171,7 +171,7 @@ impl State {
     pub fn view(&self) -> Element<'_, Msg> {
         let ranges = [(7, "7 days"), (30, "30 days"), (90, "90 days"), (365, "1 year")];
         let rebuild = if self.busy {
-            style::quiet_button(None, "Cancel", style::quiet_danger, Some(Msg::Cancel))
+            style::quiet_button(None, "Cancel", style::quiet, Some(Msg::Cancel))
         } else {
             style::quiet_button(None, "Rebuild", style::quiet, Some(Msg::Load))
         };

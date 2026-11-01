@@ -30,6 +30,8 @@ const SEARCH_ID: &str = "search";
 /// Fixed heights, so the feeds dropdown can be anchored under its button.
 const TOP_BAR_HEIGHT: f32 = 52.0;
 const LIST_HEADER_HEIGHT: f32 = 44.0;
+/// The status bar row and the rule above it.
+const STATUS_BAR_HEIGHT: f32 = 36.0;
 /// Left padding of the list header.
 const LIST_HEADER_PAD: f32 = 12.0;
 /// Width of the ⋯ menu above the article list.
@@ -216,6 +218,8 @@ pub struct App {
     add_feed: String,
     refreshing: usize,
     status: Option<String>,
+    /// Whether the status line reports an error (drawn in the danger colour).
+    status_error: bool,
     /// Session of an AI run whose result line is the status, for its "Review" button.
     status_review: Option<i64>,
     label_input: String,
@@ -246,6 +250,7 @@ impl App {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(format!("Networking unavailable: {e}"))),
         };
+        let status_error = status.is_some();
         let analytics = AnalyticsWorker::spawn(db_path.clone(), Limits::default()).ok().map(Arc::new);
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
@@ -287,6 +292,7 @@ impl App {
             refreshing: 0,
             status,
             status_review: None,
+            status_error,
             label_input: String::new(),
             feed_edit: None,
             feeds_open: false,
@@ -370,14 +376,24 @@ impl App {
 
     /// The AI popover title: the scope, plus the search when one is active.
     fn quick_label(&self) -> String {
-        let scope = self.scope_label();
+        let mut scope = self.scope_label();
+        if self.unread_only && self.place == Place::News {
+            scope = format!("Unread in {scope}");
+        }
         if self.active_search.is_empty() { scope } else { format!("{scope} matching “{}”", self.active_search) }
     }
 
     /// Replaces the status bar line.
     fn show_status(&mut self, line: String) {
         self.status = Some(line);
+        self.status_error = false;
         self.status_review = None;
+    }
+
+    /// Replaces the status bar line with an error, drawn in the danger colour.
+    fn show_error(&mut self, line: String) {
+        self.show_status(line);
+        self.status_error = true;
     }
 
     /// The query behind the article list being viewed.
@@ -601,7 +617,7 @@ impl App {
                     if juttusihti_core::feed::is_web_url(&url)
                         && let Err(e) = open::that_detached(&url)
                     {
-                        self.show_status(format!("Could not open browser: {e}"));
+                        self.show_error(format!("Could not open browser: {e}"));
                     }
                 }
                 Task::none()
@@ -757,7 +773,7 @@ impl App {
                 if let Err(e) = &result {
                     let name = self.sidebar.feeds.iter().find(|f| f.id == id).map_or("feed", |f| f.title.as_str());
                     tracing::warn!(feed = id, error = %e, "refresh failed");
-                    self.show_status(format!("{name}: {e}"));
+                    self.show_error(format!("{name}: {e}"));
                 }
                 if self.refreshing == 0 {
                     return Task::batch([self.load_sidebar(), self.load_list()]);
@@ -886,7 +902,7 @@ impl App {
             }
             Message::HeadlineDecided(r) => {
                 if let Err(e) = r {
-                    self.show_status(e);
+                    self.show_error(e);
                 }
                 Task::none()
             }
@@ -919,8 +935,12 @@ impl App {
                 );
                 let task = self.quick.update(msg).map(Message::Quick);
                 // A run that finished while the popover was closed reports in the status bar.
-                if let Some((line, session)) = self.quick.take_finished() {
-                    self.show_status(line);
+                if let Some((line, session, failed)) = self.quick.take_finished() {
+                    if failed {
+                        self.show_error(line);
+                    } else {
+                        self.show_status(line);
+                    }
                     self.status_review = session;
                 }
                 if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
@@ -1043,6 +1063,7 @@ impl App {
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
             Message::DismissStatus => {
                 self.status = None;
+                self.status_error = false;
                 self.status_review = None;
                 Task::none()
             }
@@ -1057,7 +1078,7 @@ impl App {
             | Message::LabelsChanged(Err(e))
             | Message::FeedSaved(Err(e)) => {
                 tracing::warn!(error = %e, "operation failed");
-                self.show_status(e);
+                self.show_error(e);
                 Task::none()
             }
         }
@@ -1117,7 +1138,9 @@ impl App {
         let body = row![rail::view(self.place, self.screen), rule::vertical(1), main].height(Fill);
         let mut layout = column![self.view_top_bar(), rule::horizontal(1), body];
         if let Some(status) = &self.status {
-            let mut line = row![text(status).size(SIZE_SMALL).width(Fill)].spacing(SPACE[1]).align_y(Center);
+            let message = text(status).size(SIZE_SMALL).width(Fill);
+            let message = if self.status_error { message.style(style::danger) } else { message };
+            let mut line = row![message].spacing(SPACE[1]).align_y(Center);
             if let Some(id) = self.status_review {
                 line = line.push(style::quiet_button(
                     None,
@@ -1148,6 +1171,11 @@ impl App {
                 self.feed_edit.as_ref(),
                 self.confirm_unsubscribe,
                 self.fetcher.is_some(),
+                feeds_menu::list_max_height(
+                    size.height - below_header - if self.status.is_some() { STATUS_BAR_HEIGHT } else { 0.0 },
+                    self.feed_edit.is_some(),
+                    self.confirm_unsubscribe.is_some(),
+                ),
             );
             return style::overlay(layout, panel, anchor, Message::CloseOverlays);
         }
@@ -1688,6 +1716,12 @@ mod tests {
         assert_eq!(app.quick_label(), "All feeds");
         app.active_search = "vaalit".into();
         assert_eq!(app.quick_label(), "All feeds matching “vaalit”");
+        let _ = app.update(Message::SetUnreadOnly(true));
+        assert_eq!(app.quick_label(), "Unread in All feeds matching “vaalit”");
+        app.active_search.clear();
+        assert_eq!(app.quick_label(), "Unread in All feeds");
+        let _ = app.update(Message::GoPlace(Place::Saved));
+        assert_eq!(app.quick_label(), "Saved");
     }
 
     #[test]
@@ -1697,10 +1731,28 @@ mod tests {
         assert!(!app.quick.open);
         let finished = crate::research::RunEvent::Finished(Ok(juttusihti_ai::RunSummary::default()));
         let _ = app.update(Message::Quick(crate::quick::Msg::Run(finished)));
-        assert!(app.status.as_deref().is_some_and(|s| s.starts_with("Stopped") || s.starts_with("Done")));
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Stopped (finished): 0 results from 0 requests, 0 tokens, cost unknown.")
+        );
+        assert!(!app.status_error);
         assert_eq!(app.status_review, Some(7));
         let _ = app.update(Message::DismissStatus);
         assert_eq!((app.status.as_deref(), app.status_review), (None, None));
+    }
+
+    #[test]
+    fn errors_mark_the_status_and_messages_clear_it() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::StateChanged(Err("boom".into())));
+        assert_eq!(app.status.as_deref(), Some("boom"));
+        assert!(app.status_error);
+        app.show_status("Subscribed".into());
+        assert!(!app.status_error);
+        let _ = app.update(Message::HeadlineDecided(Err("nope".into())));
+        assert!(app.status_error);
+        let _ = app.update(Message::DismissStatus);
+        assert!(!app.status_error);
     }
 
     #[test]

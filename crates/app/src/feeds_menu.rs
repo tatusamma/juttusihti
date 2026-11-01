@@ -12,8 +12,28 @@ use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 /// Panel width in pixels.
 pub const WIDTH: f32 = 340.0;
-/// Height at which the feed list starts to scroll.
+/// Most height the feed list takes before it scrolls.
 const LIST_MAX_HEIGHT: f32 = 420.0;
+/// Least height the feed list keeps, so a few rows stay visible.
+const LIST_MIN_HEIGHT: f32 = 80.0;
+/// Height of the Add / Import / Export block, its rule and the panel padding.
+const FOOTER_HEIGHT: f32 = 130.0;
+/// Height of the pinned edit form and of the pinned unsubscribe question.
+const EDIT_HEIGHT: f32 = 190.0;
+const CONFIRM_HEIGHT: f32 = 90.0;
+
+/// Height for the scrolling feed list when `available` pixels are free below the list
+/// header, so the panel (with the pinned form and the footer) always fits the window.
+pub fn list_max_height(available: f32, editing: bool, confirming: bool) -> f32 {
+    let mut pinned = 0.0;
+    if editing {
+        pinned += EDIT_HEIGHT;
+    }
+    if confirming {
+        pinned += CONFIRM_HEIGHT;
+    }
+    (available - FOOTER_HEIGHT - pinned).clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT)
+}
 /// Longest scope name the dropdown button shows before cutting it with "…".
 const BUTTON_MAX_CHARS: usize = 28;
 
@@ -42,7 +62,8 @@ fn shorten(label: &str, max: usize) -> String {
 }
 
 /// The dropdown panel. `edit` is the feed whose edit form is open; `confirm` the feed
-/// waiting for an "Unsubscribe from …?" answer; `can_add` is false without networking.
+/// waiting for an "Unsubscribe from …?" answer (both pinned above the list); `can_add` is
+/// false without networking; `list_height` caps the scrolling list (see [`list_max_height`]).
 pub fn panel<'a>(
     sidebar: &'a Sidebar,
     scope: Scope,
@@ -50,6 +71,7 @@ pub fn panel<'a>(
     edit: Option<&'a FeedEdit>,
     confirm: Option<FeedId>,
     can_add: bool,
+    list_height: f32,
 ) -> Element<'a, Message> {
     let unread_of = |id: FeedId| sidebar.unread.iter().find(|(f, _)| *f == id).map_or(0, |(_, n)| *n);
     let feed_entry = |f: &'a Feed, indent: bool| -> Element<'a, Message> {
@@ -62,27 +84,13 @@ pub fn panel<'a>(
             style::tip("Edit feed"),
             tooltip::Position::Left,
         );
-        let mut entry = column![
-            row![
-                scope_row(
-                    label,
-                    unread_of(f.id),
-                    scope == Scope::Feed(f.id),
-                    indent,
-                    Message::SetScope(Scope::Feed(f.id))
-                ),
-                edit_button,
-            ]
-            .spacing(SPACE[0])
-            .align_y(Center)
-        ];
-        if let Some(e) = edit.filter(|e| e.id == f.id) {
-            entry = entry.push(edit_form(sidebar, f, e));
-        }
-        if confirm == Some(f.id) {
-            entry = entry.push(confirm_unsubscribe(f));
-        }
-        entry.into()
+        row![
+            scope_row(label, unread_of(f.id), scope == Scope::Feed(f.id), indent, Message::SetScope(Scope::Feed(f.id))),
+            edit_button,
+        ]
+        .spacing(SPACE[0])
+        .align_y(Center)
+        .into()
     };
 
     let total: u64 = sidebar.unread.iter().map(|(_, n)| n).sum();
@@ -126,14 +134,20 @@ pub fn panel<'a>(
     ]
     .spacing(SPACE[1]);
 
+    // The edit form and the unsubscribe question sit above the list, always in view.
+    let mut body = column![].spacing(SPACE[1]);
+    if let Some((e, f)) = edit.and_then(|e| sidebar.feeds.iter().find(|f| f.id == e.id).map(|f| (e, f))) {
+        body = body.push(edit_form(sidebar, f, e));
+    }
+    if let Some(f) = confirm.and_then(|id| sidebar.feeds.iter().find(|f| f.id == id)) {
+        body = body.push(confirm_unsubscribe(f));
+    }
     container(
-        column![
-            container(scrollable(list.padding(Padding { right: SPACE[2], ..Padding::ZERO })))
-                .max_height(LIST_MAX_HEIGHT),
-            rule::horizontal(1),
-            add
-        ]
-        .spacing(SPACE[1]),
+        body.push(
+            container(scrollable(list.padding(Padding { right: SPACE[2], ..Padding::ZERO }))).max_height(list_height),
+        )
+        .push(rule::horizontal(1))
+        .push(add),
     )
     .width(WIDTH)
     .padding(SPACE[1])
@@ -160,7 +174,7 @@ fn quiet<'a>(label: &'a str, target: Message) -> Element<'a, Message> {
     style::quiet_button(None, label, style::quiet, Some(target))
 }
 
-/// Title, folder and Unsubscribe for one feed, shown under its row.
+/// Title, folder and Unsubscribe for one feed, pinned above the list.
 fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> Element<'a, Message> {
     let mut choices = vec![FolderChoice(None, "No folder".into())];
     choices.extend(sidebar.folders.iter().map(|f| FolderChoice(Some(f.id), f.name.clone())));
@@ -223,6 +237,16 @@ fn confirm_unsubscribe<'a>(feed: &'a Feed) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_height_leaves_room_for_the_footer_and_pinned_blocks() {
+        assert_eq!(list_max_height(2000.0, false, false), LIST_MAX_HEIGHT);
+        // 560px window: 97px header leaves 463; the footer takes its share.
+        assert_eq!(list_max_height(463.0, false, false), 463.0 - FOOTER_HEIGHT);
+        assert_eq!(list_max_height(463.0, true, false), 463.0 - FOOTER_HEIGHT - EDIT_HEIGHT);
+        assert_eq!(list_max_height(463.0, false, true), 463.0 - FOOTER_HEIGHT - CONFIRM_HEIGHT);
+        assert_eq!(list_max_height(100.0, true, true), LIST_MIN_HEIGHT);
+    }
 
     #[test]
     fn long_scope_names_are_shortened() {
