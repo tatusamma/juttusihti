@@ -242,7 +242,7 @@ fn usd() -> String {
 
 /// USD per million tokens → micro-USD per million tokens.
 pub fn usd_to_micros(usd: f64) -> Result<Micros> {
-    if !usd.is_finite() || usd < 0.0 || usd > 1_000_000.0 {
+    if !usd.is_finite() || !(0.0..=1_000_000.0).contains(&usd) {
         return Err(Error::Invalid(format!("invalid price {usd}")));
     }
     Ok((usd * 1_000_000.0).round() as Micros)
