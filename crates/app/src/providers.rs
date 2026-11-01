@@ -41,6 +41,8 @@ pub enum Msg {
     SetTier(Tier),
     MaxArticles(String),
     MaxCost(String),
+    SetClickbait(bool),
+    ClickbaitThreshold(String),
     DefaultsSaved(Result<(), String>),
 }
 
@@ -61,6 +63,8 @@ pub struct State {
     defaults: Option<AiDefaults>,
     max_articles: String,
     max_cost: String,
+    /// Clickbait threshold in percent, as typed.
+    threshold: String,
     status: Vec<(Provider, Result<bool, String>)>,
     inputs: [String; 3],
     message: Option<Result<String, String>>,
@@ -82,6 +86,7 @@ impl State {
             defaults: None,
             max_articles: String::new(),
             max_cost: String::new(),
+            threshold: String::new(),
             status: Vec::new(),
             inputs: Default::default(),
             message: None,
@@ -111,6 +116,7 @@ impl State {
             Msg::DefaultsLoaded(Ok(d)) => {
                 self.max_articles = d.max_articles.to_string();
                 self.max_cost = d.max_cost.map(format_usd).unwrap_or_default().trim_start_matches('$').to_string();
+                self.threshold = d.clickbait.threshold_percent.to_string();
                 self.defaults = Some(d);
             }
             Msg::DefaultsLoaded(Err(e)) | Msg::DefaultsSaved(Err(e)) => self.message = Some(Err(e)),
@@ -146,6 +152,15 @@ impl State {
                 };
                 if let Some(c) = parsed {
                     return self.change(|d| d.max_cost = c);
+                }
+            }
+            Msg::SetClickbait(on) => return self.change(|d| d.clickbait.enabled = on),
+            Msg::ClickbaitThreshold(v) => {
+                self.threshold = v;
+                if let Ok(n) = self.threshold.trim().trim_end_matches('%').trim().parse::<u8>()
+                    && (1..=100).contains(&n)
+                {
+                    return self.change(|d| d.clickbait.threshold_percent = n);
                 }
             }
             Msg::Loaded(s) => self.status = s,
@@ -322,6 +337,25 @@ impl State {
             .spacing(SPACE[1])
             .align_y(Center),
         );
+        // The Decisions API needs an OpenAI API key; other runs rewrite in one stage.
+        if d.provider == Provider::Openai && d.billing() == Billing::ApiKey {
+            let c = &d.clickbait;
+            let mut check = row![
+                label("Headlines"),
+                style::check(c.enabled, "Check for clickbait first").on_toggle(Msg::SetClickbait),
+                style::help(
+                    "Before rewriting, a fast, cheap classifier (OpenAI Decisions API) rates how likely each                      headline is clickbait. Only headlines at or above the threshold are sent for a rewrite;                      the rest stay as they are. Ratings are remembered, so changing the threshold is free."
+                ),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center);
+            if c.enabled {
+                check = check.push(text("rewrite from").size(SIZE_BODY));
+                check = check.push(small_input("70", &self.threshold, Msg::ClickbaitThreshold));
+                check = check.push(text("% likely").size(SIZE_BODY));
+            }
+            col = col.push(check);
+        }
         col.into()
     }
 

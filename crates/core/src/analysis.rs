@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use rusqlite::params_from_iter;
 use rusqlite::types::Value;
+use rusqlite::{OptionalExtension, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::budget;
@@ -20,6 +20,17 @@ use crate::{ArticleId, Result};
 /// Bumped whenever a task's prompt changes, so cached results are not reused
 /// across incompatible prompts.
 pub const PROMPT_VERSION: &str = "2026-10-25.1";
+
+/// Bumped whenever the clickbait check's criteria change, so cached
+/// probabilities are not reused across incompatible criteria.
+pub const CLICKBAIT_PROMPT_VERSION: &str = "2026-11-01.1";
+
+/// Provider requests in flight at once, unless a run sets its own.
+pub const DEFAULT_PARALLEL_REQUESTS: u32 = 4;
+
+fn default_parallel_requests() -> u32 {
+    DEFAULT_PARALLEL_REQUESTS
+}
 
 /// Per-article input caps, so a single long article cannot dominate a run.
 pub const MAX_DESCRIPTION_CHARS: usize = 1_500;
@@ -131,6 +142,79 @@ pub struct AnalysisConfig {
     pub use_batch: bool,
     /// Investigation topic for relevance filtering.
     pub relevance_criteria: Option<String>,
+    /// Clickbait check before headline rewriting. Sessions saved before it
+    /// existed were approved without it and run without it.
+    #[serde(default = "ClickbaitCheck::off")]
+    pub clickbait: ClickbaitCheck,
+    /// Provider requests in flight at once. Each one's worst case is
+    /// reserved in the budget before it is sent, so limits still hold.
+    #[serde(default = "default_parallel_requests")]
+    pub parallel_requests: u32,
+}
+
+impl AnalysisConfig {
+    /// The clickbait check, if it runs for this configuration. It needs the
+    /// headline task with article text (a rewrite must be grounded in it)
+    /// and an OpenAI API key: the Decisions API is OpenAI's and is not
+    /// documented for ChatGPT plans, so plan runs keep the one-stage rewrite.
+    pub fn clickbait_check(&self) -> Option<&ClickbaitCheck> {
+        (self.clickbait.enabled
+            && self.tasks.contains(&Task::Headlines)
+            && self.depth != Depth::Headlines
+            && self.provider == Provider::Openai
+            && self.billing == Billing::ApiKey)
+            .then_some(&self.clickbait)
+    }
+
+    /// Requests in flight at once (at least one).
+    pub fn parallel_requests(&self) -> usize {
+        self.parallel_requests.clamp(1, 32) as usize
+    }
+}
+
+/// A cheap first stage for headline rewriting: OpenAI's Decisions API
+/// estimates for each headline the probability that it is clickbait, and
+/// only headlines at or above the threshold go to the rewriting model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClickbaitCheck {
+    pub enabled: bool,
+    /// Decisions API model.
+    pub model: String,
+    /// Clickbait probability, in percent, from which a headline is rewritten.
+    pub threshold_percent: u8,
+    /// Headlines classified per request.
+    pub batch_size: u32,
+    /// Seconds to wait for one classification request.
+    pub timeout_secs: u32,
+}
+
+impl Default for ClickbaitCheck {
+    fn default() -> Self {
+        Self { enabled: true, model: "gpt-6-luna".into(), threshold_percent: 70, batch_size: 50, timeout_secs: 30 }
+    }
+}
+
+impl ClickbaitCheck {
+    /// Questions the Decisions API takes in one request.
+    pub const MAX_BATCH: u32 = 400;
+
+    pub fn off() -> Self {
+        Self { enabled: false, ..Default::default() }
+    }
+
+    /// The threshold as a probability, 0.70 by default.
+    pub fn threshold(&self) -> f64 {
+        f64::from(self.threshold_percent.min(100)) / 100.0
+    }
+
+    pub fn is_clickbait(&self, probability: f64) -> bool {
+        probability >= self.threshold()
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size.clamp(1, Self::MAX_BATCH) as usize
+    }
 }
 
 /// Compact per-article input for the AI.
@@ -214,6 +298,12 @@ pub struct SessionSummary {
 pub fn cache_key(content_hash: &str, provider: Provider, model: &str, task: Task, depth: Depth) -> String {
     let provider = serde_json::to_string(&provider).unwrap_or_default();
     sha256_hex(&format!("{content_hash}|{provider}|{model}|{}|{PROMPT_VERSION}|{}", task.key(), depth.key()))
+}
+
+/// Cache key for one article's clickbait probability. The threshold is not
+/// part of it: a new threshold reuses the probabilities already paid for.
+pub fn clickbait_key(content_hash: &str, check: &ClickbaitCheck, depth: Depth) -> String {
+    sha256_hex(&format!("{content_hash}|clickbait|{}|{CLICKBAIT_PROMPT_VERSION}|{}", check.model, depth.key()))
 }
 
 fn cut(s: &str, max: usize) -> (String, bool) {
@@ -411,17 +501,10 @@ impl Store {
         stats.selected = selected_ids.len() as u64;
         stats.distinct = records.len() as u64;
 
-        let per_article: Vec<Task> = config.tasks.iter().copied().filter(|t| t.per_article()).collect();
         let mut needs_processing = Vec::new();
-        if !per_article.is_empty() {
-            let mut cached_stmt = conn.prepare_cached("SELECT 1 FROM ai_result_cache WHERE cache_key = ?1")?;
+        if config.tasks.iter().any(|t| t.per_article()) {
             for r in &records {
-                let all_cached = config.reuse_cached
-                    && per_article.iter().try_fold(true, |acc, t| {
-                        let key = cache_key(&r.content_hash, config.provider, &config.model, *t, config.depth);
-                        Ok::<_, rusqlite::Error>(acc && cached_stmt.exists([key])?)
-                    })?;
-                if all_cached {
+                if self.open_tasks(config, r, config.reuse_cached)?.is_empty() {
                     stats.cached += 1;
                 } else {
                     needs_processing.push(r.id);
@@ -436,6 +519,48 @@ impl Store {
             Vec::new()
         };
         Ok(Scope { stats, records, needs_processing, selected_ids, candidates })
+    }
+
+    /// The per-article tasks still to do for one article. With `reuse`, a
+    /// task with a cached result is done. Under the clickbait check, the
+    /// headline task is also done when no rewrite could be grounded (no
+    /// article text) or a cached probability is below the threshold; an
+    /// unclassified headline stays open, to be classified first.
+    pub fn open_tasks(&self, config: &AnalysisConfig, r: &ArticleRecord, reuse: bool) -> Result<BTreeSet<Task>> {
+        let mut open = BTreeSet::new();
+        let mut cached = self.conn().prepare_cached("SELECT 1 FROM ai_result_cache WHERE cache_key = ?1")?;
+        for t in config.tasks.iter().copied().filter(|t| t.per_article()) {
+            let key = cache_key(&r.content_hash, config.provider, &config.model, t, config.depth);
+            if !(reuse && cached.exists([key])?) {
+                open.insert(t);
+            }
+        }
+        if let Some(check) = config.clickbait_check()
+            && open.contains(&Task::Headlines)
+        {
+            let settled = r.body.trim().is_empty()
+                || (reuse
+                    && self
+                        .cached_clickbait(&clickbait_key(&r.content_hash, check, config.depth))?
+                        .is_some_and(|p| !check.is_clickbait(p)));
+            if settled {
+                open.remove(&Task::Headlines);
+            }
+        }
+        Ok(open)
+    }
+
+    /// A cached clickbait probability.
+    pub fn cached_clickbait(&self, key: &str) -> Result<Option<f64>> {
+        let json: Option<String> = self
+            .conn()
+            .prepare_cached("SELECT result_json FROM ai_result_cache WHERE cache_key = ?1")?
+            .query_row([key], |r| r.get(0))
+            .optional()?;
+        Ok(json
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .and_then(|v| v["probability"].as_f64())
+            .filter(|p| (0.0..=1.0).contains(p)))
     }
 
     /// Stores a per-article AI result for reuse by later runs.

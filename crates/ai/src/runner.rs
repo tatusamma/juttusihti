@@ -10,15 +10,23 @@
 //! 5. validate output and persist suggestions with provenance,
 //! 6. cache per-article results so a resume never repeats paid work.
 //!
+//! Headline rewriting has two stages when the configuration allows it
+//! ([`AnalysisConfig::clickbait_check`]): the Decisions API first rates each
+//! headline's clickbait probability in large batches, and only headlines at
+//! or above the threshold are sent to the rewriting model. A failed check
+//! never drops an article: its headline goes to the rewriting model as it
+//! would without the check.
+//!
 //! Source articles are never modified.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use juttusihti_core::analysis::{
-    AnalysisConfig, ArticleRecord, PROMPT_VERSION, Scope, Task, cache_key as article_cache_key,
+    AnalysisConfig, ArticleRecord, ClickbaitCheck, PROMPT_VERSION, Scope, Task, cache_key as article_cache_key,
+    clickbait_key,
 };
 use juttusihti_core::budget::{Guard, Refusal, Reservation};
 use juttusihti_core::normalize::sha256_hex;
@@ -29,16 +37,16 @@ use juttusihti_core::{EntityKind, Origin, SessionStatus};
 use tokio::sync::{Notify, mpsc};
 
 use crate::prompts::{self, Summary};
-use crate::{AiError, Client, Outcome, Reply, Request};
+use crate::{AiError, Client, Outcome, Reply, Request, decisions};
 
 const EXTRACT_BATCH: usize = 20;
 const PAIR_BATCH: usize = 10;
 const SUMMARY_CHUNK: usize = 40;
 /// Retries of a batch whose output failed validation or was truncated.
 const OUTPUT_RETRIES: u32 = 1;
-/// Requests in flight at once. Each one's worst case is reserved in the
-/// budget before it is sent, so limits hold with requests in parallel.
-const PARALLEL_REQUESTS: usize = 4;
+/// Output tokens reserved per clickbait question (they are not charged).
+const CHECK_OUTPUT_PER_QUESTION: u64 = 64;
+const CHECK_OPERATION: &str = "clickbait_check";
 /// Reasoning effort for per-article extraction and pair checks: simple,
 /// well-specified tasks that need little thinking. Summaries keep the
 /// model's default.
@@ -98,6 +106,31 @@ pub struct RunSummary {
     pub cost: Option<Micros>,
     pub suggestions: u32,
     pub final_status: Option<SessionStatus>,
+    pub headlines: HeadlineStats,
+    /// Wall time of the run.
+    pub elapsed_ms: u64,
+}
+
+/// What the clickbait check did in a run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadlineStats {
+    /// Headlines that needed a decision.
+    pub considered: u32,
+    /// Rated by the Decisions API in this run.
+    pub classified: u32,
+    /// Rated earlier; the cached probability was reused.
+    pub cached: u32,
+    /// At or above the threshold: sent to the rewriting model.
+    pub clickbait: u32,
+    /// Below the threshold: kept as they are, no rewrite requested.
+    pub rewrites_avoided: u32,
+    /// Not rated (error, refusal, budget): sent to the rewriting model, as without the check.
+    pub fallbacks: u32,
+    pub check_requests: u32,
+    pub check_errors: u32,
+    /// Wall time of the clickbait check and of the extraction (rewriting) stage.
+    pub check_ms: u64,
+    pub extraction_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,6 +174,8 @@ struct Ctx {
     session: i64,
     config: AnalysisConfig,
     price: Option<Price>,
+    /// Price of the clickbait check's model.
+    check_price: Option<Price>,
     guard: Guard,
     summary: RunSummary,
 }
@@ -185,14 +220,25 @@ impl Runner {
         if config.billing != self.client.billing() {
             return Err(RunError::BillingMismatch { client: self.client.billing(), session: config.billing });
         }
-        let price = self.catalog.price_for(config.provider, &config.model, config.billing, Utc::now().date_naive());
+        let started = std::time::Instant::now();
+        let today = Utc::now().date_naive();
+        let price = self.catalog.price_for(config.provider, &config.model, config.billing, today);
+        let check_price = config
+            .clickbait_check()
+            .and_then(|c| self.catalog.price_for(config.provider, &c.model, config.billing, today));
         let spent = self.db(|s| s.session_usage(session))?;
         let guard = Guard::new(config.limits, spent);
         self.control.reset();
         self.db(|s| s.set_session_status(session, SessionStatus::Running, None))?;
 
-        let mut ctx =
-            Ctx { session, config, price, guard, summary: RunSummary { cost: Some(0), ..Default::default() } };
+        let mut ctx = Ctx {
+            session,
+            config,
+            price,
+            check_price,
+            guard,
+            summary: RunSummary { cost: Some(0), ..Default::default() },
+        };
         let scope = self.db(|s| s.session_scope(session, &ctx.config))?;
         let result = self.execute(&mut ctx, &scope).await;
         let (status, error) = match result {
@@ -206,6 +252,7 @@ impl Runner {
         }
         self.db(|s| s.set_session_status(session, status, error.as_deref()))?;
         ctx.summary.final_status = Some(status);
+        ctx.summary.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(ctx.summary)
     }
 
@@ -343,15 +390,27 @@ impl Runner {
     }
 
     fn ledger(&self, ctx: &mut Ctx, operation: &str, usage: &Usage, reasoning: u64, cost: Option<Micros>) {
+        let model = ctx.config.model.clone();
+        self.ledger_for(ctx, &model, operation, usage, reasoning, cost);
+    }
+
+    fn ledger_for(
+        &self,
+        ctx: &mut Ctx,
+        model: &str,
+        operation: &str,
+        usage: &Usage,
+        reasoning: u64,
+        cost: Option<Micros>,
+    ) {
         ctx.summary.calls += 1;
         ctx.summary.usage += *usage;
         ctx.summary.cost = match (ctx.summary.cost, cost) {
             (Some(a), Some(b)) => Some(a + b),
             _ => None,
         };
-        let (session, provider, model) = (ctx.session, ctx.config.provider, ctx.config.model.clone());
-        if let Err(e) = self.db(|s| s.record_usage(Some(session), provider, &model, operation, usage, reasoning, cost))
-        {
+        let (session, provider) = (ctx.session, ctx.config.provider);
+        if let Err(e) = self.db(|s| s.record_usage(Some(session), provider, model, operation, usage, reasoning, cost)) {
             tracing::error!(error = %e, "could not write usage ledger");
         }
     }
@@ -382,36 +441,44 @@ impl Runner {
     // ---- stage 1: labels / entities / relevance ----------------------------------
 
     async fn extraction(&self, ctx: &mut Ctx, scope: &Scope, tasks: &BTreeSet<Task>) -> Result<(), Stop> {
-        // Re-check the cache: a resumed run skips articles finished earlier.
+        // Re-check the cache: a resumed run skips work finished earlier. Each
+        // article gets only its open tasks.
         let config = ctx.config.clone();
-        let pending: Vec<&ArticleRecord> = scope
+        let mut open: Vec<(&ArticleRecord, BTreeSet<Task>)> = scope
             .records
             .iter()
             .filter(|r| scope.needs_processing.contains(&r.id))
-            .filter(|r| {
-                !tasks.iter().all(|t| {
-                    let key = article_cache_key(&r.content_hash, config.provider, &config.model, *t, config.depth);
-                    self.db(|s| s.is_cached(&key)).unwrap_or(false)
-                })
-            })
+            .map(|r| (r, self.db(|s| s.open_tasks(&config, r, true)).unwrap_or_else(|_| tasks.clone())))
+            .filter(|(_, t)| !t.is_empty())
             .collect();
-        let batches: Vec<&[&ArticleRecord]> = pending.chunks(EXTRACT_BATCH).collect();
+        if let Some(check) = config.clickbait_check() {
+            self.filter_clickbait(ctx, check, &mut open).await?;
+        }
+
+        // One request per batch of articles with the same open tasks.
+        let mut groups: BTreeMap<BTreeSet<Task>, Vec<&ArticleRecord>> = BTreeMap::new();
+        for (r, t) in open {
+            groups.entry(t).or_default().push(r);
+        }
+        let batches: Vec<(&BTreeSet<Task>, &[&ArticleRecord])> =
+            groups.iter().flat_map(|(t, recs)| recs.chunks(EXTRACT_BATCH).map(move |b| (t, b))).collect();
         self.emit(Progress::Stage { name: "Labels / entities / relevance / headlines", requests: batches.len() });
+        let started = std::time::Instant::now();
         let vocabulary: Vec<String> =
             self.db(|s| s.labels()).map(|l| l.into_iter().map(|l| l.name).collect()).unwrap_or_default();
-        let per_article_out: u32 = tasks
-            .iter()
-            .map(|t| match t {
-                Task::Labels => 30,
-                Task::Entities => 90,
-                Task::Relevance => 25,
-                Task::Headlines => 30,
-                _ => 0,
-            })
-            .sum();
         let reqs: Vec<Request> = batches
             .iter()
-            .map(|batch| {
+            .map(|(tasks, batch)| {
+                let per_article_out: u32 = tasks
+                    .iter()
+                    .map(|t| match t {
+                        Task::Labels => 30,
+                        Task::Entities => 90,
+                        Task::Relevance => 25,
+                        Task::Headlines => 30,
+                        _ => 0,
+                    })
+                    .sum();
                 let max_out = per_article_out * batch.len() as u32 * 5 + 1_024;
                 let mut req = prompts::extraction_request(
                     &config.model,
@@ -425,20 +492,215 @@ impl Runner {
                 req
             })
             .collect();
-        self.run_parallel(
-            ctx,
-            "extraction",
-            &reqs,
-            |i, v| prompts::validate_extraction(v, batches[i], tasks),
-            |this, ctx, i, items| {
-                for item in items {
-                    if let Some(rec) = batches[i].iter().find(|r| r.id == item.id) {
-                        this.persist_extraction(ctx, rec, &item, tasks);
+        let result = self
+            .run_parallel(
+                ctx,
+                "extraction",
+                &reqs,
+                |i, v| prompts::validate_extraction(v, batches[i].1, batches[i].0),
+                |this, ctx, i, items| {
+                    let (tasks, batch) = batches[i];
+                    for item in items {
+                        if let Some(rec) = batch.iter().find(|r| r.id == item.id) {
+                            this.persist_extraction(ctx, rec, &item, tasks);
+                        }
+                    }
+                },
+            )
+            .await;
+        ctx.summary.headlines.extraction_ms = started.elapsed().as_millis() as u64;
+        if config.clickbait_check().is_some() {
+            tracing::info!(stats = ?ctx.summary.headlines, "headline pipeline");
+        }
+        result
+    }
+
+    // ---- stage 0: clickbait check ------------------------------------------------
+
+    /// Rates the open headlines with the Decisions API and closes the
+    /// headline task of those below the threshold. Cached probabilities are
+    /// reused, and articles with the same content are rated once.
+    async fn filter_clickbait(
+        &self,
+        ctx: &mut Ctx,
+        check: &ClickbaitCheck,
+        open: &mut Vec<(&ArticleRecord, BTreeSet<Task>)>,
+    ) -> Result<(), Stop> {
+        let depth = ctx.config.depth;
+        let mut probability: HashMap<&str, f64> = HashMap::new();
+        let mut to_rate: Vec<&ArticleRecord> = Vec::new();
+        let mut considered = 0;
+        for (r, _) in open.iter().filter(|(_, t)| t.contains(&Task::Headlines)) {
+            considered += 1;
+            let hash = r.content_hash.as_str();
+            if probability.contains_key(hash) || to_rate.iter().any(|x| x.content_hash == hash) {
+                continue;
+            }
+            match self.db(|s| s.cached_clickbait(&clickbait_key(hash, check, depth))) {
+                Ok(Some(p)) => {
+                    probability.insert(hash, p);
+                    ctx.summary.headlines.cached += 1;
+                }
+                _ => to_rate.push(r),
+            }
+        }
+        if considered == 0 {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let rated = self.rate_headlines(ctx, check, &to_rate).await;
+        ctx.summary.headlines.check_ms = started.elapsed().as_millis() as u64;
+        let by_id: HashMap<i64, &ArticleRecord> = to_rate.iter().map(|r| (r.id, *r)).collect();
+        for (id, p) in rated? {
+            if let Some(r) = by_id.get(&id) {
+                probability.insert(r.content_hash.as_str(), p);
+            }
+        }
+
+        let stats = &mut ctx.summary.headlines;
+        stats.considered += considered;
+        for (r, tasks) in open.iter_mut().filter(|(_, t)| t.contains(&Task::Headlines)) {
+            match probability.get(r.content_hash.as_str()) {
+                Some(p) if !check.is_clickbait(*p) => {
+                    tasks.remove(&Task::Headlines);
+                    stats.rewrites_avoided += 1;
+                }
+                Some(_) => stats.clickbait += 1,
+                None => stats.fallbacks += 1,
+            }
+        }
+        open.retain(|(_, t)| !t.is_empty());
+        let mut note = format!(
+            "Clickbait check: {} of {considered} headlines look like clickbait (at least {}%); {} kept without a rewrite.",
+            stats.clickbait, check.threshold_percent, stats.rewrites_avoided
+        );
+        if stats.fallbacks > 0 {
+            note.push_str(&format!(" {} could not be rated and go to the rewriting model.", stats.fallbacks));
+        }
+        self.emit(Progress::Note(note));
+        Ok(())
+    }
+
+    /// Sends the classification batches, a few at a time, and caches each
+    /// probability. Errors end the check without stopping the run; only
+    /// pause and cancel stop it.
+    async fn rate_headlines(
+        &self,
+        ctx: &mut Ctx,
+        check: &ClickbaitCheck,
+        records: &[&ArticleRecord],
+    ) -> Result<HashMap<i64, f64>, Stop> {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let batches = decisions::batches(records, check.batch_size());
+        let bodies: Vec<serde_json::Value> = batches.iter().map(|b| decisions::request(&check.model, b)).collect();
+        self.emit(Progress::Stage { name: "Clickbait check", requests: bodies.len() });
+        let timeout = std::time::Duration::from_secs(u64::from(check.timeout_secs.max(1)));
+        let bodies = &bodies;
+        let send = |i: usize| async move {
+            let reply = tokio::select! {
+                r = self.client.decide(&bodies[i], timeout) => Some(r),
+                _ = self.control.cancelled() => None,
+            };
+            (i, reply)
+        };
+        let mut rated = HashMap::new();
+        let mut flights: HashMap<usize, InFlight> = HashMap::new();
+        let mut pending = FuturesUnordered::new();
+        let mut next = 0;
+        let mut done = 0;
+        // Set by the first failure: the remaining batches are not sent.
+        let mut broken = false;
+        let mut stop = None;
+        loop {
+            while !broken && stop.is_none() && pending.len() < ctx.config.parallel_requests() && next < bodies.len() {
+                if let Err(s) = self.check_control() {
+                    stop = Some(s);
+                    break;
+                }
+                let input = juttusihti_core::estimate::approx_tokens(&bodies[next].to_string()) * 135 / 100 + 64;
+                let output = batches[next].len() as u64 * CHECK_OUTPUT_PER_QUESTION + 256;
+                let worst_usage = Usage { input, output, ..Default::default() };
+                let worst_cost =
+                    ctx.check_price.as_ref().and_then(|p| p.cost(&Usage { output: 0, ..worst_usage }, false));
+                match ctx.guard.reserve(worst_usage.total(), worst_cost) {
+                    Ok(reservation) => {
+                        flights.insert(next, InFlight { reservation, worst_usage, worst_cost });
+                        pending.push(send(next));
+                        next += 1;
+                    }
+                    Err(Refusal::Paused) => {
+                        stop = Some(Stop::Paused("paused".into()));
+                        break;
+                    }
+                    Err(r) if pending.is_empty() => {
+                        self.emit(Progress::Note(format!("Clickbait check skipped: {r}")));
+                        broken = true;
+                    }
+                    // Budget may free up once a request in flight settles.
+                    Err(_) => break,
+                }
+            }
+            let Some((i, reply)) = pending.next().await else { break };
+            let InFlight { reservation, worst_usage, worst_cost } =
+                flights.remove(&i).expect("every request in flight has a reservation");
+            ctx.summary.headlines.check_requests += 1;
+            let ids: Vec<i64> = batches[i].iter().map(|r| r.id).collect();
+            let reply = match reply {
+                None => {
+                    // Cancelled in flight: the provider may still bill the request.
+                    ctx.guard.settle(reservation, None);
+                    let op = format!("{CHECK_OPERATION}:cancelled_in_flight");
+                    self.ledger_for(ctx, &check.model, &op, &worst_usage, 0, worst_cost);
+                    stop.get_or_insert(Stop::Cancelled);
+                    continue;
+                }
+                Some(r) => r.and_then(|v| decisions::parse(&v, &ids)),
+            };
+            match reply {
+                Ok(d) => {
+                    let cost = ctx.check_price.as_ref().and_then(|p| p.cost(&Usage { output: 0, ..d.usage }, false));
+                    ctx.guard.settle(reservation, Some((d.usage.total(), cost)));
+                    self.ledger_for(ctx, &check.model, CHECK_OPERATION, &d.usage, d.reasoning_tokens, cost);
+                    if d.refusals > 0 {
+                        self.emit(Progress::Note(format!("The clickbait check declined {} headlines.", d.refusals)));
+                    }
+                    let depth = ctx.config.depth;
+                    for r in &batches[i] {
+                        let Some(&p) = d.probabilities.get(&r.id) else { continue };
+                        rated.insert(r.id, p);
+                        ctx.summary.headlines.classified += 1;
+                        let key = clickbait_key(&r.content_hash, check, depth);
+                        let payload = serde_json::json!({"probability": p, "model": check.model});
+                        if let Err(e) = self.db(|s| s.cache_result(&key, r.id, Task::Headlines, &payload)) {
+                            tracing::error!(article = r.id, error = %e, "could not cache a clickbait probability");
+                        }
                     }
                 }
-            },
-        )
-        .await
+                Err(e) => {
+                    if e.possibly_charged() {
+                        ctx.guard.settle(reservation, None);
+                        let op = format!("{CHECK_OPERATION}:unknown_outcome");
+                        self.ledger_for(ctx, &check.model, &op, &worst_usage, 0, worst_cost);
+                    } else {
+                        ctx.guard.release(reservation);
+                    }
+                    ctx.summary.headlines.check_errors += 1;
+                    tracing::warn!(error = %e, "clickbait check failed");
+                    if !broken {
+                        self.emit(Progress::Note(format!(
+                            "Clickbait check failed ({e}); headlines go to the rewriting model without it."
+                        )));
+                    }
+                    broken = true;
+                }
+            }
+            done += 1;
+            self.emit_call(ctx, CHECK_OPERATION, done, bodies.len());
+        }
+        match stop {
+            Some(s) => Err(s),
+            None => Ok(rated),
+        }
     }
 
     /// Calls and validates, retrying once when output is unusable.
@@ -463,10 +725,11 @@ impl Runner {
         Ok(None)
     }
 
-    /// Sends independent requests, up to [`PARALLEL_REQUESTS`] at a time.
-    /// Valid results are handed to `accept` (and stored) as soon as their
-    /// wave returns, so a stop never loses paid work. Unusable output is
-    /// retried up to [`OUTPUT_RETRIES`] times.
+    /// Sends independent requests, keeping up to the configured number in
+    /// flight: a new one starts as soon as any returns. Valid results are
+    /// handed to `accept` (and stored) as each returns, so a stop never
+    /// loses paid work. Unusable output is retried up to [`OUTPUT_RETRIES`]
+    /// times.
     async fn run_parallel<T>(
         &self,
         ctx: &mut Ctx,
@@ -475,59 +738,68 @@ impl Runner {
         validate: impl Fn(usize, &serde_json::Value) -> Result<T, String>,
         mut accept: impl FnMut(&Self, &mut Ctx, usize, T),
     ) -> Result<(), Stop> {
-        let mut queue: std::collections::VecDeque<usize> = (0..reqs.len()).collect();
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let send = |i: usize| async move { (i, self.send(&reqs[i]).await) };
+        let mut queue: VecDeque<usize> = (0..reqs.len()).collect();
         let mut attempts = vec![0u32; reqs.len()];
+        let mut flights: HashMap<usize, InFlight> = HashMap::new();
+        let mut pending = FuturesUnordered::new();
         let mut done = 0;
-        while !queue.is_empty() {
-            let mut wave: Vec<(usize, InFlight)> = Vec::new();
-            while wave.len() < PARALLEL_REQUESTS
+        let mut stop = None;
+        loop {
+            while stop.is_none()
+                && pending.len() < ctx.config.parallel_requests()
                 && let Some(&i) = queue.front()
             {
                 match self.begin(ctx, &reqs[i]) {
                     Ok(f) => {
                         queue.pop_front();
-                        wave.push((i, f));
+                        flights.insert(i, f);
+                        pending.push(send(i));
                     }
-                    Err(stop) if wave.is_empty() => return Err(stop),
-                    // Budget may free up once this wave settles at actual usage.
+                    Err(s) if pending.is_empty() => return Err(s),
+                    // Budget may free up once a request in flight settles at actual usage.
                     Err(_) => break,
                 }
             }
-            let replies = futures_util::future::join_all(wave.iter().map(|(i, _)| self.send(&reqs[*i]))).await;
-            let mut stop = None;
-            for ((i, flight), reply) in wave.into_iter().zip(replies) {
-                match self.finish(ctx, operation, flight, reply) {
-                    Ok(Some(v)) => match validate(i, &v) {
-                        Ok(t) => {
-                            accept(self, ctx, i, t);
-                            done += 1;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!(operation, error = %e, "model output failed validation");
-                            self.emit(Progress::Note(format!("Discarded invalid {operation} output: {e}")));
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(s) => {
-                        stop.get_or_insert(s);
+            let Some((i, reply)) = pending.next().await else { break };
+            let flight = flights.remove(&i).expect("every request in flight has a reservation");
+            match self.finish(ctx, operation, flight, reply) {
+                Ok(Some(v)) => match validate(i, &v) {
+                    Ok(t) => {
+                        accept(self, ctx, i, t);
+                        done += 1;
+                        self.emit_call(ctx, operation, done, reqs.len());
                         continue;
                     }
-                }
-                attempts[i] += 1;
-                if attempts[i] <= OUTPUT_RETRIES {
-                    queue.push_back(i);
-                } else {
-                    done += 1;
+                    Err(e) => {
+                        tracing::warn!(operation, error = %e, "model output failed validation");
+                        self.emit(Progress::Note(format!("Discarded invalid {operation} output: {e}")));
+                    }
+                },
+                Ok(None) => {}
+                Err(s) => {
+                    stop.get_or_insert(s);
+                    continue;
                 }
             }
-            let (tokens, cost) = (ctx.summary.usage.total(), ctx.summary.cost);
-            self.emit(Progress::Call { stage: operation, done, total: reqs.len(), tokens, cost });
-            if let Some(s) = stop {
-                return Err(s);
+            attempts[i] += 1;
+            if attempts[i] <= OUTPUT_RETRIES {
+                queue.push_back(i);
+            } else {
+                done += 1;
             }
+            self.emit_call(ctx, operation, done, reqs.len());
         }
-        Ok(())
+        match stop {
+            Some(s) => Err(s),
+            None => Ok(()),
+        }
+    }
+
+    fn emit_call(&self, ctx: &Ctx, stage: &'static str, done: usize, total: usize) {
+        let (tokens, cost) = (ctx.summary.usage.total(), ctx.summary.cost);
+        self.emit(Progress::Call { stage, done, total, tokens, cost });
     }
 
     fn persist_extraction(

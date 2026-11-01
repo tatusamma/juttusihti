@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use juttusihti_core::analysis::{AnalysisConfig, Depth, Task, cache_key};
+use juttusihti_core::analysis::{AnalysisConfig, ClickbaitCheck, Depth, Task, cache_key, clickbait_key};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::{Scenario, Stage, estimate};
 use juttusihti_core::pricing::{Billing, Catalog, Provider};
@@ -93,6 +93,8 @@ fn config(tasks: &[Task]) -> AnalysisConfig {
         use_batch: false,
         billing: Default::default(),
         relevance_criteria: None,
+        clickbait: juttusihti_core::analysis::ClickbaitCheck::off(),
+        parallel_requests: 4,
     }
 }
 
@@ -146,6 +148,66 @@ fn cached_results_are_not_counted_again() {
     let mut fresh = cfg.clone();
     fresh.reuse_cached = false;
     assert_eq!(s.analysis_scope(&fresh).unwrap().stats.cached, 0);
+}
+
+#[test]
+fn clickbait_check_plans_its_own_stage_and_settles_headlines() {
+    let s = seeded();
+    let mut cfg = config(&[Task::Headlines]);
+    (cfg.provider, cfg.model, cfg.clickbait) = (Provider::Openai, "gpt-6-luna".into(), ClickbaitCheck::default());
+    assert!(cfg.clickbait_check().is_some());
+    let scope = s.analysis_scope(&cfg).unwrap();
+    // Three distinct articles in range have a description; one does not
+    // and needs nothing, as no rewrite could be grounded.
+    assert_eq!(scope.needs_processing.len(), 3);
+    let e = estimate(&cfg, &scope, 0, &Catalog::builtin(), today());
+    assert_eq!(e.stages[0].stage, Stage::ClickbaitCheck);
+    assert_eq!((e.stages[0].requests, e.stages[0].expected_output), (1, 0), "one batch; output is not charged");
+    assert_eq!(e.stages[1].stage, Stage::Extraction, "the rewrite stage stays an upper bound");
+    assert!(e.price_known);
+    assert!(e.warnings.iter().any(|w| w.contains("clickbait check")), "{:?}", e.warnings);
+
+    // A cached probability below the threshold settles the headline task;
+    // one at the threshold keeps it open, and so does a lower threshold.
+    let (low, high) = (&scope.records[0], &scope.records[1]);
+    let key = |r: &juttusihti_core::analysis::ArticleRecord| clickbait_key(&r.content_hash, &cfg.clickbait, cfg.depth);
+    s.cache_result(&key(low), low.id, Task::Headlines, &serde_json::json!({"probability": 0.2})).unwrap();
+    s.cache_result(&key(high), high.id, Task::Headlines, &serde_json::json!({"probability": 0.7})).unwrap();
+    assert_eq!(s.cached_clickbait(&key(low)).unwrap(), Some(0.2));
+    assert!(s.open_tasks(&cfg, low, true).unwrap().is_empty());
+    assert!(s.open_tasks(&cfg, high, true).unwrap().contains(&Task::Headlines));
+    assert!(s.open_tasks(&cfg, low, false).unwrap().contains(&Task::Headlines), "reuse can be turned off");
+    let mut strict = cfg.clone();
+    strict.clickbait.threshold_percent = 15;
+    assert!(s.open_tasks(&strict, low, true).unwrap().contains(&Task::Headlines));
+    assert_eq!(s.analysis_scope(&cfg).unwrap().needs_processing.len(), 2);
+
+    // Not on other providers, on a ChatGPT plan, or with headlines only.
+    for change in [
+        |c: &mut AnalysisConfig| c.provider = Provider::Anthropic,
+        |c: &mut AnalysisConfig| c.billing = Billing::ChatGptPlan,
+        |c: &mut AnalysisConfig| c.depth = Depth::Headlines,
+        |c: &mut AnalysisConfig| c.clickbait.enabled = false,
+    ] {
+        let mut other = cfg.clone();
+        change(&mut other);
+        assert!(other.clickbait_check().is_none());
+        let scope = s.analysis_scope(&other).unwrap();
+        let e = estimate(&other, &scope, 0, &Catalog::builtin(), today());
+        assert!(e.stages.iter().all(|st| st.stage != Stage::ClickbaitCheck));
+    }
+}
+
+#[test]
+fn sessions_saved_before_the_clickbait_check_run_without_it() {
+    let mut v = serde_json::to_value(config(&[Task::Headlines])).unwrap();
+    v.as_object_mut().unwrap().remove("clickbait");
+    v.as_object_mut().unwrap().remove("parallel_requests");
+    let old: AnalysisConfig = serde_json::from_value(v).unwrap();
+    assert!(!old.clickbait.enabled);
+    assert_eq!(old.parallel_requests(), 4);
+    assert_eq!(ClickbaitCheck::default().threshold(), 0.70);
+    assert_eq!(ClickbaitCheck { batch_size: 10_000, ..Default::default() }.batch_size(), 400);
 }
 
 #[test]

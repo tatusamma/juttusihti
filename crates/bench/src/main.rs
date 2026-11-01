@@ -302,6 +302,8 @@ fn main() {
         use_batch: false,
         billing: Default::default(),
         relevance_criteria: None,
+        clickbait: juttusihti_core::analysis::ClickbaitCheck::off(),
+        parallel_requests: 4,
     };
     let mut scope = None;
     res.time("Analysis scope: 30 days, max 1,000 (dedup, cache, candidates)", || {
