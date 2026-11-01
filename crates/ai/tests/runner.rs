@@ -1206,3 +1206,71 @@ async fn clickbait_check_is_skipped_on_other_providers() {
     assert!(m.requests().iter().all(|r| !is_decision(r)));
     assert_eq!((r.headlines.considered, r.headlines.check_requests), (0, 0));
 }
+
+// ---- an empty OpenAI API account -----------------------------------------------------
+
+fn no_credit() -> MockReply {
+    MockReply {
+        status: 429,
+        body: json!({"error": {"message": "You have no credits remaining. Add credits to continue using the API.",
+            "type": "insufficient_quota", "code": "insufficient_quota"}}),
+        delay: Duration::ZERO,
+    }
+}
+
+#[tokio::test]
+async fn no_credit_pauses_without_retrying_and_resumes_after_a_top_up() {
+    let db = seed(3);
+    let sid = session(&db, &config(Provider::Openai, &[Task::Labels]));
+    let topped_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paid = topped_up.clone();
+    let good = good_model(Provider::Openai);
+    let m =
+        mock(Arc::new(move |r: &Recorded, n| if paid.load(Ordering::SeqCst) { good(r, n) } else { no_credit() })).await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Paused), "resumable, not failed");
+    assert_eq!(m.count(), 1, "an empty account is not retried");
+    assert!(r.stop_reason.as_deref().unwrap().contains("no credit left"), "{:?}", r.stop_reason);
+    assert!(ledger_rows(&db).is_empty(), "a refused request is not charged");
+
+    topped_up.store(true, Ordering::SeqCst);
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!(r.stop_reason, None);
+}
+
+#[tokio::test]
+async fn no_credit_on_the_clickbait_check_pauses_before_any_rewrite() {
+    let db = seed_headlines();
+    let mut cfg = check_config(&[Task::Headlines]);
+    cfg.clickbait.batch_size = 50;
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(|_: &Recorded, _| no_credit())).await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Paused));
+    assert_eq!(m.count(), 1, "one check request; no rewrite is sent to an empty account");
+    assert!(is_decision(&m.requests()[0]));
+    assert!(r.stop_reason.as_deref().unwrap().contains("platform.openai.com"), "{:?}", r.stop_reason);
+}
+
+#[tokio::test]
+async fn a_rate_limit_is_still_retried() {
+    let db = seed(3);
+    let sid = session(&db, &config(Provider::Openai, &[Task::Labels]));
+    let good = good_model(Provider::Openai);
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        if n == 0 {
+            MockReply {
+                status: 429,
+                body: json!({"error": {"message": "Rate limit reached", "type": "requests", "code": "rate_limit_exceeded"}}),
+                delay: Duration::ZERO,
+            }
+        } else {
+            good(r, n)
+        }
+    }))
+    .await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!(m.count(), 2);
+}

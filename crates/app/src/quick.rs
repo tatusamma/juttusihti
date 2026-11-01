@@ -264,8 +264,17 @@ impl State {
                 self.result = Some((
                     result.map(|s| {
                         let status = s.final_status.map(|st| st.as_str()).unwrap_or("finished");
-                        let what =
-                            if status == "completed" { "Done".to_string() } else { format!("Stopped ({status})") };
+                        // The reason a run stopped, as a sentence, and where to resume it.
+                        let why = s.stop_reason.as_deref().map(str::trim).filter(|w| !w.is_empty()).map(|w| {
+                            let end = if w.ends_with('.') { "" } else { "." };
+                            let resume = if status == "paused" { " Resume it under Custom analysis." } else { "" };
+                            format!("{w}{end}{resume} So far")
+                        });
+                        let what = match (status, why) {
+                            ("completed", _) => "Done".to_string(),
+                            (_, Some(why)) => format!("Stopped ({status}). {why}"),
+                            (_, None) => format!("Stopped ({status})"),
+                        };
                         let mut line = format!(
                             "{what}: {} results from {} requests, {} tokens, {}.",
                             s.suggestions,

@@ -403,7 +403,8 @@ pub fn estimate(
         && !checks.is_empty()
     {
         warnings.push(format!(
-            "A clickbait check ({}, OpenAI Decisions API) runs first; only headlines it rates at least {}% likely              clickbait go to {} for a rewrite, so the run usually costs less than this estimate.",
+            "A clickbait check ({}, OpenAI Decisions API) runs first; only headlines it rates at least {}% likely \
+                clickbait go to {} for a rewrite, so the run usually costs less than this estimate.",
             check.model, check.threshold_percent, config.model
         ));
     }
@@ -416,7 +417,9 @@ pub fn estimate(
     if config.billing == Billing::ChatGptPlan {
         if config.provider == Provider::Openai {
             warnings.push(
-                "Runs use your ChatGPT plan allowance instead of API credit. OpenAI does not publish plan allowances                  in tokens; the run pauses if the plan or the app's weekly cap is reached. Output length cannot                  be capped on the plan, so token use may exceed the estimate."
+                "Runs use your ChatGPT plan allowance instead of API credit. OpenAI does not publish plan allowances \
+                    in tokens; the run pauses if the plan or the app's weekly cap is reached. Output length cannot \
+                    be capped on the plan, so token use may exceed the estimate."
                     .into(),
             );
         } else {

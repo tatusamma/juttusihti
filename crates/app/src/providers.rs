@@ -344,7 +344,9 @@ impl State {
                 label("Headlines"),
                 style::check(c.enabled, "Check for clickbait first").on_toggle(Msg::SetClickbait),
                 style::help(
-                    "Before rewriting, a fast, cheap classifier (OpenAI Decisions API) rates how likely each                      headline is clickbait. Only headlines at or above the threshold are sent for a rewrite;                      the rest stay as they are. Ratings are remembered, so changing the threshold is free."
+                    "Before rewriting, a fast, cheap classifier (OpenAI Decisions API) rates how likely each \
+                        headline is clickbait. Only headlines at or above the threshold are sent for a rewrite; \
+                        the rest stay as they are. Ratings are remembered, so changing the threshold is free."
                 ),
             ]
             .spacing(SPACE[1])

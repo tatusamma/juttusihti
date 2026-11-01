@@ -165,6 +165,19 @@ Results show up in the list while the run goes on. Rewritten headlines carry an 
 the original underneath. Runs can be paused, resumed and cancelled, and never exceed the
 spending limits.
 
+**Clickbait check.** With an OpenAI API key, headlines are checked before they are rewritten:
+a fast, cheap classifier (OpenAI's Decisions API, `gpt-6-luna`) rates how likely each headline
+is clickbait, in batches, and only those at or above the threshold (70% by default) are sent
+to the rewriting model. Ratings are cached, so a new threshold costs nothing. Turn the check off
+or change the threshold on **AI setup**. On a ChatGPT plan, or with Claude or Gemini, headlines
+are rewritten in one step without the check.
+
+**API credit.** An API key is billed to the provider account behind it, which needs credit; a
+ChatGPT plan is not. If your OpenAI API account runs out of credit, the run pauses at once and
+says so instead of retrying. Add credit on
+[OpenAI's billing page](https://platform.openai.com/settings/organization/billing/), then press
+**Resume** under **Custom analysis**: finished work is kept and never paid for twice.
+
 ![AI setup](docs/screenshots/ai-setup.png)
 
 ### Custom analysis
@@ -172,6 +185,8 @@ spending limits.
 For a larger study, **Custom analysis** chooses a date range, feeds, folders, labels or a
 search, the model, how much of each article to send, tasks and limits. Its preview is
 computed locally; the analysis is saved and waits for your approval before anything is sent.
+Recent runs are listed there too, including ✨ runs; a paused or stopped run shows why it
+stopped and has a **Resume** button.
 
 ![Custom analysis](docs/screenshots/analysis.png)
 

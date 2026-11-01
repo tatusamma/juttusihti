@@ -138,6 +138,9 @@ pub enum AiError {
     /// The ChatGPT plan (or this app's weekly cap) is used up for now.
     #[error("ChatGPT plan usage limit reached: {0}")]
     PlanLimit(String),
+    /// The OpenAI API account has no credit left. Retrying cannot help.
+    #[error("the OpenAI API account has no credit left: {0}")]
+    NoCredit(String),
     /// The feature is not available with this kind of credential.
     #[error("{0}")]
     Unsupported(&'static str),
@@ -343,6 +346,12 @@ impl Client {
         if status != StatusCode::OK {
             if providers::is_plan_limit(&bytes) {
                 return Err((AiError::PlanLimit(providers::error_message(&bytes)), None));
+            }
+            if self.endpoint.provider == Provider::Openai
+                && status == StatusCode::TOO_MANY_REQUESTS
+                && providers::is_no_credit(&bytes)
+            {
+                return Err((AiError::NoCredit(providers::error_message(&bytes)), None));
             }
             return Err((
                 AiError::Status { status: status.as_u16(), message: providers::error_message(&bytes) },

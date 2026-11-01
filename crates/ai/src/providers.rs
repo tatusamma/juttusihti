@@ -145,6 +145,16 @@ pub fn is_plan_limit(body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether an OpenAI 429 body says the API account is out of credit
+/// (`insufficient_quota`) rather than rate limited.
+pub fn is_no_credit(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else { return false };
+    let e = &v["error"];
+    e["code"] == "insufficient_quota"
+        || e["type"] == "insufficient_quota"
+        || e["message"].as_str().is_some_and(|m| m.contains("no credits remaining"))
+}
+
 /// Reads a Responses API event stream (server-sent events) and returns the
 /// final `response` object. Only `response.completed` or
 /// `response.incomplete` count as an answer; a stream that ends without
@@ -419,6 +429,11 @@ mod tests {
         assert!(matches!(final_response_from_stream(cut.as_bytes()), Err(AiError::Unknown(_))));
         assert!(is_plan_limit(br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"m"}}"#));
         assert!(!is_plan_limit(br#"{"error":{"code":"rate_limit_exceeded"}}"#));
+        assert!(is_no_credit(br#"{"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"m"}}"#));
+        assert!(is_no_credit(
+            br#"{"error":{"message":"You have no credits remaining. Add credits to continue using the API."}}"#
+        ));
+        assert!(!is_no_credit(br#"{"error":{"code":"rate_limit_exceeded","type":"requests","message":"slow down"}}"#));
     }
 
     #[test]

@@ -166,6 +166,7 @@ fn clickbait_check_plans_its_own_stage_and_settles_headlines() {
     assert_eq!(e.stages[1].stage, Stage::Extraction, "the rewrite stage stays an upper bound");
     assert!(e.price_known);
     assert!(e.warnings.iter().any(|w| w.contains("clickbait check")), "{:?}", e.warnings);
+    assert!(e.warnings.iter().all(|w| !w.contains("  ")), "no runs of spaces: {:?}", e.warnings);
 
     // A cached probability below the threshold settles the headline task;
     // one at the threshold keeps it open, and so does a lower threshold.
