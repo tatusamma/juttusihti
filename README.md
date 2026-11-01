@@ -2,7 +2,138 @@
 
 A local-first RSS reader and news research desktop app written in Rust with Iced.
 SQLite is the source of truth and DuckDB runs analytics. Optional AI-assisted research
-(OpenAI, Anthropic, Gemini) is planned and only ever starts when the user asks for it.
+(OpenAI, Anthropic, Gemini) only ever starts when you ask for it, after showing what it will
+send and what it will cost.
+
+![Reading an article](docs/screenshots/reader.png)
+
+## Using Juttusihti
+
+The same guide is built into the app: click **?** at the bottom of the left rail, or press
+**F1**.
+
+![The Help screen](docs/screenshots/help.png)
+
+### Getting started
+
+1. Open **News** (the newspaper icon at the top of the left rail).
+2. Open the feed menu at the top left of the article list. Paste a site address or a feed URL
+   into **Add a site or feed** and press **Add**. Juttusihti finds the site's feeds for you.
+3. Coming from another reader? Export OPML there and use **Import OPML** in the feed menu or
+   in Settings.
+
+Feeds refresh on a schedule (Settings → Feeds, every 30 minutes by default) and with the
+refresh button in the top bar. Everything you fetch stays on this computer and can be read
+offline.
+
+### Reading
+
+- The feed menu chooses what the list shows: all news, a folder or a single feed. **All /
+  Unread** filters the list.
+- Click an article to read it on the right. **Save** keeps it under **Saved** in the rail and
+  protects it from the retention clean-up; **Open in browser** opens the original page.
+- The **⋯** menu marks the list read, hides articles you have dismissed as irrelevant,
+  switches between AI-rewritten and original headlines and, for a single feed, renames it,
+  moves it to a folder or unsubscribes.
+- Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
+  them.
+
+### Searching
+
+Type in the search bar at the top (or press `/`). Search is local full-text search.
+
+| Query | Finds |
+| --- | --- |
+| `tram strike` | both words (AND is implicit) |
+| `"city council"` | the exact phrase |
+| `tram OR bus` | either word |
+| `-sports` or `NOT sports` | leaves out articles with the word |
+| `työttömyysturva*` | prefix; needed for Finnish inflections such as `työttömyysturvaan` |
+| `title:sää` | only in the title (also `author:`, `summary:`, `content:`) |
+| `NEAR(rail budget, 10)` | words within 10 words of each other; `( )` groups terms |
+
+### Keyboard shortcuts
+
+| Keys | Action |
+| --- | --- |
+| `j` / `↓`, `k` / `↑` | next / previous article |
+| `o` / `Enter` | open the article in the browser |
+| `s` | save or unsave |
+| `m` | mark read or unread |
+| `n` / `p` | next / previous page |
+| `/` or `Ctrl+F` | search |
+| `Ctrl+R` | refresh all feeds |
+| `Esc` | close menus and panels |
+| `F1` | help |
+
+### AI for a list (✨)
+
+Nothing is sent to an AI provider until you ask.
+
+1. Connect a provider on **AI setup** (the robot icon): sign in with ChatGPT, or add an
+   OpenAI, Anthropic (Claude) or Gemini API key. The screen explains step by step how to get a
+   key. Keys are stored in the system's secret store, never in the database. Set the default
+   provider, Fast/Quality model and per-run spending limits here too.
+2. Press **✨** above the article list. It works on what the list shows: a feed, a folder, a
+   view or a search.
+3. Pick tasks (clickbait headlines, labels, related stories, people and places, summary), check the
+   local estimate of articles, requests, tokens and cost, and press **Send N articles to
+   &lt;provider&gt;**. That button is your consent for that run.
+
+![The AI panel](docs/screenshots/ai-panel.png)
+
+Results show up in the list while the run goes on. Rewritten headlines carry an AI tag with
+the original underneath. Runs can be paused, resumed and cancelled, and never exceed the
+spending limits.
+
+![AI setup](docs/screenshots/ai-setup.png)
+
+### Custom analysis
+
+For a larger study, **Custom analysis** chooses a date range, feeds, folders, labels or a
+search, the model, how much of each article to send, tasks and limits. Its preview is
+computed locally; the analysis is saved and waits for your approval before anything is sent.
+
+![Custom analysis](docs/screenshots/analysis.png)
+
+### Review
+
+Everything AI produces starts as a suggestion. On **Review** you confirm or reject entities,
+relationships, relevance and summaries, one by one or in bulk. AI never overrides a choice you
+have made.
+
+### Reports
+
+Charts of your news: volume per source, topics, labels, entities that appear together,
+relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day,
+week or month buckets, and export any report as CSV.
+
+![Reports](docs/screenshots/reports.png)
+
+### Timeline, map and relationship map
+
+- **Timeline** shows articles per source, story threads and dated events. Drag to pan, scroll
+  to zoom.
+- **Map** shows places from articles. Map tiles stay off until you turn them on, because the
+  area you view is then sent to the tile server; without them a coordinate grid is shown.
+  Places named by AI have no coordinates: check the evidence and use **Place on map**.
+- **Relationship map** draws people, organisations and places and how they connect: solid
+  lines are confirmed, dashed lines are AI suggestions.
+
+![Timeline](docs/screenshots/timeline.png)
+
+### Settings and your data
+
+Settings sets how long articles are kept (saved and researched articles are always kept), the
+refresh interval, dark or light theme, the CPU renderer (far less memory), and the map tile
+server and its cache.
+
+![Settings](docs/screenshots/settings.png)
+
+All data is in one SQLite database on this computer; its path is shown at the bottom of
+Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
+
+# Development
 
 ## Workspace
 
