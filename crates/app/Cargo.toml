@@ -6,6 +6,34 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# The Linux .rpm, built with cargo-generate-rpm (cargo-packager has no rpm format):
+#   cargo build --release -p juttusihti && cargo generate-rpm -p crates/app
+# Asset sources are relative to this crate. The libraries below are loaded at run time, so
+# the automatic dependency scan cannot see them; sonames keep them distro-neutral.
+[package.metadata.generate-rpm]
+summary = "Local-first RSS reader and news research desktop app"
+url = "https://github.com/tero-k/juttusihti"
+assets = [
+  { source = "target/release/juttusihti", dest = "/usr/bin/juttusihti", mode = "755" },
+  { source = "../../packaging/linux/juttusihti.desktop", dest = "/usr/share/applications/juttusihti.desktop", mode = "644" },
+  { source = "../../packaging/icons/juttusihti-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/juttusihti.png", mode = "644" },
+  { source = "../../packaging/icons/juttusihti-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/juttusihti.png", mode = "644" },
+  { source = "../../packaging/icons/juttusihti-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/juttusihti.png", mode = "644" },
+  { source = "../../packaging/icons/juttusihti-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/juttusihti.png", mode = "644" },
+  { source = "../../packaging/icons/juttusihti-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/juttusihti.png", mode = "644" },
+  { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/juttusihti/LICENSE-MIT", mode = "644", doc = true },
+  { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/juttusihti/LICENSE-APACHE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+"libdbus-1.so.3()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libfontconfig.so.1()(64bit)" = "*"
+"(libvulkan.so.1()(64bit) or libEGL.so.1()(64bit))" = ""
+
 [dependencies]
 juttusihti-core = { path = "../core" }
 juttusihti-fetch = { path = "../fetch" }
