@@ -1,0 +1,128 @@
+# Builds the Linux packages for a version tag and puts them on a DRAFT GitHub Release.
+# Windows installers are built and signed locally (packaging/release-windows.ps1) and added to
+# the same draft; the maintainer publishes it by hand. See RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        name: Tag matches Cargo.toml and Packager.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          packager_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)
+          echo "tag $version, Cargo.toml $cargo_version, Packager.toml $packager_version"
+          if [ "$version" != "$cargo_version" ] || [ "$version" != "$packager_version" ]; then
+            echo "::error::Tag $TAG does not match the versions in Cargo.toml and Packager.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  linux:
+    needs: [version, ci]
+    # Ubuntu 22.04 (glibc 2.35): binaries built on newer distros do not run on older ones.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: false
+      - run: cargo install cargo-packager --version 0.11.8 --locked
+      # Packager.toml's beforePackagingCommand then finds the binary up to date.
+      - run: cargo build --release -p juttusihti --locked
+      - run: cargo packager --release -f deb,appimage -c Packager.toml
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+      - name: Tarball and checksums
+        run: |
+          mkdir dist
+          cp target/packages/*.deb target/packages/*.AppImage dist/
+          stage="juttusihti-$VERSION-x86_64-linux"
+          mkdir "$stage"
+          cp target/release/juttusihti README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf "dist/$stage.tar.gz" "$stage"
+          cd dist
+          sha256sum -- * > SHA256SUMS-linux.txt
+          cat SHA256SUMS-linux.txt
+      # Free for public repositories only.
+      - if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  draft:
+    needs: [version, linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux
+          path: dist
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG is already published; not touching it"
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+          else
+            prerelease=()
+            case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+            # Never publishes: the maintainer adds the signed Windows build, then publishes.
+            gh release create "$TAG" dist/* --draft --verify-tag "${prerelease[@]}" \
+              --title "Juttusihti $VERSION" --generate-notes
+          fi
