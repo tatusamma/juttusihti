@@ -106,6 +106,8 @@ pub struct RunSummary {
     pub cost: Option<Micros>,
     pub suggestions: u32,
     pub final_status: Option<SessionStatus>,
+    /// Why a run paused or failed.
+    pub stop_reason: Option<String>,
     pub headlines: HeadlineStats,
     /// Wall time of the run.
     pub elapsed_ms: u64,
@@ -154,6 +156,15 @@ struct InFlight {
     reservation: Reservation,
     worst_usage: Usage,
     worst_cost: Option<Micros>,
+}
+
+/// A run stopped by an empty OpenAI API account; it resumes after a top-up.
+fn no_credit() -> Stop {
+    Stop::Paused(
+        "Your OpenAI API account has no credit left. Add credit at \
+            https://platform.openai.com/settings/organization/billing/, then resume."
+            .into(),
+    )
 }
 
 enum Stop {
@@ -252,6 +263,7 @@ impl Runner {
         }
         self.db(|s| s.set_session_status(session, status, error.as_deref()))?;
         ctx.summary.final_status = Some(status);
+        ctx.summary.stop_reason = error;
         ctx.summary.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(ctx.summary)
     }
@@ -374,6 +386,7 @@ impl Runner {
                 }
                 match e {
                     // Resumable later; the plan resets on OpenAI's schedule.
+                    AiError::NoCredit(_) => Err(no_credit()),
                     AiError::PlanLimit(m) => Err(Stop::Paused(format!(
                         "ChatGPT plan usage limit reached ({m}). Check ChatGPT settings → Usage, then resume."
                     ))),
@@ -686,6 +699,13 @@ impl Runner {
                     }
                     ctx.summary.headlines.check_errors += 1;
                     tracing::warn!(error = %e, "clickbait check failed");
+                    // The rewrite would be refused too: pause, resumable after topping up.
+                    if matches!(e, AiError::NoCredit(_)) {
+                        stop.get_or_insert(no_credit());
+                        broken = true;
+                        done += 1;
+                        continue;
+                    }
                     if !broken {
                         self.emit(Progress::Note(format!(
                             "Clickbait check failed ({e}); headlines go to the rewriting model without it."

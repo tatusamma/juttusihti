@@ -199,7 +199,11 @@ pub fn extraction_request(
     }
     if tasks.contains(&Task::Headlines) {
         steps.push(
-            "headline: if the title is clickbait or uninformative (a teaser, a vague hint, a question that hides              the news, \"you won't believe\"), write a plain, informative headline that states the key fact from              the article text, in the article's language, at most 110 characters, without adding anything the text              does not say. If the title is already informative, or the text does not reveal the news, return an              empty string."
+            "headline: if the title is clickbait or uninformative (a teaser, a vague hint, a question that hides \
+                the news, \"you won't believe\"), write a plain, informative headline that states the key fact from \
+                the article text, in the article's language, at most 110 characters, without adding anything the text \
+                does not say. If the title is already informative, or the text does not reveal the news, return an \
+                empty string."
                 .to_string(),
         );
     }
@@ -536,6 +540,7 @@ mod tests {
         let tasks: BTreeSet<Task> = [Task::Headlines].into_iter().collect();
         let req = extraction_request("m", &tasks, &[&r], &[], None, 100);
         assert_eq!(req.schema["properties"]["articles"]["items"]["required"], json!(["id", "headline"]));
+        assert!(!req.user.contains("  "), "line continuations leave no runs of spaces: {}", req.user);
         let v = json!({"articles": [{"id": 1, "headline": "Kallion uimahalli suljetaan remontin ajaksi"}]});
         let out = validate_extraction(&v, &[&r], &tasks).unwrap();
         assert_eq!(out[0].headline.as_deref(), Some("Kallion uimahalli suljetaan remontin ajaksi"));

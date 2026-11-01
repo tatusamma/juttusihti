@@ -9,6 +9,15 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenAI API key without credit**: a run now pauses at once with a message saying the account
+  has no credit and where to add it, instead of retrying and failing. Resume it under Custom
+  analysis after topping up. The ✨ panel now also shows why a run stopped.
+- Some messages (the clickbait-check estimate note, the ChatGPT plan estimate warning and the
+  clickbait help in AI setup) and the headline rewriting prompt no longer contain long runs of
+  spaces.
+
 ## [0.2.0] - 2026-11-01
 
 ### Changed
