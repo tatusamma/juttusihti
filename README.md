@@ -40,6 +40,7 @@ after showing what it will send and what it will cost. Written in Rust with
 ## Download
 
 Get the latest version from [GitHub Releases](https://github.com/tero-k/juttusihti/releases).
+What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 | System | File | Install |
 | --- | --- | --- |
