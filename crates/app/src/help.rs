@@ -47,6 +47,7 @@ const SECTIONS: [(&str, &[&str]); 9] = [
             "The feed menu chooses what the list shows: all news, a folder or one feed. All / Unread filters the list. Click an article to read it on the right; the star saves it to Saved in the rail.",
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
             "Labels can be added to an article from its preview. The Labels screen renames, merges and deletes them.",
+            "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
         ],
     ),
     (

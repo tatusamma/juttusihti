@@ -6,15 +6,16 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, responsive, rich_text, row, rule, scrollable, span, stack, text,
-    text_input, tooltip,
+    Space, button, column, container, operation, pick_list, responsive, rich_text, row, rule, scrollable, span, stack,
+    text, text_input, tooltip,
 };
 use iced::{Center, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::ListFilter;
 use juttusihti_core::{
-    Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, NewFeed, Page, View,
+    Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, Label, LabelId, NewFeed, Page,
+    View,
 };
 use juttusihti_fetch::{Fetcher, Policy};
 use tokio::sync::Semaphore;
@@ -34,6 +35,8 @@ const LIST_HEADER_HEIGHT: f32 = 44.0;
 const STATUS_BAR_HEIGHT: f32 = 36.0;
 /// Left padding of the list header.
 const LIST_HEADER_PAD: f32 = 12.0;
+/// Width of the label filter by the search box, so long label names cannot squeeze the search.
+const LABEL_FILTER_WIDTH: f32 = 200.0;
 /// Width of the ⋯ menu above the article list.
 const LIST_MENU_WIDTH: f32 = 280.0;
 /// Diameter of the unread dot in the article list.
@@ -80,6 +83,18 @@ pub struct Sidebar {
     pub(crate) feeds: Vec<Feed>,
     pub(crate) folders: Vec<Folder>,
     pub(crate) unread: Vec<(FeedId, u64)>,
+    /// Every label, for the label filter by the search box.
+    pub(crate) labels: Vec<Label>,
+}
+
+/// An entry in the label filter: a label, or `None` for "Any label".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelChoice(pub Option<LabelId>, pub String);
+
+impl std::fmt::Display for LabelChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +154,8 @@ pub enum Message {
     SearchSubmit,
     ClearSearch,
     FocusSearch,
+    /// Shows only articles with this confirmed label, or any label.
+    FilterLabel(LabelChoice),
     PrevPage,
     NextPage,
     AddFeedInput(String),
@@ -211,6 +228,8 @@ pub struct App {
     screen: Screen,
     search: String,
     active_search: String,
+    /// The label the list is filtered by.
+    label_filter: Option<LabelId>,
     page: Page,
     /// Incremented for every list request, so stale responses are dropped.
     list_generation: u64,
@@ -271,13 +290,14 @@ impl App {
             db,
             fetcher,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
-            sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![] },
+            sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![], labels: vec![] },
             place: Place::News,
             scope: Scope::All,
             unread_only: false,
             screen: Screen::Reader,
             search: String::new(),
             active_search: String::new(),
+            label_filter: None,
             page: Page::first(PAGE_SIZE),
             list_generation: 0,
             listing: Listing {
@@ -335,7 +355,12 @@ impl App {
         Task::perform(
             async move {
                 db.call(|s| -> juttusihti_core::Result<_> {
-                    Ok(Sidebar { feeds: s.feeds()?, folders: s.folders()?, unread: s.unread_counts()? })
+                    Ok(Sidebar {
+                        feeds: s.feeds()?,
+                        folders: s.folders()?,
+                        unread: s.unread_counts()?,
+                        labels: s.labels()?,
+                    })
                 })
                 .await
             },
@@ -375,13 +400,26 @@ impl App {
         }
     }
 
-    /// The AI popover title: the scope, plus the search when one is active.
+    /// The AI popover title: the scope, plus the label and search when active.
     fn quick_label(&self) -> String {
         let mut scope = self.scope_label();
         if self.unread_only && self.place == Place::News {
             scope = format!("Unread in {scope}");
         }
+        if let Some(name) = self.label_filter_name() {
+            scope = format!("{scope} labelled “{name}”");
+        }
         if self.active_search.is_empty() { scope } else { format!("{scope} matching “{}”", self.active_search) }
+    }
+
+    fn label_filter_name(&self) -> Option<&str> {
+        let id = self.label_filter?;
+        self.sidebar.labels.iter().find(|l| l.id == id).map(|l| l.name.as_str())
+    }
+
+    /// Whether search text or a label narrows the list.
+    fn is_filtered(&self) -> bool {
+        !self.active_search.is_empty() || self.label_filter.is_some()
     }
 
     /// Replaces the status bar line.
@@ -405,6 +443,7 @@ impl App {
             view: filter.view,
             feed_ids: filter.feed_id.into_iter().collect(),
             folder_ids: filter.folder_id.into_iter().collect(),
+            label_ids: self.label_filter.into_iter().collect(),
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
         }
@@ -538,6 +577,12 @@ impl App {
         match message {
             Message::SidebarLoaded(Ok(sidebar)) => {
                 self.sidebar = sidebar;
+                // The label was deleted or merged away on the Labels screen.
+                if self.label_filter.is_some_and(|id| !self.sidebar.labels.iter().any(|l| l.id == id)) {
+                    self.label_filter = None;
+                    self.page = Page::first(PAGE_SIZE);
+                    return self.load_list();
+                }
                 Task::none()
             }
             Message::GoPlace(place) => {
@@ -637,7 +682,14 @@ impl App {
             Message::ClearSearch => {
                 self.search.clear();
                 self.active_search.clear();
+                self.label_filter = None;
                 self.page = Page::first(PAGE_SIZE);
+                self.load_list()
+            }
+            Message::FilterLabel(LabelChoice(id, _)) => {
+                self.label_filter = id;
+                self.page = Page::first(PAGE_SIZE);
+                self.screen = Screen::Reader;
                 self.load_list()
             }
             Message::FocusSearch => operation::focus(SEARCH_ID),
@@ -857,7 +909,12 @@ impl App {
                 self.review.open(id).map(Message::Review)
             }
             Message::Research(msg) => self.research.update(msg).map(Message::Research),
-            Message::Labels(msg) => self.labels.update(msg).map(Message::Labels),
+            Message::Labels(msg) => {
+                // Creates, renames, merges and deletes change the label filter's choices.
+                let changed = matches!(msg, crate::labels::Msg::Done(_));
+                let task = self.labels.update(msg).map(Message::Labels);
+                if changed { Task::batch([task, self.load_sidebar()]) } else { task }
+            }
             Message::Review(crate::review::Msg::OpenArticle(id)) => {
                 self.screen = Screen::Reader;
                 self.update(Message::Open(id))
@@ -1009,7 +1066,8 @@ impl App {
                 if let Some(p) = self.preview.as_mut() {
                     p.labels = labels;
                 }
-                Task::none()
+                // Adding a label may have created a new one for the label filter.
+                self.load_sidebar()
             }
             Message::EditFeed(id) => {
                 self.feeds_open = true;
@@ -1213,8 +1271,20 @@ impl App {
             style::tip("Search: words, \"phrases\", OR, -exclude, prefix*, title:…"),
             tooltip::Position::Bottom,
         );
-        let clear = (!self.active_search.is_empty())
-            .then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
+        let label_filter = (!self.sidebar.labels.is_empty()).then(|| {
+            let any = LabelChoice(None, "Any label".into());
+            let mut choices = vec![any.clone()];
+            choices.extend(self.sidebar.labels.iter().map(|l| LabelChoice(Some(l.id), l.name.clone())));
+            let selected = choices.iter().find(|c| c.0 == self.label_filter).cloned().unwrap_or(any);
+            pick_list(choices, Some(selected), Message::FilterLabel)
+                .style(style::pick_list)
+                .menu_style(style::menu)
+                .text_size(SIZE_BODY)
+                .padding(SPACE[1])
+                .width(LABEL_FILTER_WIDTH)
+        });
+        let clear =
+            self.is_filtered().then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
         let refresh_tip =
             if self.refreshing > 0 { format!("Refreshing {}", self.refreshing) } else { "Refresh all feeds".into() };
         let refresh = tooltip(
@@ -1234,7 +1304,13 @@ impl App {
             tooltip::Position::Bottom,
         );
         container(
-            row![brand, search, help].push(clear).push(refresh).push(settings).spacing(SPACE[2]).align_y(iced::Center),
+            row![brand, search, help]
+                .push(label_filter)
+                .push(clear)
+                .push(refresh)
+                .push(settings)
+                .spacing(SPACE[2])
+                .align_y(iced::Center),
         )
         .padding([0.0, SPACE[2]])
         .center_y(TOP_BAR_HEIGHT)
@@ -1248,7 +1324,7 @@ impl App {
             list = list.push(self.view_row(a, selected == Some(a.id)));
         }
         if self.listing.items.is_empty() {
-            if self.place == Place::News && self.sidebar.feeds.is_empty() && self.active_search.is_empty() {
+            if self.place == Place::News && self.sidebar.feeds.is_empty() && !self.is_filtered() {
                 list = list.push(
                     column![
                         text("No feeds yet.").size(SIZE_BODY).style(style::muted),
@@ -1258,7 +1334,7 @@ impl App {
                     .padding(SPACE[3]),
                 );
             } else {
-                let msg = if self.active_search.is_empty() { "No articles." } else { "No matches." };
+                let msg = if self.is_filtered() { "No matches." } else { "No articles." };
                 list = list.push(container(text(msg).size(SIZE_BODY).style(style::muted)).padding(SPACE[3]));
             }
         }
@@ -1719,6 +1795,45 @@ mod tests {
         let _ = app.update(Message::OpenQuick);
         let _ = app.update(Message::OpenQuick);
         assert!(!app.quick.open);
+    }
+
+    /// The app with one label, "Sää", loaded into the sidebar as a reload would.
+    fn app_with_label() -> (App, LabelId) {
+        let (mut app, _) = app_with_feed();
+        let id = app.db.shared().lock().unwrap().create_label("Sää").unwrap();
+        let labels = app.db.shared().lock().unwrap().labels().unwrap();
+        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { labels, ..app.sidebar.clone() })));
+        (app, id)
+    }
+
+    #[test]
+    fn label_filter_narrows_the_list() {
+        let (mut app, label) = app_with_label();
+        assert!(app.list_query().label_ids.is_empty());
+        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
+        assert_eq!(app.list_query().label_ids, vec![label]);
+        assert!(!app.list_query().include_suggested, "only confirmed labels");
+        assert_eq!(app.quick_label(), "All feeds labelled “Sää”");
+        let _ = app.update(Message::FilterLabel(LabelChoice(None, "Any label".into())));
+        assert!(app.list_query().label_ids.is_empty());
+    }
+
+    #[test]
+    fn clear_also_clears_the_label_filter() {
+        let (mut app, label) = app_with_label();
+        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
+        assert!(app.is_filtered());
+        let _ = app.update(Message::ClearSearch);
+        assert_eq!(app.label_filter, None);
+        assert!(!app.is_filtered());
+    }
+
+    #[test]
+    fn label_filter_drops_a_deleted_label() {
+        let (mut app, label) = app_with_label();
+        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
+        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { labels: vec![], ..app.sidebar.clone() })));
+        assert_eq!(app.label_filter, None);
     }
 
     #[test]
