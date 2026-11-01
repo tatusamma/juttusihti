@@ -476,8 +476,15 @@ impl MapCanvas<'_> {
 
 impl MapCanvas<'_> {
     /// One marker: a solid dot with a white edge when confirmed, a ring when
-    /// only suggested.
-    fn draw_dot(&self, frame: &mut Frame, size: Size, l: &LocationRow, data: &crate::style::DataColors) {
+    /// only suggested, plus its name when selected or zoomed in.
+    fn draw_marker(
+        &self,
+        frame: &mut Frame,
+        size: Size,
+        l: &LocationRow,
+        data: &crate::style::DataColors,
+        label_color: Color,
+    ) {
         let Some((lat, lon)) = l.coordinates else { return };
         let p = self.to_screen(size, lat, lon);
         let color = match l.role {
@@ -495,10 +502,19 @@ impl MapCanvas<'_> {
             frame.fill(&dot, Color { a: 0.35, ..color });
             frame.stroke(&dot, Stroke::default().with_width(2.0).with_color(color));
         }
+        if selected || self.state.zoom >= 7 {
+            frame.fill_text(Text {
+                content: l.place_name.clone(),
+                position: Point::new(p.x + 9.0, p.y - 7.0),
+                color: label_color,
+                size: SIZE_SMALL.into(),
+                ..Text::default()
+            });
+        }
     }
 }
 
-/// Markers drawn in a layer above the map tiles: a canvas draws images above
+/// Markers, labels and the attribution drawn in a layer above the map tiles: a canvas draws images above
 /// its own shapes, so with tiles on the dots must live in a second canvas.
 struct MapMarkers<'a> {
     state: &'a State,
@@ -517,10 +533,25 @@ impl canvas::Program<Msg> for MapMarkers<'_> {
     ) -> Vec<Geometry> {
         let data = crate::style::data_colors(theme);
         let map = MapCanvas { state: self.state };
-        let mut frame = Frame::new(renderer, bounds.size());
+        let size = bounds.size();
+        let mut frame = Frame::new(renderer, size);
         for l in &self.state.locations {
-            map.draw_dot(&mut frame, bounds.size(), l, &data);
+            map.draw_marker(&mut frame, size, l, &data, Color::from_rgb(0.1, 0.1, 0.1));
         }
+        // Attribution on the map itself, bottom-right.
+        let w = 214.0;
+        frame.fill_rectangle(
+            Point::new(size.width - w, size.height - 20.0),
+            Size::new(w, 20.0),
+            Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+        );
+        frame.fill_text(Text {
+            content: ATTRIBUTION.into(),
+            position: Point::new(size.width - w + 6.0, size.height - 18.0),
+            color: Color::from_rgb(0.1, 0.1, 0.1),
+            size: SIZE_SMALL.into(),
+            ..Text::default()
+        });
         vec![frame.into_geometry()]
     }
 }
@@ -625,38 +656,10 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                     lat += step;
                 }
             }
-            for l in &s.locations {
-                let Some((lat, lon)) = l.coordinates else { continue };
-                let p = self.to_screen(size, lat, lon);
-                let selected = s.selected == Some(l.id);
-                if !s.tiles_enabled {
-                    self.draw_dot(frame, size, l, &data);
+            if !s.tiles_enabled {
+                for l in &s.locations {
+                    self.draw_marker(frame, size, l, &data, pal.text);
                 }
-                if selected || s.zoom >= 7 {
-                    frame.fill_text(Text {
-                        content: l.place_name.clone(),
-                        position: Point::new(p.x + 9.0, p.y - 7.0),
-                        color: pal.text,
-                        size: SIZE_SMALL.into(),
-                        ..Text::default()
-                    });
-                }
-            }
-            if s.tiles_enabled {
-                // Attribution on the map itself, bottom-right.
-                let w = 214.0;
-                frame.fill_rectangle(
-                    Point::new(size.width - w, size.height - 20.0),
-                    Size::new(w, 20.0),
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.8),
-                );
-                frame.fill_text(Text {
-                    content: ATTRIBUTION.into(),
-                    position: Point::new(size.width - w + 6.0, size.height - 18.0),
-                    color: Color::from_rgb(0.1, 0.1, 0.1),
-                    size: SIZE_SMALL.into(),
-                    ..Text::default()
-                });
             }
         });
         vec![geometry]
