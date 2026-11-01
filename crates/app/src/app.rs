@@ -17,6 +17,7 @@ use juttusihti_core::{
     Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, Label, LabelId, NewFeed, Page,
     View,
 };
+use juttusihti_fetch::article::{ArticleFetcher, ArticlePolicy};
 use juttusihti_fetch::{Fetcher, Policy};
 use tokio::sync::Semaphore;
 
@@ -115,6 +116,8 @@ pub struct FeedEdit {
     pub(crate) title: String,
     pub(crate) folder: Option<FolderId>,
     pub(crate) new_folder: String,
+    /// Fetch article pages for teaser-only entries.
+    pub(crate) full_text: bool,
 }
 
 /// Pick-list entry for a feed's folder.
@@ -132,6 +135,8 @@ pub struct Preview {
     article: Article,
     feed_title: String,
     body: String,
+    /// The page `body` was extracted from, when it is fetched full-article text.
+    full_text_from: Option<String>,
     labels: Vec<ArticleLabel>,
     headline: Option<juttusihti_core::headlines::Headline>,
 }
@@ -208,6 +213,7 @@ pub enum Message {
     EditFeed(FeedId),
     FeedTitle(String),
     FeedFolder(FolderChoice),
+    FeedFullText(bool),
     NewFolder(String),
     SaveFeed,
     CancelEditFeed,
@@ -220,6 +226,8 @@ pub enum Message {
 pub struct App {
     db: Db,
     fetcher: Option<Fetcher>,
+    /// Article pages for feeds with full-article text on.
+    articles: Option<ArticleFetcher>,
     fetch_slots: Arc<Semaphore>,
     sidebar: Sidebar,
     place: Place,
@@ -270,6 +278,7 @@ impl App {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(format!("Networking unavailable: {e}"))),
         };
+        let articles = ArticleFetcher::new(&Policy::default(), ArticlePolicy::default()).ok();
         let status_error = status.is_some();
         let analytics = AnalyticsWorker::spawn(db_path.clone(), Limits::default()).ok().map(Arc::new);
         let mut app = Self {
@@ -289,6 +298,7 @@ impl App {
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
             db,
             fetcher,
+            articles,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
             sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![], labels: vec![] },
             place: Place::News,
@@ -506,11 +516,28 @@ impl App {
         let db = self.db.clone();
         let slots = self.fetch_slots.clone();
         let (id, url, etag, last_modified) = (feed.id, feed.url.clone(), feed.etag.clone(), feed.last_modified.clone());
+        let articles = self.articles.clone().filter(|_| feed.fetch_full_text);
         Some(Task::perform(
             async move {
-                let _permit = slots.acquire_owned().await.map_err(|e| e.to_string())?;
+                let permit = slots.acquire_owned().await.map_err(|e| e.to_string())?;
                 let outcome = fetcher.fetch(&url, etag.as_deref(), last_modified.as_deref()).await;
-                db.call(move |s| juttusihti_fetch::apply(s, id, outcome).map(|st| st.inserted)).await
+                let inserted = db.call(move |s| juttusihti_fetch::apply(s, id, outcome).map(|st| st.inserted)).await?;
+                // Article pages are paced per host, not by the feed slots.
+                drop(permit);
+                if let Some(articles) = articles {
+                    let candidates =
+                        db.call(move |s| s.full_text_candidates(id, juttusihti_core::extract::MAX_PER_REFRESH)).await?;
+                    if !candidates.is_empty() {
+                        let gained =
+                            juttusihti_fetch::article::fetch_full_text(&articles, candidates, |aid, url, r| {
+                                let db = db.clone();
+                                async move { db.call(move |s| s.save_extract(aid, &url, r)).await }
+                            })
+                            .await;
+                        tracing::debug!(feed = id, gained, "full-article text fetched");
+                    }
+                }
+                Ok(inserted)
             },
             move |r| Message::Refreshed(id, r),
         ))
@@ -621,8 +648,13 @@ impl App {
                             s.set_read(id, true)?;
                             let article = s.article(id)?;
                             let feed_title = s.feed(article.feed_id)?.title;
+                            let full_text_from = s
+                                .article_extract(id)?
+                                .filter(|e| e.status == juttusihti_core::extract::ExtractStatus::Ok)
+                                .map(|e| e.url);
                             Ok(Box::new(Preview {
                                 body: s.article_text(id)?,
+                                full_text_from,
                                 labels: s.article_labels(id)?,
                                 headline: s.headline(id)?,
                                 feed_title,
@@ -744,6 +776,7 @@ impl App {
                     last_modified: None,
                     last_fetched_at: None,
                     last_error: None,
+                    fetch_full_text: false,
                 };
                 let fetch = self.refresh_feed(&feed).unwrap_or_else(Task::none);
                 self.refreshing += 1;
@@ -1074,8 +1107,13 @@ impl App {
                 self.feeds_open = true;
                 self.confirm_unsubscribe = None;
                 if let Some(f) = self.sidebar.feeds.iter().find(|f| f.id == id) {
-                    self.feed_edit =
-                        Some(FeedEdit { id, title: f.title.clone(), folder: f.folder_id, new_folder: String::new() });
+                    self.feed_edit = Some(FeedEdit {
+                        id,
+                        title: f.title.clone(),
+                        folder: f.folder_id,
+                        new_folder: String::new(),
+                        full_text: f.fetch_full_text,
+                    });
                 }
                 Task::none()
             }
@@ -1092,6 +1130,12 @@ impl App {
                 }
                 Task::none()
             }
+            Message::FeedFullText(on) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.full_text = on;
+                }
+                Task::none()
+            }
             Message::NewFolder(s) => {
                 if let Some(e) = self.feed_edit.as_mut() {
                     e.new_folder = s;
@@ -1105,19 +1149,34 @@ impl App {
             Message::SaveFeed => {
                 let Some(edit) = self.feed_edit.take() else { return Task::none() };
                 let db = self.db.clone();
-                Task::perform(
+                // Switching full-article text on fetches the pages right away.
+                let turned_on = self
+                    .sidebar
+                    .feeds
+                    .iter()
+                    .find(|f| f.id == edit.id && edit.full_text && !f.fetch_full_text)
+                    .map(|f| Feed { fetch_full_text: true, ..f.clone() });
+                let save = Task::perform(
                     async move {
                         db.call(move |s| -> juttusihti_core::Result<()> {
                             let folder = match edit.new_folder.trim() {
                                 "" => edit.folder,
                                 name => Some(s.create_folder(name)?),
                             };
-                            s.update_feed(edit.id, &edit.title, folder)
+                            s.update_feed(edit.id, &edit.title, folder)?;
+                            s.set_feed_full_text(edit.id, edit.full_text)
                         })
                         .await
                     },
                     Message::FeedSaved,
-                )
+                );
+                match turned_on.and_then(|f| self.refresh_feed(&f)) {
+                    Some(fetch) => {
+                        self.refreshing += 1;
+                        save.chain(fetch)
+                    }
+                    None => save,
+                }
             }
             Message::FeedSaved(Ok(())) => self.load_sidebar(),
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
@@ -1594,6 +1653,10 @@ impl App {
         if let Some(author) = &a.author {
             meta.push_str(&format!(" · {author}"));
         }
+        if let Some(from) = &p.full_text_from {
+            let host = url_host(from).unwrap_or(from.as_str());
+            meta.push_str(&format!(" · full text fetched from {host}"));
+        }
         let save = if a.is_saved {
             style::quiet_button(Some(Icon::Star), "Saved", style::quiet_active, Some(Message::ToggleSaved))
         } else {
@@ -1687,6 +1750,14 @@ fn header_icon<'a>(i: Icon, tip: &'a str, open: bool, target: Message) -> Elemen
     .into()
 }
 
+/// Host part of an http(s) URL, for short display.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    (!host.is_empty()).then_some(host)
+}
+
 #[cfg(test)]
 mod tests {
     use juttusihti_core::store::Store;
@@ -1710,6 +1781,26 @@ mod tests {
         fn db_has_feed(&self, id: FeedId) -> bool {
             self.db.shared().lock().unwrap().feeds().unwrap().iter().any(|f| f.id == id)
         }
+    }
+
+    #[test]
+    fn feed_edit_carries_the_full_text_option() {
+        let (mut app, feed) = app_with_feed();
+        app.sidebar.feeds = app.db.shared().lock().unwrap().feeds().unwrap();
+        let _ = app.update(Message::EditFeed(feed));
+        assert!(!app.feed_edit.as_ref().unwrap().full_text, "off by default");
+        let _ = app.update(Message::FeedFullText(true));
+        assert!(app.feed_edit.as_ref().unwrap().full_text);
+        let _ = app.update(Message::SaveFeed);
+        assert!(app.feed_edit.is_none());
+        assert_eq!(app.refreshing, 1, "switching it on fetches the feed's pages right away");
+    }
+
+    #[test]
+    fn full_text_source_is_shown_by_host() {
+        assert_eq!(url_host("https://news.example/a/b?c#d"), Some("news.example"));
+        assert_eq!(url_host("http://user@news.example:8080/x"), Some("news.example:8080"));
+        assert_eq!(url_host("not a url"), None);
     }
 
     #[test]

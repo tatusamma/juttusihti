@@ -9,6 +9,23 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Full-article text** (opt-in per feed, off by default): for feeds that only carry teasers,
+  tick *Fetch full articles for short entries* in the feed's edit form. On refresh, the article
+  page of each short entry is fetched once and its main text is extracted with
+  [dom_smoothie](https://crates.io/crates/dom_smoothie) (a Readability.js port; no JavaScript is
+  run). The text is stored separately from the feed content and used for the reading pane,
+  search (`content:` includes it) and AI input at the "Archived article text" depth.
+- Article pages are fetched with the existing timeouts and proxy settings, capped at 4 MB,
+  paced to one request per site every 2 seconds, and refused when a URL or any redirect points
+  to a non-web scheme, `localhost`, or a private, link-local or otherwise non-public address.
+
+### Changed
+
+- Database schema version 6: a `fetch_full_text` feed setting, an `article_extracts` table, and
+  a search index with an `extracted_text` column. Upgrading rebuilds the search index once.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed
