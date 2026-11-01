@@ -2,7 +2,7 @@
 //! edit or unsubscribe a feed, add a feed and import or export OPML.
 
 use iced::widget::button::Button;
-use iced::widget::{Space, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip};
+use iced::widget::{Space, checkbox, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip};
 use iced::{Center, Element, Fill, Padding};
 use juttusihti_core::{Feed, FeedId};
 
@@ -19,7 +19,7 @@ const LIST_MIN_HEIGHT: f32 = 80.0;
 /// Height of the Add / Import / Export block, its rule and the panel padding.
 const FOOTER_HEIGHT: f32 = 130.0;
 /// Height of the pinned edit form and of the pinned unsubscribe question.
-const EDIT_HEIGHT: f32 = 190.0;
+const EDIT_HEIGHT: f32 = 245.0;
 const CONFIRM_HEIGHT: f32 = 90.0;
 
 /// Height for the scrolling feed list when `available` pixels are free below the list
@@ -174,7 +174,7 @@ fn quiet<'a>(label: &'a str, target: Message) -> Element<'a, Message> {
     style::quiet_button(None, label, style::quiet, Some(target))
 }
 
-/// Title, folder and Unsubscribe for one feed, pinned above the list.
+/// Title, folder, full-article text and Unsubscribe for one feed, pinned above the list.
 fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> Element<'a, Message> {
     let mut choices = vec![FolderChoice(None, "No folder".into())];
     choices.extend(sidebar.folders.iter().map(|f| FolderChoice(Some(f.id), f.name.clone())));
@@ -203,6 +203,19 @@ fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> El
             ]
             .spacing(SPACE[1])
             .align_y(Center),
+            tooltip(
+                checkbox(edit.full_text)
+                    .label("Fetch full articles for short entries")
+                    .size(SIZE_SMALL)
+                    .text_size(SIZE_SMALL)
+                    .style(style::checkbox)
+                    .on_toggle(Message::FeedFullText),
+                style::tip(
+                    "When an entry only has a teaser, load the article page and keep its main text \
+                     for reading, search and AI analysis. No JavaScript is run."
+                ),
+                tooltip::Position::Bottom,
+            ),
             row![
                 quiet("Save", Message::SaveFeed),
                 quiet("Cancel", Message::CancelEditFeed),

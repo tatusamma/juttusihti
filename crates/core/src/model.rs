@@ -26,6 +26,8 @@ pub struct Feed {
     pub last_modified: Option<String>,
     pub last_fetched_at: Option<i64>,
     pub last_error: Option<String>,
+    /// Fetch the article page for entries whose feed text is only a teaser.
+    pub fetch_full_text: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

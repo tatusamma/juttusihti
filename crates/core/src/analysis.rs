@@ -454,10 +454,19 @@ impl Store {
             conn.query_row(&format!("SELECT count(*){from_where}"), params_from_iter(params.iter()), |r| r.get(0))?;
 
         params.push(Value::Integer(i64::from(config.max_articles)));
+        // Text fetched from the article page (full-article feeds) replaces a
+        // teaser as full-text input. `from_where` always starts with
+        // " FROM articles a", so the extract join slots in right after it.
+        debug_assert!(from_where.starts_with(" FROM articles a "));
+        let from_where_extract = from_where.replacen(
+            " FROM articles a ",
+            " FROM articles a LEFT JOIN article_extracts ext ON ext.article_id = a.id AND ext.status = 'ok' ",
+            1,
+        );
         let sql = format!(
             "SELECT a.id, a.feed_id, a.effective_at, a.title, COALESCE(a.summary_text, ''), COALESCE(a.content_text, ''),
-                    a.content_hash, a.dedup_key
-             {from_where} ORDER BY a.effective_at DESC, a.id DESC LIMIT ?"
+                    a.content_hash, a.dedup_key, ext.text, ext.text_hash
+             {from_where_extract} ORDER BY a.effective_at DESC, a.id DESC LIMIT ?"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
@@ -470,6 +479,8 @@ impl Store {
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         })?;
 
@@ -478,7 +489,23 @@ impl Store {
         let mut records: Vec<ArticleRecord> = Vec::new();
         let mut seen: HashMap<String, ArticleId> = HashMap::new();
         for row in rows {
-            let (id, feed_id, effective_at, title, summary, content, content_hash, dedup_key) = row?;
+            let (
+                id,
+                feed_id,
+                effective_at,
+                title,
+                summary,
+                content,
+                mut content_hash,
+                dedup_key,
+                extract,
+                extract_hash,
+            ) = row?;
+            if let (Some(h), Depth::FullText) = (&extract_hash, config.depth) {
+                // Results cached for the teaser must not be reused for the full text.
+                content_hash = crate::normalize::sha256_hex(&format!("{content_hash}|extract|{h}"));
+            }
+            let content = extract.unwrap_or(content);
             selected_ids.push(id);
             stats.with_description += u64::from(!summary.trim().is_empty());
             stats.with_full_text += u64::from(!content.trim().is_empty());

@@ -18,7 +18,8 @@ after showing what it will send and what it will cost. Written in Rust with
 
 - **Reader**: subscribe by site or feed address (feeds are discovered for you), folders, OPML
   import and export, unread and saved views, scheduled refresh, offline reading and keyboard
-  shortcuts.
+  shortcuts. Feeds that only carry teasers can opt in to **full-article text**, extracted from
+  the article page.
 - **Search**: local FTS5 full-text search with phrases, `OR`, `NOT`, prefixes, field filters
   and `NEAR`, plus a label filter next to the search box.
 - **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
@@ -115,6 +116,26 @@ offline.
   moves it to a folder or unsubscribes.
 - Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
   them.
+
+#### Full-article text (optional, per feed)
+
+Many feeds carry only a teaser. For such a feed, open its edit form (the pencil in the feed
+menu) and tick **Fetch full articles for short entries**. It is off for every feed by default.
+
+- On each refresh, entries of that feed whose feed text is shorter than 600 characters get their
+  article page fetched once, and its main text is extracted with a Readability-style extractor
+  ([dom_smoothie](https://crates.io/crates/dom_smoothie)). Up to 20 pages per feed per refresh,
+  only entries from the last 14 days, at most one request per site every 2 seconds.
+- The text is stored apart from the feed's own content, which is never changed. When present it
+  is what the reading pane shows (the article's details then say *full text fetched from
+  …*), it is indexed for search (`content:` covers it too), and it is the AI input at the
+  "Archived article text" depth. Cached AI results for the teaser are not reused for it.
+- Pages are treated as untrusted: no JavaScript is run, pages are capped at 4 MB (never more
+  than the feed limit), only `text/html` is read, and every redirect is checked: only http(s),
+  and never to `localhost`, private, link-local or other non-public addresses. Timeouts and
+  system proxy settings are the same as for feeds.
+- A page that fails or has no usable article text (paywalls, cookie walls) is remembered and
+  not fetched again; the entry keeps showing the feed's teaser.
 
 ### Searching
 
@@ -524,11 +545,14 @@ tokenizer, or AI-assisted query expansion.
 - AI-originated records start as `suggested`. A later AI suggestion never overrides a user's
   confirmation or rejection.
 - Source article columns are written only by feed ingestion, never by research code. Search and
-  AI input use derived `summary_text` and `content_text`; the original HTML is kept as-is.
+  AI input use derived `summary_text` and `content_text`, plus extracted page text from
+  `article_extracts` for feeds with full-article text on; the original HTML is kept as-is.
 - Search input is parsed into an AST and rendered with every term quoted, so it cannot inject
   FTS5 operators or SQL. Filters are bound parameters.
 - Unsafe input is rejected or bounded: only http(s) URLs are accepted from feeds, OPML,
   discovery and redirects; feeds and OPML have size limits; HTML becomes plain text for display.
+  Article pages (opt-in) are additionally refused for non-public addresses on every redirect
+  hop, capped in size and never run scripts.
 - Unknown AI cost is stored as `NULL`, never zero, and reports propagate it as unknown.
 - An analysis cannot reach `running` without an estimate and an approval step. Selecting a
   time range never sends anything anywhere: scope, dedup, cache lookup, candidate pairs and
