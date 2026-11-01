@@ -9,6 +9,12 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
+### Fixed
+
+- **Windows**: starting Juttusihti no longer opens a terminal window next to the app.
+
 ## [0.1.0] - 2026-11-01
 
 The first release: a local-first RSS reader with optional, consent-based AI research tools,
@@ -75,5 +81,6 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/tero-k/juttusihti/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tero-k/juttusihti/releases/tag/v0.1.0

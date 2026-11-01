@@ -1,5 +1,9 @@
 //! Juttusihti desktop application.
 
+// Release builds are GUI-subsystem binaries on Windows so no console
+// window opens alongside the app; debug builds keep it for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod ai_setup;
 mod app;
 mod db;
