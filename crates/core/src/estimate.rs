@@ -414,6 +414,13 @@ pub fn estimate(
     if config.use_batch {
         warnings.push("Batch processing is not supported yet; this estimate and the run use standard prices.".into());
     }
+    if config.provider == Provider::Local {
+        warnings.push(
+            "Runs on your own OpenAI-compatible server, so there is no API cost. Token counts are estimated \
+                with a general rule; your model's tokenizer may count differently."
+                .into(),
+        );
+    }
     if config.billing == Billing::ChatGptPlan {
         if config.provider == Provider::Openai {
             warnings.push(

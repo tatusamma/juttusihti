@@ -9,6 +9,11 @@
 //!   required, `max_output_tokens` is rejected and system text goes in
 //!   `instructions`. The stream is read to its terminal event, whose
 //!   `response` object is parsed like a normal reply.
+//! - A local or self-hosted server (llama.cpp `llama-server`, Ollama, vLLM,
+//!   LM Studio): OpenAI chat completions at `{base}/chat/completions` with
+//!   `response_format: json_schema`. Without schema support the schema is
+//!   put in the system prompt instead ([`local_body`] with `schema: false`).
+//!   Reasoning models' `<think>` blocks are dropped before parsing.
 
 use juttusihti_core::pricing::{Provider, Usage};
 use serde_json::{Value, json};
@@ -20,7 +25,7 @@ pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 pub fn auth_headers(provider: Provider, token: &str) -> Vec<(&'static str, String)> {
     match provider {
         Provider::Anthropic => vec![("x-api-key", token.into()), ("anthropic-version", ANTHROPIC_VERSION.into())],
-        Provider::Openai => vec![("authorization", format!("Bearer {token}"))],
+        Provider::Openai | Provider::Local => vec![("authorization", format!("Bearer {token}"))],
         Provider::Gemini => vec![("x-goog-api-key", token.into())],
     }
 }
@@ -59,6 +64,42 @@ fn gemini_request(req: &Request) -> Value {
             "maxOutputTokens": req.max_output_tokens,
         },
     })
+}
+
+/// The chat-completions URL of a local server.
+pub fn local_url(e: &Endpoint) -> String {
+    format!("{}/chat/completions", base(e))
+}
+
+/// Chat-completions request for a local server: with the JSON schema in
+/// `response_format`, or (`schema: false`) with the schema described in
+/// the system prompt for servers that cannot constrain output.
+pub fn local_body(req: &Request, schema: bool) -> Value {
+    let system = if schema {
+        req.system.clone()
+    } else {
+        format!(
+            "{}\n\nReply with one JSON object and nothing else: no Markdown, no explanation. \
+             It must match this JSON schema:\n{}",
+            req.system, req.schema
+        )
+    };
+    let mut body = json!({
+        "model": req.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": req.user},
+        ],
+        "max_tokens": req.max_output_tokens,
+        "stream": false,
+    });
+    if schema {
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": {"name": req.schema_name, "schema": req.schema, "strict": true},
+        });
+    }
+    body
 }
 
 pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
@@ -100,11 +141,14 @@ fn completion_body(e: &Endpoint, req: &Request) -> (String, Value) {
             }),
         ),
         Provider::Gemini => (format!("{}/v1beta/models/{}:generateContent", base(e), req.model), gemini_request(req)),
+        Provider::Local => (local_url(e), local_body(req, true)),
     }
 }
 
-pub fn count_tokens(e: &Endpoint, req: &Request) -> (String, Value) {
-    match e.provider {
+/// The provider's token-counting request; `None` for local servers, which
+/// have no standard counter.
+pub fn count_tokens(e: &Endpoint, req: &Request) -> Option<(String, Value)> {
+    Some(match e.provider {
         Provider::Anthropic => (format!("{}/v1/messages/count_tokens", base(e)), anthropic_body(req)),
         Provider::Openai => (
             format!("{}/v1/responses/input_tokens", base(e)),
@@ -115,12 +159,26 @@ pub fn count_tokens(e: &Endpoint, req: &Request) -> (String, Value) {
             inner["model"] = json!(format!("models/{}", req.model));
             (format!("{}/v1beta/models/{}:countTokens", base(e), req.model), json!({"generateContentRequest": inner}))
         }
-    }
+        Provider::Local => return None,
+    })
+}
+
+/// Model ids from an OpenAI-style `GET /models` reply (`{"data": [{"id"}]}`;
+/// Ollama and LM Studio answer the same way), at most 200.
+pub fn parse_models(v: &Value) -> Result<Vec<String>, AiError> {
+    let data = v["data"].as_array().ok_or_else(|| AiError::Malformed("no model list in the reply".into()))?;
+    Ok(data
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .filter(|id| crate::valid_model_for(Provider::Local, id))
+        .take(200)
+        .map(str::to_string)
+        .collect())
 }
 
 pub fn parse_count(provider: Provider, v: &Value) -> Result<u64, AiError> {
     let field = match provider {
-        Provider::Anthropic | Provider::Openai => &v["input_tokens"],
+        Provider::Anthropic | Provider::Openai | Provider::Local => &v["input_tokens"],
         Provider::Gemini => &v["totalTokens"],
     };
     field.as_u64().ok_or_else(|| AiError::Malformed("token count missing".into()))
@@ -234,7 +292,11 @@ fn u(v: &Value) -> u64 {
 /// Parses model text as JSON. Tolerates a Markdown code fence or prose
 /// around one JSON object; the result is still validated by the caller.
 fn json_or_text(text: String) -> Outcome {
-    let t = text.trim();
+    // Reasoning models on local servers may put their thinking first.
+    let t = match text.trim_start().strip_prefix("<think>").and_then(|rest| rest.split_once("</think>")) {
+        Some((_, answer)) => answer.trim(),
+        None => text.trim(),
+    };
     let unfenced = t
         .strip_prefix("```json")
         .or_else(|| t.strip_prefix("```"))
@@ -359,6 +421,33 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
             };
             Ok(Reply { outcome, usage, reasoning_tokens: thoughts })
         }
+        Provider::Local => {
+            let usage = &v["usage"];
+            let prompt = u(&usage["prompt_tokens"]);
+            let cached = u(&usage["prompt_tokens_details"]["cached_tokens"]).min(prompt);
+            let usage_out = Usage {
+                input: prompt - cached,
+                cached_input: cached,
+                cache_write: 0,
+                output: u(&usage["completion_tokens"]),
+            };
+            let reasoning = u(&usage["completion_tokens_details"]["reasoning_tokens"]);
+            let choice = &v["choices"][0];
+            if choice.is_null() {
+                return Err(AiError::Malformed("no choices".into()));
+            }
+            let message = &choice["message"];
+            let outcome = if let Some(r) = message["refusal"].as_str().filter(|r| !r.is_empty()) {
+                Outcome::Refused(r.chars().take(300).collect())
+            } else {
+                match choice["finish_reason"].as_str().unwrap_or("stop") {
+                    "length" => Outcome::Truncated,
+                    "content_filter" => Outcome::Refused("content filter".into()),
+                    _ => json_or_text(message["content"].as_str().unwrap_or_default().to_string()),
+                }
+            };
+            Ok(Reply { outcome, usage: usage_out, reasoning_tokens: reasoning })
+        }
     }
 }
 
@@ -399,9 +488,59 @@ mod tests {
         assert_eq!(url, "http://x/v1beta/models/m-1:generateContent");
         assert_eq!(b["generationConfig"]["maxOutputTokens"], 100);
 
-        let (url, b) = count_tokens(&ep(Provider::Gemini), &req());
+        let (url, b) = count_tokens(&ep(Provider::Gemini), &req()).unwrap();
         assert_eq!(url, "http://x/v1beta/models/m-1:countTokens");
         assert_eq!(b["generateContentRequest"]["model"], "models/m-1");
+    }
+
+    #[test]
+    fn builds_local_requests_with_and_without_a_schema() {
+        let mut e = ep(Provider::Local);
+        e.base_url = "http://192.168.1.20:8080/v1/".into();
+        let r = Request { reasoning_effort: Some("low"), ..req() };
+        let (url, b) = completion(&e, &r);
+        assert_eq!(url, "http://192.168.1.20:8080/v1/chat/completions");
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][1]["content"], "usr");
+        assert_eq!(b["max_tokens"], 100);
+        assert_eq!(b["stream"], false);
+        assert_eq!(b["response_format"]["type"], "json_schema");
+        assert_eq!(b["response_format"]["json_schema"]["name"], "s");
+        assert_eq!(b["response_format"]["json_schema"]["schema"], json!({"type": "object"}));
+        assert!(b.get("reasoning").is_none(), "OpenAI-only parameters are not sent");
+        assert!(b.get("store").is_none());
+
+        let plain = local_body(&r, false);
+        assert!(plain.get("response_format").is_none());
+        let system = plain["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("sys\n\n") && system.contains(r#"{"type":"object"}"#), "{system}");
+        assert!(count_tokens(&e, &r).is_none());
+        assert_eq!(auth_headers(Provider::Local, "k"), vec![("authorization", "Bearer k".to_string())]);
+    }
+
+    #[test]
+    fn parses_local_chat_completions() {
+        let v = json!({"choices": [{"message": {"role": "assistant", "content": "{\"a\":4}"}, "finish_reason": "stop"}],
+                       "usage": {"prompt_tokens": 80, "completion_tokens": 12, "prompt_tokens_details": {"cached_tokens": 30}}});
+        let r = parse_completion(Provider::Local, &v).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 4})));
+        assert_eq!((r.usage.input, r.usage.cached_input, r.usage.output), (50, 30, 12));
+        // Thinking first, then a fenced answer, no usage block (some servers omit it).
+        let think = json!({"choices": [{"message": {"content": "<think>\nThe user wants {json}.\n</think>\n```json\n{\"a\":5}\n```"},
+                           "finish_reason": "stop"}]});
+        let r = parse_completion(Provider::Local, &think).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 5})));
+        assert_eq!(r.usage.total(), 0);
+        let cut = json!({"choices": [{"message": {"content": "{\"a\":"}, "finish_reason": "length"}], "usage": {}});
+        assert_eq!(parse_completion(Provider::Local, &cut).unwrap().outcome, Outcome::Truncated);
+        let refused = json!({"choices": [{"message": {"content": null, "refusal": "no"}, "finish_reason": "stop"}]});
+        assert_eq!(parse_completion(Provider::Local, &refused).unwrap().outcome, Outcome::Refused("no".into()));
+        let prose = json!({"choices": [{"message": {"content": "Sure! Here are labels."}, "finish_reason": "stop"}]});
+        assert!(matches!(parse_completion(Provider::Local, &prose).unwrap().outcome, Outcome::NotJson(_)));
+        assert!(parse_completion(Provider::Local, &json!({"choices": []})).is_err());
+        let models = json!({"object": "list", "data": [{"id": "qwen3:8b"}, {"id": "bad id"}, {"id": "Qwen/Qwen3-8B"}]});
+        assert_eq!(parse_models(&models).unwrap(), vec!["qwen3:8b", "Qwen/Qwen3-8B"]);
+        assert!(parse_models(&json!({"models": []})).is_err());
     }
 
     #[test]

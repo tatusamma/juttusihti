@@ -387,9 +387,17 @@ impl State {
                 if p != Provider::Openai {
                     self.billing = Billing::ApiKey;
                 }
-                self.model = juttusihti_core::ai_defaults::recommended(p, juttusihti_core::ai_defaults::Tier::Fast)
-                    .model
-                    .to_string();
+                self.model =
+                    match juttusihti_core::ai_defaults::recommended(p, juttusihti_core::ai_defaults::Tier::Fast) {
+                        Some(r) => r.model.to_string(),
+                        // A local server runs whatever model the user set up for it.
+                        None => self
+                            .lists
+                            .as_ref()
+                            .and_then(|l| l.defaults.as_ref())
+                            .map(|d| d.local.model.trim().to_string())
+                            .unwrap_or_default(),
+                    };
                 self.invalidate();
             }
             Msg::Billing(b) => {
@@ -689,10 +697,16 @@ impl State {
         .spacing(SPACE[1]);
         {
             use juttusihti_core::ai_defaults::{Tier, recommended};
-            let fast = recommended(self.provider, Tier::Fast);
-            let quality = recommended(self.provider, Tier::Quality);
-            provider =
-                provider.push(style::note(format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)));
+            provider = provider.push(style::note(
+                match (recommended(self.provider, Tier::Fast), recommended(self.provider, Tier::Quality)) {
+                    (Some(fast), Some(quality)) => {
+                        format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)
+                    }
+                    _ => "Runs on the server set under AI setup → Local or self-hosted server, with no API cost. Enter the model \
+                          name as the server knows it."
+                        .to_string(),
+                },
+            ));
         }
         if self.provider == Provider::Openai {
             provider = provider.push(
@@ -1055,9 +1069,18 @@ pub fn run_session(
 ) -> impl iced::futures::Stream<Item = RunEvent> {
     iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
         use iced::futures::SinkExt;
-        let endpoint = match billing {
-            Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
-            Billing::ApiKey => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
+        // A local server's address is a setting, read when the run starts.
+        let local = (provider == Provider::Local).then(|| {
+            shared
+                .lock()
+                .map_err(|_| "database unavailable".to_string())
+                .and_then(|s| s.ai_defaults().map(|d| d.local).map_err(|e| e.to_string()))
+        });
+        let endpoint = match (local, billing) {
+            (Some(Ok(local)), _) => crate::ai_setup::local_endpoint(&local).await,
+            (Some(Err(e)), _) => Err(e),
+            (None, Billing::ChatGptPlan) => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
+            (None, Billing::ApiKey) => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
                 Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
                 Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI setup.")),
                 Ok(Err(e)) => Err(e),

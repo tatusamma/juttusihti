@@ -1,9 +1,12 @@
-//! AI provider clients (OpenAI, Anthropic, Gemini) and the runner that
-//! executes a user-approved analysis session.
+//! AI provider clients (OpenAI, Anthropic, Gemini, and local or self-hosted
+//! OpenAI-compatible servers) and the runner that executes a user-approved
+//! analysis session.
 //!
 //! All provider traffic goes through [`Client`], which speaks each
 //! provider's HTTP API directly, requests JSON-schema-constrained output,
-//! bounds response sizes and retries only transient failures. Model output
+//! bounds response sizes and retries only transient failures. A local server
+//! that cannot constrain output to a schema is asked for JSON in the prompt
+//! instead. Model output
 //! is untrusted: [`prompts`] validates every response before anything is
 //! stored, and nothing in a response is ever executed.
 
@@ -31,6 +34,8 @@ pub enum Auth {
     ApiKey(String),
     /// Sign in with ChatGPT: OpenAI requests charged to the user's plan.
     ChatGpt(Arc<chatgpt::Session>),
+    /// No credentials: a local server that does not check keys.
+    None,
 }
 
 /// Where and how to reach a provider. Credentials are never logged.
@@ -51,18 +56,73 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
-fn official_base(provider: Provider) -> &'static str {
+/// Hosted providers' public APIs. A local server has none: its address is
+/// always the user's.
+fn official_base(provider: Provider) -> Option<&'static str> {
     match provider {
-        Provider::Anthropic => "https://api.anthropic.com",
-        Provider::Openai => "https://api.openai.com",
-        Provider::Gemini => "https://generativelanguage.googleapis.com",
+        Provider::Anthropic => Some("https://api.anthropic.com"),
+        Provider::Openai => Some("https://api.openai.com"),
+        Provider::Gemini => Some("https://generativelanguage.googleapis.com"),
+        Provider::Local => None,
     }
 }
 
+/// Checks and normalizes a local server address to the base that
+/// `/chat/completions` and `/models` are appended to.
+///
+/// Accepts what servers print on start-up or document: `http://host:8080/v1`,
+/// `http://host:11434` (no path → `/v1`), or a full
+/// `…/v1/chat/completions` URL. Credentials, queries and fragments are
+/// refused so a key never ends up in an address.
+pub fn normalize_local_base(input: &str) -> Result<String, String> {
+    let example = "e.g. http://192.168.1.20:8080/v1";
+    let t = input.trim();
+    if t.is_empty() {
+        return Err(format!("Enter the server address, {example}."));
+    }
+    let mut url = url::Url::parse(t).map_err(|_| format!("That is not a valid address ({example})."))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("The address must start with http:// or https:// ({example})."));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("The address has no host ({example})."));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Put the API key in its own field, not in the address.".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("The address cannot contain ? or #.".into());
+    }
+    let mut path = url.path().trim_end_matches('/').to_string();
+    for suffix in ["/chat/completions", "/models"] {
+        if let Some(p) = path.strip_suffix(suffix) {
+            path = p.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+    if path.is_empty() {
+        path = "/v1".into();
+    }
+    url.set_path(&path);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
 impl Endpoint {
-    /// The provider's public API with an API key.
+    /// The provider's public API with an API key. A local server has no
+    /// public API: use [`Endpoint::local`].
     pub fn official(provider: Provider, api_key: String) -> Self {
-        Self { provider, base_url: official_base(provider).into(), auth: Auth::ApiKey(api_key) }
+        Self { provider, base_url: official_base(provider).unwrap_or_default().into(), auth: Auth::ApiKey(api_key) }
+    }
+
+    /// A local or self-hosted OpenAI-compatible server at `base_url` (see
+    /// [`normalize_local_base`]), with an optional API key.
+    pub fn local(base_url: &str, api_key: Option<String>) -> Result<Self, AiError> {
+        let base_url = normalize_local_base(base_url).map_err(AiError::BadAddress)?;
+        let auth = match api_key.map(|k| k.trim().to_string()) {
+            Some(k) if !k.is_empty() => Auth::ApiKey(k),
+            _ => Auth::None,
+        };
+        Ok(Self { provider: Provider::Local, base_url, auth })
     }
 
     /// OpenAI's public API, charged to the signed-in ChatGPT plan.
@@ -73,7 +133,7 @@ impl Endpoint {
 
     pub fn billing(&self) -> Billing {
         match self.auth {
-            Auth::ApiKey(_) => Billing::ApiKey,
+            Auth::ApiKey(_) | Auth::None => Billing::ApiKey,
             Auth::ChatGpt(_) => Billing::ChatGptPlan,
         }
     }
@@ -132,6 +192,9 @@ pub enum AiError {
     TooLarge,
     #[error("invalid model id")]
     InvalidModel,
+    /// The local server address is not usable; nothing was sent.
+    #[error("{0}")]
+    BadAddress(String),
     /// Credentials could not be obtained (ChatGPT sign-in); nothing was sent.
     #[error("{0}")]
     Auth(#[from] chatgpt::AuthError),
@@ -189,6 +252,9 @@ pub struct Client {
     /// Set once the model rejected a reasoning effort, so later requests
     /// do not repeat the failed attempt.
     no_reasoning_effort: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once a local server worked only without a JSON schema, so later
+    /// requests ask for JSON in the prompt straight away.
+    plain_json: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Model ids go into URL paths (Gemini); allow only safe characters.
@@ -196,6 +262,35 @@ pub(crate) fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 128
         && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+}
+
+/// Local model names only go into the JSON body, and servers name them
+/// like `llama3.1:8b`, `Qwen/Qwen3-8B` or `model.gguf`: allow those, but no
+/// whitespace or control characters.
+pub(crate) fn valid_model_for(provider: Provider, model: &str) -> bool {
+    match provider {
+        Provider::Local => {
+            !model.is_empty()
+                && model.len() <= 256
+                && model
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | '/' | '@' | '+'))
+        }
+        _ => valid_model(model),
+    }
+}
+
+/// Whether `model` is usable as a local server's model name.
+pub fn valid_local_model(model: &str) -> bool {
+    valid_model_for(Provider::Local, model)
+}
+
+/// Whether a local server's error may mean it cannot constrain output to a
+/// JSON schema (unknown `response_format`, schema-to-grammar failure, no
+/// guided-decoding backend). Auth, missing-route, rate and timeout errors
+/// are not: retrying without the schema would not help.
+fn may_lack_schema_support(e: &AiError) -> bool {
+    matches!(e, AiError::Status { status, .. } if matches!(status, 400 | 415 | 422 | 500 | 501))
 }
 
 impl Client {
@@ -207,7 +302,10 @@ impl Client {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AiError::NotSent(e.to_string()))?;
-        Ok(Self { http, endpoint, policy, no_reasoning_effort: Default::default() })
+        if endpoint.provider == Provider::Local {
+            normalize_local_base(&endpoint.base_url).map_err(AiError::BadAddress)?;
+        }
+        Ok(Self { http, endpoint, policy, no_reasoning_effort: Default::default(), plain_json: Default::default() })
     }
 
     pub fn provider(&self) -> Provider {
@@ -220,8 +318,11 @@ impl Client {
 
     /// Sends a structured-output request, retrying transient failures.
     pub async fn complete(&self, req: &Request) -> Result<Reply, AiError> {
-        if !valid_model(&req.model) {
+        if !valid_model_for(self.endpoint.provider, &req.model) {
             return Err(AiError::InvalidModel);
+        }
+        if self.endpoint.provider == Provider::Local {
+            return self.complete_local(req).await;
         }
         use std::sync::atomic::Ordering;
         let (url, mut body) = providers::completion(&self.endpoint, req);
@@ -247,17 +348,75 @@ impl Client {
         providers::parse_completion(self.endpoint.provider, &json)
     }
 
+    /// A local server: JSON-schema output first; if the server cannot do
+    /// that, plain JSON prompting. Either way the caller validates the reply.
+    async fn complete_local(&self, req: &Request) -> Result<Reply, AiError> {
+        use std::sync::atomic::Ordering;
+        let url = providers::local_url(&self.endpoint);
+        if !self.plain_json.load(Ordering::Relaxed) {
+            match self.post_with_retries(&url, &providers::local_body(req, true), None).await {
+                Ok(json) => return providers::parse_completion(Provider::Local, &json),
+                Err(e) if may_lack_schema_support(&e) => {
+                    tracing::info!(model = %req.model, error = %e, "local server refused JSON-schema output; asking for JSON in the prompt");
+                }
+                Err(e) => return Err(e),
+            }
+            let json = self.post_with_retries(&url, &providers::local_body(req, false), None).await?;
+            // Only a server that works without the schema keeps working that way.
+            self.plain_json.store(true, Ordering::Relaxed);
+            return providers::parse_completion(Provider::Local, &json);
+        }
+        let json = self.post_with_retries(&url, &providers::local_body(req, false), None).await?;
+        providers::parse_completion(Provider::Local, &json)
+    }
+
+    /// Whether this client asks a local server for JSON in the prompt
+    /// because the server could not use a JSON schema.
+    pub fn uses_plain_json(&self) -> bool {
+        self.plain_json.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Model ids a local server offers (`GET {base}/models`). Sends no
+    /// article content, so it needs no consent.
+    pub async fn list_models(&self) -> Result<Vec<String>, AiError> {
+        if self.endpoint.provider != Provider::Local {
+            return Err(AiError::Unsupported("listing models is only available for a local server"));
+        }
+        let url = format!("{}/models", self.endpoint.base_url.trim_end_matches('/'));
+        let mut req = self.http.get(&url);
+        if let Auth::ApiKey(k) = &self.endpoint.auth {
+            for (h, v) in providers::auth_headers(Provider::Local, k) {
+                req = req.header(h, v);
+            }
+        }
+        let resp = req.timeout(Duration::from_secs(20)).send().await.map_err(|e| {
+            if e.is_connect() || e.is_builder() {
+                AiError::NotSent(e.to_string())
+            } else {
+                AiError::Unknown(e.to_string())
+            }
+        })?;
+        let (status, bytes, _) = read_bounded(resp).await?;
+        if status != StatusCode::OK {
+            return Err(AiError::Status { status: status.as_u16(), message: providers::error_message(&bytes) });
+        }
+        let v: Value = serde_json::from_slice(&bytes).map_err(|e| AiError::Malformed(e.to_string()))?;
+        providers::parse_models(&v)
+    }
+
     /// Counts input tokens for a request with the provider's own counter.
     /// This sends the request content to the provider: only call it after
     /// the user consented to that.
     pub async fn count_tokens(&self, req: &Request) -> Result<u64, AiError> {
-        if !valid_model(&req.model) {
+        if !valid_model_for(self.endpoint.provider, &req.model) {
             return Err(AiError::InvalidModel);
         }
         if self.billing() == Billing::ChatGptPlan {
             return Err(AiError::Unsupported("token counting is not available with a ChatGPT plan"));
         }
-        let (url, body) = providers::count_tokens(&self.endpoint, req);
+        let Some((url, body)) = providers::count_tokens(&self.endpoint, req) else {
+            return Err(AiError::Unsupported("OpenAI-compatible servers have no standard token counter"));
+        };
         let json = self.post_with_retries(&url, &body, None).await?;
         providers::parse_count(self.endpoint.provider, &json)
     }
@@ -311,17 +470,18 @@ impl Client {
         timeout: Option<Duration>,
     ) -> Result<Value, (AiError, Option<Duration>)> {
         let token = match &self.endpoint.auth {
-            Auth::ApiKey(k) => k.clone(),
-            Auth::ChatGpt(s) => s.access_token().await.map_err(|e| (AiError::Auth(e), None))?,
+            Auth::ApiKey(k) => Some(k.clone()),
+            Auth::ChatGpt(s) => Some(s.access_token().await.map_err(|e| (AiError::Auth(e), None))?),
+            Auth::None => None,
         };
         let mut req = self.http.post(url).header(reqwest::header::CONTENT_TYPE, "application/json");
-        for (k, v) in providers::auth_headers(self.endpoint.provider, &token) {
+        for (k, v) in token.map(|t| providers::auth_headers(self.endpoint.provider, &t)).unwrap_or_default() {
             req = req.header(k, v);
         }
         if let Some(t) = timeout {
             req = req.timeout(t);
         }
-        let mut resp = req.body(body.to_string()).send().await.map_err(|e| {
+        let resp = req.body(body.to_string()).send().await.map_err(|e| {
             let err = if e.is_connect() || e.is_builder() {
                 AiError::NotSent(e.to_string())
             } else {
@@ -329,20 +489,7 @@ impl Client {
             };
             (err, None)
         })?;
-        let status = resp.status();
-        let retry_after = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(Duration::from_secs);
-        let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| (AiError::Unknown(e.to_string()), None))? {
-            if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err((AiError::TooLarge, None));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let (status, bytes, retry_after) = read_bounded(resp).await.map_err(|e| (e, None))?;
         if status != StatusCode::OK {
             if providers::is_plan_limit(&bytes) {
                 return Err((AiError::PlanLimit(providers::error_message(&bytes)), None));
@@ -365,6 +512,26 @@ impl Client {
     }
 }
 
+/// Reads a response body up to [`MAX_RESPONSE_BYTES`], with its status and
+/// any `Retry-After` delay.
+async fn read_bounded(mut resp: reqwest::Response) -> Result<(StatusCode, Vec<u8>, Option<Duration>), AiError> {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| AiError::Unknown(e.to_string()))? {
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(AiError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((status, bytes, retry_after))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +543,41 @@ mod tests {
         assert!(!valid_model("../../v1/files"));
         assert!(!valid_model("model:generateContent?x"));
         assert!(!valid_model(""));
+    }
+
+    #[test]
+    fn local_model_names_allow_server_conventions() {
+        for m in ["llama3.1:8b", "Qwen/Qwen3-8B-Instruct", "gemma-3-12b-it-Q4_K_M.gguf", "org/model@rev"] {
+            assert!(valid_model_for(Provider::Local, m), "{m}");
+            assert!(!valid_model_for(Provider::Gemini, m) || !m.contains([':', '/', '@']), "{m}");
+        }
+        assert!(!valid_model_for(Provider::Local, ""));
+        assert!(!valid_model_for(Provider::Local, "a b"));
+        assert!(!valid_model_for(Provider::Local, "a\nb"));
+        assert!(!valid_model_for(Provider::Local, &"x".repeat(257)));
+    }
+
+    #[test]
+    fn local_addresses_are_normalized() {
+        let n = |s: &str| normalize_local_base(s);
+        assert_eq!(n("http://192.168.1.20:8080/v1").unwrap(), "http://192.168.1.20:8080/v1");
+        assert_eq!(n(" http://192.168.1.20:8080/v1/ ").unwrap(), "http://192.168.1.20:8080/v1");
+        assert_eq!(n("http://localhost:11434").unwrap(), "http://localhost:11434/v1", "no path → /v1");
+        assert_eq!(n("http://localhost:1234/v1/chat/completions").unwrap(), "http://localhost:1234/v1");
+        assert_eq!(n("http://localhost:8000/v1/models").unwrap(), "http://localhost:8000/v1");
+        assert_eq!(n("https://gpu.example/openai/v1").unwrap(), "https://gpu.example/openai/v1");
+        assert_eq!(n("http://[::1]:8080/v1").unwrap(), "http://[::1]:8080/v1");
+        for bad in ["", "192.168.1.20:8080", "ftp://h/v1", "http://user:pw@h/v1", "http://h/v1?key=x", "http://h/v1#x"]
+        {
+            assert!(n(bad).is_err(), "{bad}");
+        }
+        let e = Endpoint::local("http://h:8080", Some("  ".into())).unwrap();
+        assert!(matches!(e.auth, Auth::None), "a blank key means no key");
+        assert_eq!(e.base_url, "http://h:8080/v1");
+        assert_eq!(e.billing(), Billing::ApiKey);
+        assert!(Endpoint::local("nope", None).is_err());
+        let bad = Endpoint { provider: Provider::Local, base_url: String::new(), auth: Auth::None };
+        assert!(matches!(Client::new(bad, RetryPolicy::default()), Err(AiError::BadAddress(_))));
     }
 
     #[test]
