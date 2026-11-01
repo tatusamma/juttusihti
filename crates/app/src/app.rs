@@ -72,6 +72,7 @@ pub enum Screen {
     Map,
     Providers,
     Settings,
+    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -847,7 +848,7 @@ impl App {
                     Screen::Map => self.map.load().map(Message::Map),
                     Screen::Providers => self.providers.load().map(Message::Providers),
                     Screen::Settings => self.settings.load().map(Message::Settings),
-                    Screen::Reader => Task::none(),
+                    Screen::Reader | Screen::Help => Task::none(),
                 }
             }
             Message::Reports(msg) => self.reports.update(msg).map(Message::Reports),
@@ -1102,6 +1103,7 @@ impl App {
             Key::Character("n") => self.update(Message::NextPage),
             Key::Character("p") => self.update(Message::PrevPage),
             Key::Named(keyboard::key::Named::Escape) => self.update(Message::CloseOverlays),
+            Key::Named(keyboard::key::Named::F1) => self.update(Message::ShowScreen(Screen::Help)),
             _ => Task::none(),
         }
     }
@@ -1134,6 +1136,7 @@ impl App {
             Screen::Map => self.map.view().map(Message::Map),
             Screen::Providers => self.providers.view().map(Message::Providers),
             Screen::Settings => self.settings.view().map(Message::Settings),
+            Screen::Help => crate::help::view(),
         };
         let body = row![rail::view(self.place, self.screen), rule::vertical(1), main].height(Fill);
         let mut layout = column![self.view_top_bar(), rule::horizontal(1), body];
@@ -1679,6 +1682,14 @@ mod tests {
         let _ = app.update(Message::ToggleListMenu);
         let _ = app.update(Message::Key(Key::Named(keyboard::key::Named::Escape), Default::default()));
         assert!(!app.list_menu_open);
+    }
+
+    #[test]
+    fn f1_opens_help() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::Key(Key::Named(keyboard::key::Named::F1), Default::default()));
+        assert_eq!(app.screen, Screen::Help);
+        let _ = app.view();
     }
 
     #[test]

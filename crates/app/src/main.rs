@@ -6,6 +6,7 @@ mod db;
 mod feeds_menu;
 mod format;
 mod graph_view;
+mod help;
 mod icons;
 mod labels;
 mod map_view;
