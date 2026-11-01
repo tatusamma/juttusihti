@@ -9,6 +9,16 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Local or self-hosted AI server**: a new provider for any server speaking the OpenAI
+  chat-completions API, such as llama.cpp `llama-server`, Ollama, vLLM and LM Studio. Set its
+  address (for example `http://192.168.1.20:8080/v1`), model name and an optional API key under
+  AI setup → Local or self-hosted server; **Check server** lists the server's models. Runs on
+  it show a cost of $0, still show the token estimate and still need your consent. Servers that
+  cannot force JSON-schema output are asked for JSON in the prompt instead, and every reply is
+  validated as before.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed

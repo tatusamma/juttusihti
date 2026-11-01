@@ -1,6 +1,7 @@
 //! End-to-end runs against a scripted local server that imitates the
-//! OpenAI, Anthropic and Gemini wire formats, and OpenAI's Sign in with
-//! ChatGPT endpoints. No real provider is contacted and nothing here costs
+//! OpenAI, Anthropic and Gemini wire formats, an OpenAI-compatible
+//! chat-completions server (llama.cpp, Ollama, vLLM, LM Studio), and
+//! OpenAI's Sign in with ChatGPT endpoints. No real provider is contacted and nothing here costs
 //! money.
 
 use std::collections::BTreeSet;
@@ -135,6 +136,7 @@ fn user_text(provider: Provider, body: &Value) -> String {
         // the only item on a ChatGPT plan (system text is in `instructions`).
         Provider::Openai => body["input"].as_array().and_then(|a| a.last()).and_then(|m| m["content"].as_str()),
         Provider::Gemini => body["contents"][0]["parts"][0]["text"].as_str(),
+        Provider::Local => body["messages"].as_array().and_then(|a| a.last()).and_then(|m| m["content"].as_str()),
     }
     .unwrap_or_default()
     .to_string()
@@ -162,7 +164,27 @@ fn envelope(provider: Provider, payload: &Value, input: u64, output: u64) -> Val
             "candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}],
             "usageMetadata": {"promptTokenCount": input, "candidatesTokenCount": output, "thoughtsTokenCount": 0}
         }),
+        Provider::Local => local_envelope(&text, input, output),
     }
+}
+
+fn local_envelope(content: &str, input: u64, output: u64) -> Value {
+    json!({
+        "id": "chatcmpl-1", "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output}
+    })
+}
+
+/// The JSON schema a local-server request asks for: in `response_format`,
+/// or, when a server could not use it, in the system prompt.
+fn local_schema(body: &Value) -> Value {
+    let rf = &body["response_format"]["json_schema"]["schema"];
+    if !rf.is_null() {
+        return rf.clone();
+    }
+    let system = body["messages"][0]["content"].as_str().unwrap_or_default();
+    system.rsplit_once("JSON schema:\n").and_then(|(_, s)| serde_json::from_str(s).ok()).unwrap_or(Value::Null)
 }
 
 fn ok(body: Value) -> MockReply {
@@ -176,6 +198,7 @@ fn good_model(provider: Provider) -> impl Fn(&Recorded, usize) -> MockReply + Se
             Provider::Anthropic => r.body["output_config"]["format"]["schema"]["properties"].clone(),
             Provider::Openai => r.body["text"]["format"]["schema"]["properties"].clone(),
             Provider::Gemini => r.body["generationConfig"]["responseJsonSchema"]["properties"].clone(),
+            Provider::Local => local_schema(&r.body)["properties"].clone(),
         };
         let user = user_text(provider, &r.body);
         let items = articles_in(&user);
@@ -215,6 +238,8 @@ fn model_for(p: Provider) -> &'static str {
         Provider::Anthropic => "claude-haiku-5-5",
         Provider::Openai => "gpt-6-luna",
         Provider::Gemini => "gemini-3.8-flash",
+        // Ollama-style name: a colon is not allowed for the hosted providers.
+        Provider::Local => "qwen3:8b",
     }
 }
 
@@ -292,9 +317,16 @@ fn fast() -> RetryPolicy {
 }
 
 fn runner(db: &Arc<Mutex<Store>>, provider: Provider, base: &str, control: Control) -> Runner {
-    let client =
-        Client::new(Endpoint { provider, base_url: base.into(), auth: Auth::ApiKey(API_KEY.into()) }, fast()).unwrap();
+    // A local server's address includes the API version, as servers print it.
+    let base_url = if provider == Provider::Local { format!("{base}/v1") } else { base.into() };
+    let client = Client::new(Endpoint { provider, base_url, auth: Auth::ApiKey(API_KEY.into()) }, fast()).unwrap();
     Runner::new(db.clone(), client, Catalog::builtin(), control)
+}
+
+fn local_runner(db: &Arc<Mutex<Store>>, base: &str, key: Option<&str>) -> (Runner, Client) {
+    let endpoint = Endpoint::local(&format!("{base}/v1/"), key.map(str::to_string)).unwrap();
+    let client = Client::new(endpoint, fast()).unwrap();
+    (Runner::new(db.clone(), client.clone(), Catalog::builtin(), Control::default()), client)
 }
 
 const YES: Approval = Approval { consent_to_send: true };
@@ -310,6 +342,7 @@ fn ledger_rows(db: &Arc<Mutex<Store>>) -> Vec<(String, Option<i64>)> {
 #[tokio::test]
 async fn full_run_on_every_provider() {
     for provider in Provider::ALL {
+        let free = provider == Provider::Local;
         let db = seed(3);
         let cfg = config(provider, &[Task::Labels, Task::Entities, Task::Relevance, Task::Related, Task::Summary]);
         let sid = session(&db, &cfg);
@@ -317,7 +350,11 @@ async fn full_run_on_every_provider() {
         let summary = runner(&db, provider, &m.base, Control::default()).run(sid, YES).await.unwrap();
         assert_eq!(summary.final_status, Some(SessionStatus::Completed), "{provider:?}");
         assert_eq!(m.count(), 3, "{provider:?}: extraction, related, summary");
-        assert!(summary.cost.unwrap() > 0, "{provider:?} priced from the catalog");
+        if free {
+            assert_eq!(summary.cost, Some(0), "a local server has no API cost");
+        } else {
+            assert!(summary.cost.unwrap() > 0, "{provider:?} priced from the catalog");
+        }
 
         // Requests carry auth in headers, never the body; OpenAI is told not to store.
         for r in m.requests() {
@@ -327,6 +364,11 @@ async fn full_run_on_every_provider() {
                 Provider::Openai => assert_eq!(r.body["store"], false),
                 Provider::Anthropic => assert!(r.headers.contains("anthropic-version: 2026-10-21")),
                 Provider::Gemini => assert!(r.path.starts_with("/v1beta/models/gemini-3.8-flash:generateContent")),
+                Provider::Local => {
+                    assert_eq!(r.path, "/v1/chat/completions");
+                    assert_eq!(r.body["model"], "qwen3:8b");
+                    assert_eq!(r.body["response_format"]["type"], "json_schema");
+                }
             }
         }
 
@@ -653,7 +695,7 @@ async fn preconditions_are_enforced() {
 
 #[tokio::test]
 async fn provider_token_counting() {
-    for provider in Provider::ALL {
+    for provider in Provider::CLOUD {
         let m = mock(Arc::new(move |r: &Recorded, _| {
             ok(match provider {
                 Provider::Gemini => {
@@ -668,6 +710,7 @@ async fn provider_token_counting() {
                     assert_eq!(r.path, "/v1/responses/input_tokens");
                     json!({"input_tokens": 321, "object": "response.input_tokens"})
                 }
+                Provider::Local => unreachable!("local servers have no counter"),
             })
         }))
         .await;
@@ -1273,4 +1316,180 @@ async fn a_rate_limit_is_still_retried() {
     let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
     assert_eq!(r.final_status, Some(SessionStatus::Completed));
     assert_eq!(m.count(), 2);
+}
+
+// ---- local / OpenAI-compatible servers ------------------------------------------------
+
+fn status(code: u16, message: &str) -> MockReply {
+    MockReply { status: code, body: json!({"error": {"message": message}}), delay: Duration::ZERO }
+}
+
+#[tokio::test]
+async fn local_server_run_is_free_and_keeps_the_estimate_and_consent() {
+    let db = seed(3);
+    let cfg = config(Provider::Local, &[Task::Labels, Task::Related]);
+    // The estimate before consent: tokens as usual, a known zero cost.
+    let (sid, e) = {
+        let mut s = db.lock().unwrap();
+        let scope = s.analysis_scope(&cfg).unwrap();
+        let e = estimate(&cfg, &scope, 0, &Catalog::builtin(), "2026-10-25".parse().unwrap());
+        (s.save_estimated_session(&cfg, &scope, &e).unwrap(), e)
+    };
+    assert_eq!(e.expected().cost, Some(0));
+    assert_eq!(e.conservative().cost, Some(0));
+    assert!(e.expected().usage.total() > 0, "tokens are still estimated");
+    assert!(e.warnings.iter().any(|w| w.contains("no API cost")), "{:?}", e.warnings);
+
+    let m = mock(Arc::new(good_model(Provider::Local))).await;
+    let (r, _) = local_runner(&db, &m.base, None);
+    // Consent is still required.
+    assert!(matches!(r.run(sid, Approval { consent_to_send: false }).await, Err(RunError::NoConsent)));
+    assert_eq!(m.count(), 0);
+    let summary = r.run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Completed));
+    assert_eq!(summary.cost, Some(0));
+    assert!(summary.usage.total() > 0, "usage is still recorded");
+    for req in m.requests() {
+        assert_eq!(req.path, "/v1/chat/completions");
+        assert!(!req.headers.to_lowercase().contains("authorization"), "no key, no auth header");
+    }
+    assert!(ledger_rows(&db).iter().all(|(_, cost)| *cost == Some(0)), "{:?}", ledger_rows(&db));
+}
+
+#[tokio::test]
+async fn local_server_api_key_goes_in_a_bearer_header() {
+    let db = seed(2);
+    let sid = session(&db, &config(Provider::Local, &[Task::Labels]));
+    let m = mock(Arc::new(good_model(Provider::Local))).await;
+    let (r, _) = local_runner(&db, &m.base, Some(API_KEY));
+    assert_eq!(r.run(sid, YES).await.unwrap().final_status, Some(SessionStatus::Completed));
+    let reqs = m.requests();
+    assert!(reqs[0].headers.to_lowercase().contains(&format!("authorization: bearer {API_KEY}")));
+    assert!(!reqs[0].body.to_string().contains(API_KEY));
+}
+
+#[tokio::test]
+async fn local_server_without_schema_support_falls_back_to_prompted_json() {
+    let db = seed(58); // 3 extraction batches
+    let mut cfg = config(Provider::Local, &[Task::Labels]);
+    cfg.parallel_requests = 1;
+    let sid = session(&db, &cfg);
+    let good = good_model(Provider::Local);
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        if r.body.get("response_format").is_some() {
+            status(400, "response_format type json_schema is not supported")
+        } else {
+            good(r, n)
+        }
+    }))
+    .await;
+    let (r, client) = local_runner(&db, &m.base, None);
+    let summary = r.run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Completed));
+    assert!(client.uses_plain_json());
+    let reqs = m.requests();
+    assert_eq!(reqs.len(), 4, "one refused schema request, then three plain ones");
+    assert!(reqs[0].body.get("response_format").is_some());
+    for plain in &reqs[1..] {
+        assert!(plain.body.get("response_format").is_none(), "the fallback is remembered");
+        let system = plain.body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Reply with one JSON object") && system.contains("\"articles\""), "{system}");
+    }
+    assert_eq!(summary.calls, 3, "the refused request is not counted");
+    let s = db.lock().unwrap();
+    let ids = s.session_articles(sid).unwrap();
+    assert_eq!(s.article_labels(ids[0]).unwrap()[0].label.name, "Politiikka");
+}
+
+#[tokio::test]
+async fn local_server_that_ignores_the_schema_is_still_validated() {
+    let db = seed(2);
+    let sid = session(&db, &config(Provider::Local, &[Task::Labels]));
+    let good = good_model(Provider::Local);
+    // First reply: a reasoning model thinking aloud and fencing its JSON,
+    // which is accepted. Second (another session): prose and an injection.
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        let inner = good(r, n);
+        let content = inner.body["choices"][0]["message"]["content"].as_str().unwrap().to_string();
+        ok(local_envelope(&format!("<think>\nLabels needed.\n</think>\n```json\n{content}\n```"), 400, 60))
+    }))
+    .await;
+    let (r, _) = local_runner(&db, &m.base, None);
+    assert_eq!(r.run(sid, YES).await.unwrap().final_status, Some(SessionStatus::Completed));
+    {
+        let s = db.lock().unwrap();
+        let ids = s.session_articles(sid).unwrap();
+        assert_eq!(s.article_labels(ids[0]).unwrap()[0].label.name, "Politiikka");
+    }
+
+    let sid = session(&db, &config(Provider::Local, &[Task::Entities]));
+    let m = mock(Arc::new(|_: &Recorded, n: usize| {
+        ok(local_envelope(
+            if n == 0 {
+                "Sure! The articles are about weather."
+            } else {
+                r#"{"articles":[{"id":999999,"entities":[]}]}"#
+            },
+            300,
+            20,
+        ))
+    }))
+    .await;
+    let (r, _) = local_runner(&db, &m.base, None);
+    let summary = r.run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Completed));
+    assert_eq!(m.count(), 2, "one retry after unusable output");
+    assert_eq!(db.lock().unwrap().review_counts(sid).unwrap().entities, 0, "nothing invalid is stored");
+}
+
+#[tokio::test]
+async fn local_server_errors_that_are_not_about_the_schema_do_not_fall_back() {
+    let db = seed(2);
+    let sid = session(&db, &config(Provider::Local, &[Task::Labels]));
+    let m = mock(Arc::new(|_: &Recorded, _| status(401, "invalid api key"))).await;
+    let (r, client) = local_runner(&db, &m.base, Some("wrong"));
+    let summary = r.run(sid, YES).await.unwrap();
+    assert_eq!(summary.final_status, Some(SessionStatus::Failed));
+    assert_eq!(m.count(), 1, "auth errors are not retried, with or without a schema");
+    assert!(!client.uses_plain_json());
+
+    // A server that fails both ways does not switch later requests to plain JSON.
+    let sid = session(&db, &config(Provider::Local, &[Task::Entities]));
+    let m = mock(Arc::new(|_: &Recorded, _| status(400, "context length exceeded"))).await;
+    let (r, client) = local_runner(&db, &m.base, None);
+    assert_eq!(r.run(sid, YES).await.unwrap().final_status, Some(SessionStatus::Failed));
+    assert_eq!(m.count(), 2, "schema request, then one plain attempt");
+    assert!(!client.uses_plain_json());
+}
+
+#[tokio::test]
+async fn local_server_lists_models_and_has_no_token_counter() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        assert_eq!(r.path, "/v1/models");
+        assert!(r.headers.starts_with("GET "));
+        ok(json!({"object": "list", "data": [{"id": "qwen3:8b", "object": "model"}, {"id": "llama3.1:8b"}]}))
+    }))
+    .await;
+    let client = Client::new(Endpoint::local(&m.base, Some(API_KEY.into())).unwrap(), fast()).unwrap();
+    assert_eq!(client.list_models().await.unwrap(), vec!["qwen3:8b", "llama3.1:8b"]);
+    assert!(m.requests()[0].headers.to_lowercase().contains("authorization: bearer"));
+    let req = juttusihti_ai::Request {
+        model: "qwen3:8b".into(),
+        system: "s".into(),
+        user: "u".into(),
+        schema_name: "x".into(),
+        schema: json!({"type": "object"}),
+        max_output_tokens: 10,
+        reasoning_effort: None,
+    };
+    assert!(matches!(client.count_tokens(&req).await, Err(AiError::Unsupported(_))));
+    assert_eq!(m.count(), 1, "nothing is sent to count tokens");
+    // Hosted providers keep their stricter model ids.
+    let hosted = Client::new(Endpoint::official(Provider::Gemini, "k".into()), fast()).unwrap();
+    assert!(matches!(hosted.complete(&req).await, Err(AiError::InvalidModel)));
+    assert!(matches!(hosted.list_models().await, Err(AiError::Unsupported(_))));
+
+    // An unreachable server is reported as not sent (nothing to pay for).
+    let gone = Client::new(Endpoint::local("http://127.0.0.1:9/v1", None).unwrap(), fast()).unwrap();
+    assert!(matches!(gone.list_models().await, Err(AiError::NotSent(_))));
 }

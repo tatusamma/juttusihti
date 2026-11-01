@@ -1,6 +1,7 @@
 //! AI setup screen: the defaults used by the quick AI panel (provider,
 //! fast or quality model, limits), Sign in with ChatGPT, API keys in the OS
-//! secret store, and how to get a key from each provider.
+//! secret store, how to get a key from each provider, and a local or
+//! self-hosted OpenAI-compatible server (address, model, optional key).
 
 use iced::widget::{column, container, pick_list, row, rule, scrollable, text, text_input};
 use iced::{Center, Element, Task as Cmd};
@@ -44,6 +45,10 @@ pub enum Msg {
     SetClickbait(bool),
     ClickbaitThreshold(String),
     DefaultsSaved(Result<(), String>),
+    LocalUrl(String),
+    LocalModel(String),
+    CheckLocal,
+    LocalChecked(Result<Vec<String>, String>),
 }
 
 enum ChatGpt {
@@ -66,9 +71,15 @@ pub struct State {
     /// Clickbait threshold in percent, as typed.
     threshold: String,
     status: Vec<(Provider, Result<bool, String>)>,
-    inputs: [String; 3],
+    inputs: [String; Provider::ALL.len()],
     message: Option<Result<String, String>>,
     chatgpt: ChatGpt,
+    /// Local server address and model, as typed.
+    local_url: String,
+    local_model: String,
+    /// Models the local server offered on the last check, or why it failed.
+    local_check: Option<Result<Vec<String>, String>>,
+    checking_local: bool,
 }
 
 fn idx(p: Provider) -> usize {
@@ -91,6 +102,10 @@ impl State {
             inputs: Default::default(),
             message: None,
             chatgpt: ChatGpt::Unknown,
+            local_url: String::new(),
+            local_model: String::new(),
+            local_check: None,
+            checking_local: false,
         }
     }
 
@@ -117,6 +132,8 @@ impl State {
                 self.max_articles = d.max_articles.to_string();
                 self.max_cost = d.max_cost.map(format_usd).unwrap_or_default().trim_start_matches('$').to_string();
                 self.threshold = d.clickbait.threshold_percent.to_string();
+                self.local_url = d.local.base_url.clone();
+                self.local_model = d.local.model.clone();
                 self.defaults = Some(d);
             }
             Msg::DefaultsLoaded(Err(e)) | Msg::DefaultsSaved(Err(e)) => self.message = Some(Err(e)),
@@ -161,6 +178,54 @@ impl State {
                     && (1..=100).contains(&n)
                 {
                     return self.change(|d| d.clickbait.threshold_percent = n);
+                }
+            }
+            Msg::LocalUrl(v) => {
+                self.local_url = v;
+                self.local_check = None;
+                let t = self.local_url.trim().to_string();
+                if t.is_empty() || juttusihti_ai::normalize_local_base(&t).is_ok() {
+                    return self.change(|d| d.local.base_url = t);
+                }
+            }
+            Msg::LocalModel(v) => {
+                self.local_model = v;
+                let t = self.local_model.trim().to_string();
+                if t.is_empty() || juttusihti_ai::valid_local_model(&t) {
+                    return self.change(|d| {
+                        d.local.model = t;
+                        if d.provider == Provider::Local {
+                            d.model = None;
+                        }
+                    });
+                }
+            }
+            Msg::CheckLocal => {
+                let local = juttusihti_core::ai_defaults::LocalServer {
+                    base_url: self.local_url.trim().to_string(),
+                    model: self.local_model.trim().to_string(),
+                };
+                self.checking_local = true;
+                self.local_check = None;
+                return Cmd::perform(
+                    async move {
+                        let endpoint = ai_setup::local_endpoint(&local).await?;
+                        let client = juttusihti_ai::Client::new(endpoint, juttusihti_ai::RetryPolicy::default())
+                            .map_err(|e| e.to_string())?;
+                        client.list_models().await.map_err(|e| e.to_string())
+                    },
+                    Msg::LocalChecked,
+                );
+            }
+            Msg::LocalChecked(r) => {
+                self.checking_local = false;
+                let first = r.as_ref().ok().and_then(|m| m.first().cloned());
+                self.local_check = Some(r);
+                // Fill in the model when the server has one and none is set.
+                if self.local_model.trim().is_empty()
+                    && let Some(m) = first
+                {
+                    return self.update(Msg::LocalModel(m));
                 }
             }
             Msg::Loaded(s) => self.status = s,
@@ -304,25 +369,44 @@ impl State {
                 .align_y(Center),
             );
         }
+        if d.provider == Provider::Local {
+            let model = d.model();
+            col = col.push(
+                row![
+                    label("Model"),
+                    style::note(if model.is_empty() {
+                        "Set the server and its model under “Local or self-hosted server” below.".to_string()
+                    } else {
+                        format!("{model} on your own server: no API cost.")
+                    }),
+                ]
+                .spacing(SPACE[1])
+                .align_y(Center),
+            );
+        }
         let mut tiers = column![].spacing(SPACE[0]);
         for t in Tier::ALL {
-            tiers = tiers.push(style::choice(recommended(d.provider, t).note, t, Some(d.tier), Msg::SetTier));
+            if let Some(r) = recommended(d.provider, t) {
+                tiers = tiers.push(style::choice(r.note, t, Some(d.tier), Msg::SetTier));
+            }
         }
-        col = col.push(
-            row![
+        if d.provider != Provider::Local {
+            col = col.push(
                 row![
-                    text("Model").size(SIZE_BODY),
-                    style::help(
-                        "Fast models handle headlines, labels, people & places and related stories well and use \
+                    row![
+                        text("Model").size(SIZE_BODY),
+                        style::help(
+                            "Fast models handle headlines, labels, people & places and related stories well and use \
                          the fewest tokens. Pick Quality when you mostly want research summaries."
-                    ),
+                        ),
+                    ]
+                    .spacing(SPACE[0])
+                    .width(120),
+                    tiers
                 ]
-                .spacing(SPACE[0])
-                .width(120),
-                tiers
-            ]
-            .spacing(SPACE[1]),
-        );
+                .spacing(SPACE[1]),
+            );
+        }
         if d.model.is_some() {
             col = col.push(style::note(format!("Using model {}", d.model())));
         }
@@ -481,7 +565,110 @@ impl State {
             ]
             .spacing(SPACE[2]),
         );
+        col = col.push(rule::horizontal(1)).push(self.view_local());
         scrollable(col).into()
+    }
+
+    fn view_local(&self) -> Element<'_, Msg> {
+        let label = |s: &'static str| text(s).size(SIZE_BODY).width(120);
+        let url_error = {
+            let t = self.local_url.trim();
+            (!t.is_empty()).then(|| juttusihti_ai::normalize_local_base(t).err()).flatten()
+        };
+        let model_error = {
+            let t = self.local_model.trim();
+            (!t.is_empty() && !juttusihti_ai::valid_local_model(t))
+                .then_some("Model names cannot contain spaces or unusual characters.")
+        };
+        let mut col = column![
+            style::title("Local or self-hosted server"),
+            style::intro(
+                "Run analyses on your own model with any OpenAI-compatible server. No API cost.",
+                "Any server that speaks the OpenAI chat-completions API works: llama.cpp's llama-server, Ollama, \
+                 vLLM or LM Studio, on this computer or another one on your network. Runs cost nothing in API \
+                 fees; the estimate still shows tokens, and you still approve every run before articles are sent. \
+                 If the server cannot force JSON-schema output, Juttusihti asks for JSON in the prompt and checks \
+                 every reply.",
+            ),
+            row![
+                label("Server address"),
+                text_input("http://192.168.1.20:8080/v1", &self.local_url)
+                    .style(style::text_input)
+                    .on_input(Msg::LocalUrl)
+                    .size(SIZE_BODY)
+                    .padding(SPACE[1]),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+        ]
+        .spacing(SPACE[2]);
+        let can_check = !self.checking_local && !self.local_url.trim().is_empty() && url_error.is_none();
+        if let Some(e) = url_error {
+            col = col.push(style::note(e));
+        }
+        let offered = match &self.local_check {
+            Some(Ok(models)) if !models.is_empty() => Some(models.clone()),
+            _ => None,
+        };
+        let mut model_row = row![
+            label("Model"),
+            text_input("e.g. qwen3:8b or Qwen/Qwen3-8B", &self.local_model)
+                .style(style::text_input)
+                .on_input(Msg::LocalModel)
+                .size(SIZE_BODY)
+                .padding(SPACE[1]),
+        ]
+        .spacing(SPACE[1])
+        .align_y(Center);
+        if let Some(models) = offered {
+            let selected = models.iter().find(|m| **m == self.local_model.trim()).cloned();
+            model_row = model_row.push(
+                pick_list(models, selected, Msg::LocalModel)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .placeholder("Server's models")
+                    .text_size(SIZE_BODY),
+            );
+        }
+        col = col.push(model_row);
+        if let Some(e) = model_error {
+            col = col.push(style::note(e));
+        }
+        col = col.push(
+            row![
+                style::quiet_button(None, "Check server", style::quiet, can_check.then_some(Msg::CheckLocal)),
+                style::note(match &self.local_check {
+                    _ if self.checking_local => "Asking the server for its models…".to_string(),
+                    None => "Asks the server which models it has. No articles are sent.".to_string(),
+                    Some(Ok(m)) if m.is_empty() => "The server answered but listed no models.".to_string(),
+                    Some(Ok(m)) =>
+                        format!("The server answered with {} model{}.", m.len(), if m.len() == 1 { "" } else { "s" }),
+                    Some(Err(e)) => format!("Could not reach the server: {e}"),
+                }),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+        );
+        col = col.push(style::heading("API key (optional)"));
+        col = col.push(style::note(
+            "Only if the server was started with a key (llama-server --api-key, vLLM --api-key, a proxy). \
+             Leave empty for Ollama and LM Studio.",
+        ));
+        col = col.push(self.key_row(Provider::Local, "Paste the server's API key"));
+        col = col.push(
+            container(
+                text(
+                    "Typical addresses — llama-server: http://HOST:8080/v1 · Ollama: http://HOST:11434/v1 · \
+                     vLLM: http://HOST:8000/v1 · LM Studio: http://HOST:1234/v1. Articles go to this address \
+                     when you approve a run; use https or a trusted network for a server on another computer.",
+                )
+                .size(SIZE_SMALL)
+                .style(style::body),
+            )
+            .padding(SPACE[2])
+            .style(style::card),
+        );
+        col.into()
     }
 }
 

@@ -1,7 +1,7 @@
 //! The AI defaults in effect: saved ones, or detected from what is set up
 //! (a ChatGPT sign-in first, then any stored API key).
 
-use juttusihti_core::ai_defaults::AiDefaults;
+use juttusihti_core::ai_defaults::{AiDefaults, LocalServer};
 use juttusihti_core::pricing::{Billing, Provider};
 
 use crate::db::Db;
@@ -37,9 +37,28 @@ pub async fn save(db: &Db, d: AiDefaults) -> Result<(), String> {
     db.call(move |s| s.set_ai_defaults(&d)).await
 }
 
+/// An endpoint for the local server in `local`, with its optional key from
+/// the secret store.
+pub async fn local_endpoint(local: &LocalServer) -> Result<juttusihti_ai::Endpoint, String> {
+    if local.base_url.trim().is_empty() {
+        return Err("Set the local server's address under AI setup first.".into());
+    }
+    let key = blocking(|| secrets::get(Provider::Local)).await?;
+    juttusihti_ai::Endpoint::local(&local.base_url, key).map_err(|e| e.to_string())
+}
+
 /// Whether the credentials for `d` are in place; the error says what to do.
 pub async fn readiness(d: &AiDefaults) -> Result<(), String> {
     let provider = d.provider;
+    if provider == Provider::Local {
+        juttusihti_ai::normalize_local_base(&d.local.base_url)
+            .map_err(|e| format!("Set the local server's address under AI setup first. {e}"))?;
+        if d.model().is_empty() {
+            return Err("Enter the local server's model name under AI setup first.".into());
+        }
+        // The API key is optional for a local server.
+        return Ok(());
+    }
     match d.billing() {
         Billing::ChatGptPlan => match plan::status().await? {
             Some(_) => Ok(()),
@@ -56,6 +75,10 @@ pub async fn readiness(d: &AiDefaults) -> Result<(), String> {
 pub fn describe(d: &AiDefaults) -> String {
     match d.billing() {
         Billing::ChatGptPlan => format!("{} on your ChatGPT plan", d.model()),
+        Billing::ApiKey if d.provider == Provider::Local => {
+            let host = juttusihti_ai::normalize_local_base(&d.local.base_url).unwrap_or_default();
+            format!("{} on your server {host} (no API cost)", d.model())
+        }
         Billing::ApiKey => format!("{} · {}", d.provider, d.model()),
     }
 }

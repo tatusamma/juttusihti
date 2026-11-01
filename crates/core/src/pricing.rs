@@ -20,17 +20,29 @@ pub enum Provider {
     Anthropic,
     Openai,
     Gemini,
+    /// A server the user runs or chooses that speaks the OpenAI
+    /// chat-completions API (llama.cpp `llama-server`, Ollama, vLLM,
+    /// LM Studio). It has no per-token price.
+    Local,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Anthropic, Provider::Openai, Provider::Gemini];
+    pub const ALL: [Provider; 4] = [Provider::Anthropic, Provider::Openai, Provider::Gemini, Provider::Local];
+    /// The hosted providers with official endpoints, price lists and
+    /// recommended models.
+    pub const CLOUD: [Provider; 3] = [Provider::Anthropic, Provider::Openai, Provider::Gemini];
 
     pub fn label(self) -> &'static str {
         match self {
             Provider::Anthropic => "Anthropic Claude",
             Provider::Openai => "OpenAI",
             Provider::Gemini => "Google Gemini",
+            Provider::Local => "Local / OpenAI-compatible server",
         }
+    }
+
+    pub fn is_local(self) -> bool {
+        self == Provider::Local
     }
 }
 
@@ -120,6 +132,26 @@ impl Price {
             batch_permille: None,
             reasoning: true,
             source: "charged to your ChatGPT plan, no API cost".into(),
+            verified_on: None,
+            manual: false,
+        }
+    }
+
+    /// A local or self-hosted server has no per-token API cost: a known
+    /// zero, so estimates and budgets show $0 instead of an unknown price.
+    pub fn local(model: &str) -> Self {
+        let zero = Some(0);
+        Price {
+            provider: Provider::Local,
+            model: model.to_string(),
+            currency: "USD".into(),
+            valid_from: None,
+            valid_until: None,
+            rates: Rates { input: zero, cached_input: zero, cache_write: zero, output: zero },
+            long_context: None,
+            batch_permille: None,
+            reasoning: true,
+            source: "your own server, no API cost".into(),
             verified_on: None,
             manual: false,
         }
@@ -314,9 +346,15 @@ impl Catalog {
         self.entries.iter().filter(matches).find(|p| p.manual).or_else(|| self.entries.iter().find(matches))
     }
 
-    /// Distinct model ids known for a provider.
-    /// The price a run with `billing` is charged at.
+    /// The price a run with `billing` is charged at. Local servers are
+    /// always free; a ChatGPT plan is free for OpenAI only.
     pub fn price_for(&self, provider: Provider, model: &str, billing: Billing, day: NaiveDate) -> Option<Price> {
+        if provider == Provider::Local {
+            return match billing {
+                Billing::ApiKey => Some(Price::local(model)),
+                Billing::ChatGptPlan => None,
+            };
+        }
         match billing {
             Billing::ChatGptPlan if provider == Provider::Openai => Some(Price::chatgpt_plan(model)),
             Billing::ChatGptPlan => None,
@@ -324,6 +362,7 @@ impl Catalog {
         }
     }
 
+    /// Distinct model ids known for a provider.
     pub fn models(&self, provider: Provider) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in self.entries.iter().filter(|p| p.provider == provider) {
@@ -411,6 +450,16 @@ mod tests {
             c.lookup(Provider::Anthropic, "claude-opus-5-5", day("2026-10-25")).unwrap().rates.input,
             Some(1_000_000)
         );
+    }
+
+    #[test]
+    fn local_servers_cost_nothing() {
+        let c = Catalog::builtin();
+        let p = c.price_for(Provider::Local, "llama-3.3-8b", Billing::ApiKey, day("2026-10-25")).unwrap();
+        let u = Usage { input: 1_000_000, cached_input: 5, cache_write: 7, output: 100_000 };
+        assert_eq!(p.cost(&u, false), Some(0), "a known zero, not an unknown price");
+        assert!(c.price_for(Provider::Local, "m", Billing::ChatGptPlan, day("2026-10-25")).is_none());
+        assert!(c.models(Provider::Local).is_empty(), "no hardcoded local models");
     }
 
     #[test]

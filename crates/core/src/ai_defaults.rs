@@ -91,8 +91,30 @@ pub const RECOMMENDED: [Recommendation; 6] = [
     },
 ];
 
-pub fn recommended(provider: Provider, tier: Tier) -> &'static Recommendation {
-    RECOMMENDED.iter().find(|r| r.provider == provider && r.tier == tier).expect("every provider has every tier")
+/// The recommended model for a hosted provider. A local server has none:
+/// its model is whatever the user loaded there.
+pub fn recommended(provider: Provider, tier: Tier) -> Option<&'static Recommendation> {
+    RECOMMENDED.iter().find(|r| r.provider == provider && r.tier == tier)
+}
+
+/// A local or self-hosted server speaking the OpenAI chat-completions API.
+/// The address is not secret and is kept with the defaults; an optional API
+/// key goes to the OS secret store like the other keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalServer {
+    /// Base URL up to and including the API version, e.g.
+    /// `http://192.168.1.20:8080/v1`.
+    #[serde(default)]
+    pub base_url: String,
+    /// Model name as the server knows it (`llama3.1:8b`, `Qwen/Qwen3-8B`).
+    #[serde(default)]
+    pub model: String,
+}
+
+impl LocalServer {
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty() && !self.model.trim().is_empty()
+    }
 }
 
 /// Which tier suits each task, shown next to the task.
@@ -129,6 +151,10 @@ pub struct AiDefaults {
     /// Provider requests in flight at once.
     #[serde(default = "default_parallel_requests")]
     pub parallel_requests: u32,
+    /// The local / OpenAI-compatible server, used when `provider` is
+    /// [`Provider::Local`].
+    #[serde(default)]
+    pub local: LocalServer,
 }
 
 fn default_parallel_requests() -> u32 {
@@ -148,14 +174,22 @@ impl Default for AiDefaults {
             max_tokens: Some(500_000),
             clickbait: ClickbaitCheck::default(),
             parallel_requests: DEFAULT_PARALLEL_REQUESTS,
+            local: LocalServer::default(),
         }
     }
 }
 
 impl AiDefaults {
-    /// The model to use: an explicit choice, else the tier's recommendation.
+    /// The model to use: an explicit choice, else the tier's recommendation
+    /// (for a local server, the model set for it).
     pub fn model(&self) -> String {
-        self.model.clone().unwrap_or_else(|| recommended(self.provider, self.tier).model.to_string())
+        if let Some(m) = &self.model {
+            return m.clone();
+        }
+        match recommended(self.provider, self.tier) {
+            Some(r) => r.model.to_string(),
+            None => self.local.model.trim().to_string(),
+        }
     }
 
     /// Only OpenAI can be billed to a ChatGPT plan.
@@ -214,11 +248,12 @@ mod tests {
         for r in RECOMMENDED {
             assert!(catalog.lookup(r.provider, r.model, day).is_some(), "{} has no price", r.model);
         }
-        for p in Provider::ALL {
+        for p in Provider::CLOUD {
             for t in Tier::ALL {
-                assert_eq!(recommended(p, t).provider, p);
+                assert_eq!(recommended(p, t).unwrap().provider, p);
             }
         }
+        assert!(recommended(Provider::Local, Tier::Fast).is_none(), "no hardcoded local models");
     }
 
     #[test]
@@ -247,6 +282,23 @@ mod tests {
         assert_eq!(d.model(), "gemini-3.5-flash-lite");
         d.model = Some("custom".into());
         assert_eq!(d.model(), "custom");
+        let local = AiDefaults {
+            provider: Provider::Local,
+            local: LocalServer { base_url: "http://192.168.1.20:8080/v1".into(), model: " qwen3:8b ".into() },
+            ..Default::default()
+        };
+        s.set_ai_defaults(&local).unwrap();
+        assert_eq!(s.ai_defaults().unwrap(), local);
+        assert_eq!(local.model(), "qwen3:8b");
+        assert_eq!(local.billing(), Billing::ApiKey);
+        assert!(local.local.is_configured());
+        // Settings saved before local servers existed still load.
+        s.set_setting(
+            "ai_defaults",
+            r#"{"provider":"gemini","tasks":["labels"],"max_articles":5,"max_cost":null,"max_tokens":null}"#,
+        )
+        .unwrap();
+        assert_eq!(s.ai_defaults().unwrap().local, LocalServer::default());
         s.set_setting("ai_defaults", "{not json").unwrap();
         assert_eq!(s.ai_defaults().unwrap(), AiDefaults::default(), "corrupt settings fall back");
     }

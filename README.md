@@ -8,7 +8,7 @@
 
 Juttusihti reads RSS, Atom and JSON feeds offline with fast full-text search, and turns your
 news into research: labels, people and places, story threads, timelines, maps and reports.
-AI analysis (OpenAI, Anthropic, Gemini) is optional and only ever starts when you ask for it,
+AI analysis (OpenAI, Anthropic, Gemini, or your own OpenAI-compatible server) is optional and only ever starts when you ask for it,
 after showing what it will send and what it will cost. Written in Rust with
 [Iced](https://iced.rs); SQLite is the source of truth and DuckDB runs the reports.
 
@@ -23,8 +23,9 @@ after showing what it will send and what it will cost. Written in Rust with
   and `NEAR`, plus a label filter next to the search box.
 - **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
   for a date range. Every run shows a local estimate of articles, tokens and cost, needs your
-  consent and stays within spending limits. Sign in with ChatGPT, or use your own OpenAI,
-  Anthropic or Gemini API key (kept in the system's secret store).
+  consent and stays within spending limits. Sign in with ChatGPT, use your own OpenAI,
+  Anthropic or Gemini API key (kept in the system's secret store), or run a model on your own
+  OpenAI-compatible server (llama.cpp, Ollama, vLLM, LM Studio) at no API cost.
 - **Clickbait headlines rewritten** from the article text, shown with an AI tag and the
   original underneath. With an OpenAI API key, a cheap clickbait check picks out the headlines
   worth rewriting first.
@@ -172,6 +173,27 @@ to the rewriting model. Ratings are cached, so a new threshold costs nothing. Tu
 or change the threshold on **AI setup**. On a ChatGPT plan, or with Claude or Gemini, headlines
 are rewritten in one step without the check.
 
+**Local or self-hosted server.** Instead of a hosted provider you can use any server that
+speaks the OpenAI chat-completions API, on this computer or another one on your network. On
+**AI setup → Local or self-hosted server**, enter:
+
+- **Server address**: the base URL up to `/v1`, for example `http://192.168.1.20:8080/v1`.
+  An address without a path gets `/v1`; a pasted `…/v1/chat/completions` URL is trimmed.
+  Typical ports: llama.cpp `llama-server` 8080, Ollama 11434, vLLM 8000, LM Studio 1234.
+- **Model**: the name the server knows the model by (`qwen3:8b` on Ollama,
+  `Qwen/Qwen3-8B` on vLLM, the loaded model on LM Studio). **Check server** asks the server
+  for its models (`GET /v1/models`, no articles sent) and lets you pick one.
+- **API key** (optional): only if the server was started with one, such as
+  `llama-server --api-key` or `vllm serve --api-key`. It is kept in the secret store and sent
+  as `Authorization: Bearer`.
+
+Then choose **Local / OpenAI-compatible server** as the provider. Estimates still show tokens
+and a cost of $0, and every run still needs your consent. Juttusihti asks for JSON-schema
+output (`response_format: json_schema`); if the server refuses it, the schema is put in the
+prompt instead, and every reply is validated the same way either way. There is no official
+URL for this provider: requests only ever go to the address you entered. Use `https` or a
+trusted network when the server is on another computer, since articles are sent to it.
+
 **API credit.** An API key is billed to the provider account behind it, which needs credit; a
 ChatGPT plan is not. If your OpenAI API account runs out of credit, the run pauses at once and
 says so instead of retrying. Add credit on
@@ -236,7 +258,7 @@ Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 | --- | --- | --- | --- |
 | `crates/core` (`juttusihti-core`) | Domain model, SQLite schema + migrations, FTS5 search, feed parsing, OPML, discovery, research data model | no | no |
 | `crates/fetch` (`juttusihti-fetch`) | HTTP fetching: conditional requests, timeouts, bounded retries, size limits, discovery | yes | no |
-| `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
+| `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini / OpenAI-compatible (local) clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
 | `crates/bench` | Benchmarks at 10k/100k/1M articles (BENCHMARKS.md) | no | no |
@@ -377,7 +399,15 @@ tokenizer, or AI-assisted query expansion.
     - Anthropic Messages API (`anthropic-version: 2026-10-21`, `output_config.format`).
     - OpenAI Responses API (`text.format` with a strict JSON schema; `store: false`).
     - Gemini `generateContent` (`responseMimeType` + `responseJsonSchema`).
-    - Provider token counting is implemented for all three.
+    - Local or self-hosted OpenAI-compatible servers (llama.cpp `llama-server`, Ollama, vLLM,
+      LM Studio): chat completions at the user's base URL with `response_format: json_schema`;
+      if the server rejects that (400/415/422/500/501), the request is repeated once with the
+      schema in the system prompt, and later requests go straight to prompting once that
+      worked. Leading `<think>` blocks of reasoning models are dropped. Model names may
+      contain `:`, `/` and `@`. Priced as a known zero. Tested against a fake local server
+      only; **not tried against the real servers yet**.
+    - Provider token counting is implemented for the three hosted providers; local servers
+      have no standard counter, so estimates use the local approximation.
   - Runner, per approved session:
     - Tasks: label, entity (with location roles) and relevance extraction in batches of 20;
       validation of locally generated story pairs; a hierarchical summary with cited article ids.

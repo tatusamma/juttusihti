@@ -18,6 +18,8 @@ fn account(p: Provider) -> &'static str {
         Provider::Anthropic => "anthropic-api-key",
         Provider::Openai => "openai-api-key",
         Provider::Gemini => "gemini-api-key",
+        // Optional: only for servers started with a key (`--api-key`).
+        Provider::Local => "local-server-api-key",
     }
 }
 
