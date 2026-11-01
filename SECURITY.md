@@ -70,7 +70,7 @@ Valuables:
    on OS account protection.
 4. **Dependency advisories:** see the next section.
 
-### Dependency audit (`cargo audit`, RustSec database of 2026-10-26)
+### Dependency audit (`cargo audit`, RustSec database of 2026-11-01)
 
 No vulnerabilities in 645 crates. Warnings, all from transitive dependencies:
 
