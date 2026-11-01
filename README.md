@@ -1,11 +1,85 @@
 # Juttusihti
 
-A local-first RSS reader and news research desktop app written in Rust with Iced.
-SQLite is the source of truth and DuckDB runs analytics. Optional AI-assisted research
-(OpenAI, Anthropic, Gemini) only ever starts when you ask for it, after showing what it will
-send and what it will cost.
+[![CI](https://github.com/tero-k/juttusihti/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/tero-k/juttusihti/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tero-k/juttusihti?include_prereleases&sort=semver)](https://github.com/tero-k/juttusihti/releases)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
+**A local-first RSS reader and news research desktop app for Windows and Linux.**
+
+Juttusihti reads RSS, Atom and JSON feeds offline with fast full-text search, and turns your
+news into research: labels, people and places, story threads, timelines, maps and reports.
+AI analysis (OpenAI, Anthropic, Gemini) is optional and only ever starts when you ask for it,
+after showing what it will send and what it will cost. Written in Rust with
+[Iced](https://iced.rs); SQLite is the source of truth and DuckDB runs the reports.
 
 ![Reading an article](docs/screenshots/reader.png)
+
+## Features
+
+- **Reader**: subscribe by site or feed address (feeds are discovered for you), folders, OPML
+  import and export, unread and saved views, scheduled refresh, offline reading and keyboard
+  shortcuts.
+- **Search**: local FTS5 full-text search with phrases, `OR`, `NOT`, prefixes, field filters
+  and `NEAR`, plus a label filter next to the search box.
+- **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
+  for a date range. Every run shows a local estimate of articles, tokens and cost, needs your
+  consent and stays within spending limits. Sign in with ChatGPT, or use your own OpenAI,
+  Anthropic or Gemini API key (kept in the system's secret store).
+- **Clickbait headlines rewritten** from the article text, shown with an AI tag and the
+  original underneath.
+- **Review**: everything AI produces is a suggestion until you confirm it.
+- **Reports**: volume per source, topics, labels, co-occurring entities, relevance and AI cost,
+  with CSV export.
+- **Timeline, map and relationship map** of stories, places, people and organisations.
+  OpenStreetMap tiles are opt-in.
+- **Calm interface**: an icon rail, warm paper colours with amber accents in light and dark
+  themes, a CPU renderer for low memory use, and a built-in Help screen (**F1**).
+- **Private by default**: all data is in one SQLite database on your computer. Nothing is sent
+  anywhere you did not ask for.
+
+## Download
+
+Get the latest version from [GitHub Releases](https://github.com/tero-k/juttusihti/releases).
+
+| System | File | Install |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `juttusihti_X.Y.Z_x64-setup.exe` | Run it. Installs for the current user; no administrator rights needed. |
+| Windows, portable | `juttusihti-X.Y.Z-x86_64-windows.zip` | Unzip and run `juttusihti.exe`. |
+| Debian, Ubuntu 22.04+ | `juttusihti_X.Y.Z_amd64.deb` | `sudo apt install ./juttusihti_X.Y.Z_amd64.deb` |
+| Other Linux (x86_64) | `juttusihti_X.Y.Z_x86_64.AppImage` | `chmod +x` it and run it. |
+| Linux, plain binary | `juttusihti-X.Y.Z-x86_64-linux.tar.gz` | Unpack and run `juttusihti`; needs the libraries listed under [Build from source](#build-from-source). |
+
+Windows files are code-signed. Every release lists SHA-256 checksums in
+`SHA256SUMS-linux.txt` and `SHA256SUMS-windows.txt`:
+
+```sh
+sha256sum -c SHA256SUMS-linux.txt --ignore-missing
+```
+
+Linux packages are built by GitHub Actions and carry
+[build provenance attestations](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
+
+```sh
+gh attestation verify juttusihti_X.Y.Z_amd64.deb --repo tero-k/juttusihti
+```
+
+## Build from source
+
+Requirements: Rust 1.85+ (2024 edition) and a C/C++ toolchain, because SQLite and DuckDB are
+bundled and compiled from source. On Windows this means MSVC (VS 2022 Build Tools); CMake and
+NASM are not needed. A first build of bundled DuckDB takes several minutes.
+
+On Linux, install the development libraries first:
+- Debian/Ubuntu: `libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev
+  libxi-dev libxrandr-dev libfontconfig1-dev libfreetype-dev`
+- Fedora: `dbus-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXi-devel
+  libXrandr-devel fontconfig-devel freetype-devel`
+
+```sh
+git clone https://github.com/tero-k/juttusihti.git
+cd juttusihti
+cargo run --release -p juttusihti
+```
 
 ## Using Juttusihti
 
@@ -136,9 +210,9 @@ server and its cache.
 All data is in one SQLite database on this computer; its path is shown at the bottom of
 Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 
-# Development
+## Development
 
-## Workspace
+### Workspace
 
 | Crate | Purpose | Network | AI |
 | --- | --- | --- | --- |
@@ -147,34 +221,43 @@ Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 | `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
+| `crates/bench` | Benchmarks at 10k/100k/1M articles (BENCHMARKS.md) | no | no |
 
-## Build and run
+### Build, test and run
+
+See [Build from source](#build-from-source) for requirements.
 
 ```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace          # no network or paid API needed
 cargo run -p juttusihti         # data in the OS data dir; override with JUTTUSIHTI_DATA_DIR
-cargo build -p juttusihti --release
 ```
 
-Requirements: Rust 1.85+ (2024 edition) and a C/C++ toolchain, because SQLite and DuckDB are
-bundled and compiled from source. On Windows this means MSVC (VS 2022 Build Tools); CMake and
-NASM are not needed. A first build of bundled DuckDB takes several minutes. Debug info is
-turned off for dependencies (`[profile.dev.package."*"]`): with it on, the debug `target/`
-grew past 16 GB.
+Debug info is turned off for dependencies (`[profile.dev.package."*"]`): with it on, the debug
+`target/` grew past 16 GB.
 
 Logging: `JUTTUSIHTI_LOG=debug`. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
 Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
-Linux build dependencies:
-- Debian/Ubuntu: `libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev
-  libxi-dev libxrandr-dev libfontconfig1-dev libfreetype-dev`
-- Fedora: `dbus-devel libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel libXi-devel
-  libXrandr-devel fontconfig-devel freetype-devel`
+### CI and releases
+
+- **CI** (`.github/workflows/ci.yml`, on pushes to `master` and pull requests): `cargo fmt`,
+  clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows, and `cargo audit`.
+- **Release** (`.github/workflows/release.yml`, on `v*` tags): runs CI, builds the Linux
+  `.deb`, AppImage and tarball with checksums and provenance attestations, and puts them on a
+  **draft** GitHub Release. The Windows installer is built and signed locally with
+  `packaging/release-windows.ps1` and added to the draft, which is then published by hand.
+  Step by step: [RELEASING.md](RELEASING.md).
+- **Dependabot** proposes Cargo updates weekly and GitHub Actions updates monthly. Actions are
+  pinned by commit SHA.
 
 ### Packages
 
+Unsigned local packages, for testing:
+
 ```sh
-cargo install cargo-packager --locked
+cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
 ```
@@ -183,8 +266,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.
   Fedora 44 instead, the binary needs glibc 2.43 and will not run on Ubuntu 24.04 (glibc 2.39).
 - **`name` is set in `Packager.toml` on purpose.** Without it, cargo-packager 0.11.8 tries to
   change directory into the config file.
-- **CI:** `.github/workflows/ci.yml` runs fmt, clippy (`-D warnings`), tests and `cargo audit`
-  on Windows and Ubuntu 22.04. Tags `v*` also build the packages.
+- Packages land in `target/packages/`.
 
 ## Milestone 0 findings (verified 2026-10-25, Windows 11 x64, rustc 1.99.1, MSVC 14.44)
 
@@ -230,8 +312,13 @@ tokenizer, or AI-assisted query expansion.
   scheduled refresh (interval in Settings), offline reading, OPML import/export, FTS5 search
   with highlighting, ETag/Last-Modified conditional requests, timeouts, bounded retries,
   deduplication, browser hand-off, migrations, retention (Settings; at least 7 days, applied at
-  startup), keyboard shortcuts (j/k, s, m, o, `/`, Ctrl+F, Ctrl+R, n/p), and a dark/light theme
-  that is remembered between runs.
+  startup), keyboard shortcuts (j/k, s, m, o, `/`, Ctrl+F, Ctrl+R, n/p, F1), and a dark/light
+  theme that is remembered between runs. A label filter next to the search box narrows the list
+  to one confirmed label, with or without search text.
+- **Calm UI**: done. An icon rail replaces the sidebar, with a feeds dropdown above the article
+  list; warm paper colours with amber accents and the Lucide icon font; the AI panel is a
+  popover that can close mid-run; every screen shares the same buttons, fields and muted
+  visualisation palette. An in-app Help screen (? in the rail, or F1) holds the user guide.
 - **M2 Research data model**: store API done, with tests. Covers labels (normalization,
   similarity checks, merge, bulk decisions), entities with aliases, events, typed relationships,
   locations with coordinate provenance, annotations, AI suggestions with provenance, sessions
@@ -355,7 +442,11 @@ tokenizer, or AI-assisted query expansion.
       "Place on map", which records `coordinate_source = user` and confirms the place.
       Ambiguous places are flagged.
     - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
+    - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
+      tiles are clipped to the map area with the CPU renderer too.
 - **M8 Distribution**: done, except checks on real Linux desktops.
+  - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
+    onto a draft release, and the signed Windows installer is added locally (RELEASING.md).
   - Benchmarks at 10k/100k/1M and the tuning they led to: BENCHMARKS.md.
   - Security review and `cargo audit`: SECURITY.md (no vulnerabilities; one unsound transitive
     crate through Iced, documented).
@@ -366,7 +457,8 @@ tokenizer, or AI-assisted query expansion.
   - `.deb` and AppImage built on Ubuntu 22.04: the `.deb` installs with apt on a clean Ubuntu
     24.04 with all libraries resolved, and the AppImage runs on Fedora 44.
   - Not verified: native GNOME/KDE sessions on real hardware (WSLg's GPU passthrough made wgpu
-    fall back), the OS secret store on Linux desktops, code signing (no certificate), and
+    fall back), the OS secret store on Linux desktops, code signing with a real certificate
+    (`packaging/release-windows.ps1` was only run with a stand-in signing command), and
     rendering by eye (the test machine's screen was locked throughout).
 
 ## Invariants enforced in code and tests
@@ -383,3 +475,29 @@ tokenizer, or AI-assisted query expansion.
 - An analysis cannot reach `running` without an estimate and an approval step. Selecting a
   time range never sends anything anywhere: scope, dedup, cache lookup, candidate pairs and
   estimates are all computed locally.
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome in
+[GitHub Issues](https://github.com/tero-k/juttusihti/issues). Before opening a pull request,
+run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace`; CI runs the same checks. Keep the invariants above intact, and
+update the in-app Help (`crates/app/src/help.rs`) and this README when you change how
+something is used.
+
+## Security
+
+Please report vulnerabilities privately, not in public issues: see [SECURITY.md](SECURITY.md),
+which also holds the threat model and the latest dependency audit.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this work, as defined in the Apache-2.0 license, shall be dual licensed as above, without
+any additional terms or conditions.
+
+The bundled [Lucide](https://lucide.dev) icon font is under the ISC license, with some icons
+under MIT (`crates/app/assets/LUCIDE-LICENSE.txt`). Map data © OpenStreetMap contributors.

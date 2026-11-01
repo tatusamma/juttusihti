@@ -1,0 +1,11 @@
+name: Linux build dependencies
+description: Installs the system libraries the app needs to build on Debian/Ubuntu.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev \
+          libxrandr-dev libfontconfig1-dev libfreetype-dev file

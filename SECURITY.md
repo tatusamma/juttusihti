@@ -1,8 +1,23 @@
-# Security review
+# Security
+
+## Reporting a vulnerability
+
+Please do not open a public issue. Report it privately through GitHub:
+**Security → Report a vulnerability** on
+[the repository](https://github.com/tero-k/juttusihti/security/advisories/new). Include the
+version, your OS, and steps to reproduce. Fixes are released as a new version, and the
+advisory is published once a fix is out.
+
+Security fixes go to the latest release only.
+
+Release files can be checked against `SHA256SUMS-*.txt` on the release, and the Linux packages
+with `gh attestation verify` (see README). Windows files are Authenticode-signed.
+
+## Security review
 
 Review date: 2026-10-25. Scope: all crates at the commit that adds this file.
 
-## Threat model
+### Threat model
 
 Untrusted inputs:
 - Feed documents and the web pages used for feed discovery (any server the user subscribes to,
@@ -18,7 +33,7 @@ Valuables:
 - the user's reading and research privacy
 - money spent on paid APIs
 
-## Controls and where they are tested
+### Controls and where they are tested
 
 | Risk | Control | Test |
 |---|---|---|
@@ -42,7 +57,7 @@ Valuables:
 | Data loss | AI never modifies source article columns. Retention never deletes saved, annotated or researched articles and has a 7-day minimum. Filtering is a view, never a deletion. | `retention_keeps_saved_and_researched_articles`, `hiding_dismissed_articles_is_reversible_and_needs_confirmation` |
 | Path traversal | Cache paths are built from integers only; files are chosen through OS dialogs. | — |
 
-## Accepted risks and follow-ups
+### Accepted risks and follow-ups
 
 1. **Feeds can point at the local network.** A subscribed feed, an OPML import or a redirect
    can make the app send GET requests to private addresses (for example a router's web page).
@@ -55,7 +70,7 @@ Valuables:
    on OS account protection.
 4. **Dependency advisories:** see the next section.
 
-## Dependency audit (`cargo audit`, RustSec database of 2026-10-26)
+### Dependency audit (`cargo audit`, RustSec database of 2026-10-26)
 
 No vulnerabilities in 645 crates. Warnings, all from transitive dependencies:
 

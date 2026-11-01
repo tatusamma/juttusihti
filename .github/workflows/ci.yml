@@ -3,77 +3,66 @@ name: CI
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
+  # The release workflow runs these checks before it builds packages.
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
   test:
     strategy:
       fail-fast: false
       matrix:
-        # Ubuntu 22.04 (glibc 2.35) keeps Linux builds runnable on older distros.
-        os: [windows-latest, ubuntu-22.04]
+        # Ubuntu 22.04 (glibc 2.35) is also what the Linux release is built on.
+        os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev \
-            libxcursor-dev libxi-dev libxrandr-dev libfontconfig1-dev libfreetype-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+          persist-credentials: false
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Pull requests reuse master's cache but do not write their own.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Paid live API tests and the network probe stay ignored.
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit
-
-  package:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, audit]
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            formats: nsis
-          - os: ubuntu-22.04
-            formats: deb,appimage
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev \
-            libxcursor-dev libxi-dev libxrandr-dev libfontconfig1-dev libfreetype-dev file
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-packager --locked
-      - run: cargo packager --release -f ${{ matrix.formats }} -c Packager.toml
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: 1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: packages-${{ runner.os }}
-          path: |
-            target/packages/*.exe
-            target/packages/*.deb
-            target/packages/*.AppImage
