@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::image::Handle;
-use iced::widget::{button, canvas as canvas_widget, column, container, pick_list, row, rule, scrollable, text};
+use iced::widget::{Space, button, canvas as canvas_widget, column, container, pick_list, row, rule, scrollable, text};
 use iced::{Center, Color, Element, Fill, Length, Point, Rectangle, Renderer, Size, Task as Cmd, Theme, Vector};
 use juttusihti_core::analysis::SessionSummary;
 use juttusihti_core::review::LocationRow;
@@ -323,9 +323,14 @@ impl State {
 
         let program = MapCanvas { state: self };
         let canvas = canvas_widget(program).width(Fill).height(Fill);
+        // Tiles overhang the canvas edges, and the CPU renderer clips images only to the enclosing
+        // layer. A clipping stack draws every child after the first in a layer of its own bounded
+        // by the map, so the tiles sit above an empty base; otherwise they paint over the rail,
+        // the header and the places list.
         let mut map = if self.tiles_enabled {
             let markers = canvas_widget(MapMarkers { state: self }).width(Fill).height(Fill);
-            column![iced::widget::stack![canvas, markers]]
+            let base = Space::new().width(Fill).height(Fill);
+            column![iced::widget::stack![base, canvas, markers].clip(true)]
         } else {
             column![canvas]
         };

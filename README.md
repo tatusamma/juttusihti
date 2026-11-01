@@ -121,6 +121,7 @@ week or month buckets, and export any report as CSV.
   lines are confirmed, dashed lines are AI suggestions.
 
 ![Timeline](docs/screenshots/timeline.png)
+![Map](docs/screenshots/map.png)
 
 ### Settings and your data
 
