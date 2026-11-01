@@ -80,7 +80,8 @@ pub fn is_web_url(s: &str) -> bool {
     url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
-fn bounded(mut s: String) -> String {
+/// Truncates text to [`MAX_FIELD_CHARS`] bytes at a character boundary.
+pub(crate) fn bounded(mut s: String) -> String {
     if s.len() > MAX_FIELD_CHARS {
         let mut cut = MAX_FIELD_CHARS;
         while !s.is_char_boundary(cut) {

@@ -114,6 +114,11 @@ impl Store {
         )
     }
 
+    /// Turns full-article fetching on or off for a feed.
+    pub fn set_feed_full_text(&self, id: FeedId, on: bool) -> Result<()> {
+        expect_one(self.conn.execute("UPDATE feeds SET fetch_full_text = ?1 WHERE id = ?2", params![on, id])?)
+    }
+
     /// Removes a subscription and its articles (and their research records).
     pub fn remove_feed(&self, id: FeedId) -> Result<()> {
         expect_one(self.conn.execute("DELETE FROM feeds WHERE id = ?1", [id])?)
@@ -265,11 +270,13 @@ impl Store {
             .ok_or(Error::NotFound)
     }
 
-    /// Plain-text body for display: content if present, else the summary.
+    /// Plain-text body for display: text extracted from the article page if
+    /// it was fetched, else the feed's content, else its summary.
     pub fn article_text(&self, id: ArticleId) -> Result<String> {
         self.conn
             .query_row(
-                "SELECT COALESCE(NULLIF(content_text, ''), summary_text, '') FROM articles WHERE id = ?1",
+                "SELECT COALESCE(NULLIF(e.text, ''), NULLIF(a.content_text, ''), a.summary_text, '')
+                 FROM articles a LEFT JOIN article_extracts e ON e.article_id = a.id WHERE a.id = ?1",
                 [id],
                 |r| r.get(0),
             )
@@ -382,7 +389,8 @@ impl Store {
     }
 }
 
-const FEED_COLS: &str = "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error";
+const FEED_COLS: &str =
+    "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error, fetch_full_text";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
@@ -395,6 +403,7 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         last_modified: r.get(6)?,
         last_fetched_at: r.get(7)?,
         last_error: r.get(8)?,
+        fetch_full_text: r.get(9)?,
     })
 }
 

@@ -1,10 +1,12 @@
 //! HTTP fetching for feeds: conditional requests (ETag / Last-Modified),
 //! timeouts, bounded retries with backoff, response size limits and
-//! website feed discovery.
+//! website feed discovery. [`article`] fetches article pages for feeds
+//! with full-article text switched on.
 //!
 //! Parsing and storage stay in `juttusihti-core`; [`apply`] glues a fetch
 //! outcome onto the store.
 
+pub mod article;
 pub mod tiles;
 
 use std::time::Duration;
@@ -29,6 +31,10 @@ pub enum FetchError {
     Status(StatusCode),
     #[error("response is larger than {0} bytes")]
     TooLarge(usize),
+    #[error("not fetched: {0}")]
+    Blocked(String),
+    #[error("not an HTML page ({0})")]
+    NotHtml(String),
     #[error("{0}")]
     Core(#[from] juttusihti_core::Error),
 }

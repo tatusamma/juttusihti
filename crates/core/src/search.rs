@@ -42,6 +42,14 @@ impl Column {
             Column::Author => "author",
         }
     }
+    /// FTS5 column filter. `content:` also covers text fetched from the
+    /// article page, which is the full version of the same body.
+    fn fts_filter(&self) -> &'static str {
+        match self {
+            Column::Content => "{content_text extracted_text}",
+            c => c.fts_name(),
+        }
+    }
     fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "title" | "otsikko" => Some(Column::Title),
@@ -147,7 +155,7 @@ pub fn describe(node: &Node) -> String {
 }
 
 fn col_prefix(column: &Option<Column>) -> String {
-    column.as_ref().map(|c| format!("{} : ", c.fts_name())).unwrap_or_default()
+    column.as_ref().map(|c| format!("{} : ", c.fts_filter())).unwrap_or_default()
 }
 
 fn quote(s: &str) -> String {
@@ -522,7 +530,8 @@ fn count_capped(conn: &rusqlite::Connection, from_where: &str, params: &[Value],
     Ok(if n > cap { (cap, false) } else { (n, true) })
 }
 
-const BM25: &str = "bm25(articles_fts, 10.0, 3.0, 1.0, 2.0)";
+/// Column weights: title, summary, content, author, extracted article text.
+const BM25: &str = "bm25(articles_fts, 10.0, 3.0, 1.0, 2.0, 1.0)";
 
 /// Runs a search with pagination. Text queries are ranked by bm25 with
 /// title matches weighted highest; filter-only queries are newest first.
