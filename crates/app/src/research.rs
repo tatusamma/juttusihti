@@ -611,7 +611,9 @@ impl State {
                 style::segmented(ranges, self.current_range(), |d| Msg::QuickRange(d.unwrap_or(0))),
             ]
             .spacing(SPACE[1])
-            .align_y(Center),
+            .align_y(Center)
+            .wrap()
+            .vertical_spacing(SPACE[1]),
             style::check(self.require_date, "Only articles with a publication date").on_toggle(Msg::RequireDate),
         ]
         .spacing(SPACE[1]);

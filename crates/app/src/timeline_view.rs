@@ -198,7 +198,9 @@ impl State {
                 style::check(self.only_threads, "Only story threads").on_toggle(Msg::OnlyThreads),
             ]
             .spacing(SPACE[1])
-            .align_y(Center),
+            .align_y(Center)
+            .wrap()
+            .vertical_spacing(SPACE[1]),
             style::note(
                 "● published date   ○ no date in feed (fetch time)   lines join linked stories; the ringed dot \
                  is the first mention   ◆ events with a known date"

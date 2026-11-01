@@ -586,6 +586,19 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
                     frame.fill(&dot, Color { a: 0.35, ..color });
                     frame.stroke(&dot, Stroke::default().with_width(2.0).with_color(color));
                 }
+                if s.tiles_enabled {
+                    // Map tiles are images, and a canvas draws images above its
+                    // shapes, so the dot would be hidden. Text is drawn last.
+                    frame.fill_text(Text {
+                        content: if l.status == Status::Confirmed { "●" } else { "◯" }.into(),
+                        position: p,
+                        color,
+                        size: if selected { 30.0 } else { 24.0 }.into(),
+                        align_x: iced::alignment::Horizontal::Center.into(),
+                        align_y: iced::alignment::Vertical::Center,
+                        ..Text::default()
+                    });
+                }
                 if selected || s.zoom >= 7 {
                     frame.fill_text(Text {
                         content: l.place_name.clone(),
