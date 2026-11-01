@@ -322,7 +322,13 @@ impl State {
         }
 
         let program = MapCanvas { state: self };
-        let mut map = column![canvas_widget(program).width(Fill).height(Fill)];
+        let canvas = canvas_widget(program).width(Fill).height(Fill);
+        let mut map = if self.tiles_enabled {
+            let markers = canvas_widget(MapMarkers { state: self }).width(Fill).height(Fill);
+            column![iced::widget::stack![canvas, markers]]
+        } else {
+            column![canvas]
+        };
         if self.tiles_enabled {
             let link = |label: &'static str, url: &'static str| {
                 button(text(label).size(SIZE_SMALL).style(style::muted))
@@ -468,6 +474,57 @@ impl MapCanvas<'_> {
     }
 }
 
+impl MapCanvas<'_> {
+    /// One marker: a solid dot with a white edge when confirmed, a ring when
+    /// only suggested.
+    fn draw_dot(&self, frame: &mut Frame, size: Size, l: &LocationRow, data: &crate::style::DataColors) {
+        let Some((lat, lon)) = l.coordinates else { return };
+        let p = self.to_screen(size, lat, lon);
+        let color = match l.role {
+            LocationRole::Event => data.clay,
+            LocationRole::Publisher => data.amber,
+            LocationRole::EntityAssociated => data.sage,
+            LocationRole::Mentioned => data.slate,
+        };
+        let selected = self.state.selected == Some(l.id);
+        let dot = Path::circle(p, if selected { 8.0 } else { 6.0 });
+        if l.status == Status::Confirmed {
+            frame.fill(&dot, color);
+            frame.stroke(&dot, Stroke::default().with_width(1.5).with_color(Color::WHITE));
+        } else {
+            frame.fill(&dot, Color { a: 0.35, ..color });
+            frame.stroke(&dot, Stroke::default().with_width(2.0).with_color(color));
+        }
+    }
+}
+
+/// Markers drawn in a layer above the map tiles: a canvas draws images above
+/// its own shapes, so with tiles on the dots must live in a second canvas.
+struct MapMarkers<'a> {
+    state: &'a State,
+}
+
+impl canvas::Program<Msg> for MapMarkers<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _st: &(),
+        renderer: &Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        _c: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let data = crate::style::data_colors(theme);
+        let map = MapCanvas { state: self.state };
+        let mut frame = Frame::new(renderer, bounds.size());
+        for l in &self.state.locations {
+            map.draw_dot(&mut frame, bounds.size(), l, &data);
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 impl canvas::Program<Msg> for MapCanvas<'_> {
     type State = Interaction;
 
@@ -571,33 +628,9 @@ impl canvas::Program<Msg> for MapCanvas<'_> {
             for l in &s.locations {
                 let Some((lat, lon)) = l.coordinates else { continue };
                 let p = self.to_screen(size, lat, lon);
-                let color = match l.role {
-                    LocationRole::Event => data.clay,
-                    LocationRole::Publisher => data.amber,
-                    LocationRole::EntityAssociated => data.sage,
-                    LocationRole::Mentioned => data.slate,
-                };
                 let selected = s.selected == Some(l.id);
-                let dot = Path::circle(p, if selected { 8.0 } else { 6.0 });
-                if l.status == Status::Confirmed {
-                    frame.fill(&dot, color);
-                    frame.stroke(&dot, Stroke::default().with_width(1.5).with_color(Color::WHITE));
-                } else {
-                    frame.fill(&dot, Color { a: 0.35, ..color });
-                    frame.stroke(&dot, Stroke::default().with_width(2.0).with_color(color));
-                }
-                if s.tiles_enabled {
-                    // Map tiles are images, and a canvas draws images above its
-                    // shapes, so the dot would be hidden. Text is drawn last.
-                    frame.fill_text(Text {
-                        content: if l.status == Status::Confirmed { "●" } else { "◯" }.into(),
-                        position: p,
-                        color,
-                        size: if selected { 30.0 } else { 24.0 }.into(),
-                        align_x: iced::alignment::Horizontal::Center.into(),
-                        align_y: iced::alignment::Vertical::Center,
-                        ..Text::default()
-                    });
+                if !s.tiles_enabled {
+                    self.draw_dot(frame, size, l, &data);
                 }
                 if selected || s.zoom >= 7 {
                     frame.fill_text(Text {
