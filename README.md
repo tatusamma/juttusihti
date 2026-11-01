@@ -41,6 +41,8 @@ offline.
 ### Searching
 
 Type in the search bar at the top (or press `/`). Search is local full-text search.
+The label menu next to it narrows the list to articles with one label (confirmed labels only,
+not pending AI suggestions); it works with or without search text, and **Clear** resets both.
 
 | Query | Finds |
 | --- | --- |
