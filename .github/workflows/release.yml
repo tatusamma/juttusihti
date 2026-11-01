@@ -66,15 +66,19 @@ jobs:
         with:
           save-if: false
       - run: cargo install cargo-packager --version 0.11.8 --locked
+      - run: cargo install cargo-generate-rpm --version 0.21.1 --locked
       # Packager.toml's beforePackagingCommand then finds the binary up to date.
       - run: cargo build --release -p juttusihti --locked
       - run: cargo packager --release -f deb,appimage -c Packager.toml
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
+      # cargo-packager has no rpm format; the rpm is configured in crates/app/Cargo.toml.
+      # RPM versions cannot contain "-": 0.2.0-rc.1 becomes 0.2.0~rc.1, which sorts before 0.2.0.
+      - run: cargo generate-rpm -p crates/app -o target/packages/ -s "version = \"${VERSION//-/\~}\""
       - name: Tarball and checksums
         run: |
           mkdir dist
-          cp target/packages/*.deb target/packages/*.AppImage dist/
+          cp target/packages/*.deb target/packages/*.rpm target/packages/*.AppImage dist/
           stage="juttusihti-$VERSION-x86_64-linux"
           mkdir "$stage"
           cp target/release/juttusihti README.md LICENSE-MIT LICENSE-APACHE "$stage/"
@@ -88,6 +92,7 @@ jobs:
         with:
           subject-path: |
             dist/*.deb
+            dist/*.rpm
             dist/*.AppImage
             dist/*.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

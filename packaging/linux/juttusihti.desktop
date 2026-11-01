@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Juttusihti
+Comment=Local-first RSS reader and news research desktop app
+Exec=juttusihti
+Icon=juttusihti
+Terminal=false
+Categories=Network;News;

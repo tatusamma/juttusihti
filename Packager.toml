@@ -2,6 +2,7 @@
 #   cargo install cargo-packager --locked
 #   cargo packager --release -f nsis              (Windows)
 #   cargo packager --release -f deb,appimage      (Linux)
+# The Linux .rpm is not made here: see [package.metadata.generate-rpm] in crates/app/Cargo.toml.
 # Keep `version` in sync with the workspace version.
 # `name` must be set: cargo-packager 0.11.8 otherwise tries to chdir into this file.
 name = "juttusihti"

@@ -6,7 +6,7 @@ maintainer's machine, because the code-signing certificate never leaves it. Both
 
 | Where | What | How |
 | --- | --- | --- |
-| GitHub Actions (`release.yml`) | `.deb`, AppImage, `x86_64-linux.tar.gz`, `SHA256SUMS-linux.txt`, build provenance attestations | on a pushed `v*` tag |
+| GitHub Actions (`release.yml`) | `.deb`, `.rpm`, AppImage, `x86_64-linux.tar.gz`, `SHA256SUMS-linux.txt`, build provenance attestations | on a pushed `v*` tag |
 | Maintainer's Windows machine | signed NSIS installer, signed portable `x86_64-windows.zip`, `SHA256SUMS-windows.txt` | `packaging/release-windows.ps1` |
 
 ## Prerequisites (Windows machine)
@@ -84,7 +84,7 @@ gh release upload vX.Y.Z (Get-ChildItem dist -File).FullName --clobber
 ## 4. Review and publish
 
 1. Open the draft: `gh release view vX.Y.Z --web`.
-2. Check the files: `.deb`, `.AppImage`, `-x86_64-linux.tar.gz`, `SHA256SUMS-linux.txt`,
+2. Check the files: `.deb`, `.rpm`, `.AppImage`, `-x86_64-linux.tar.gz`, `SHA256SUMS-linux.txt`,
    `-setup.exe`, `-x86_64-windows.zip` and `SHA256SUMS-windows.txt`.
 3. Spot-check the checksums and provenance:
 

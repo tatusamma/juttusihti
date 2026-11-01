@@ -46,6 +46,7 @@ Get the latest version from [GitHub Releases](https://github.com/tero-k/juttusih
 | Windows 10/11 (x64) | `juttusihti_X.Y.Z_x64-setup.exe` | Run it. Installs for the current user; no administrator rights needed. |
 | Windows, portable | `juttusihti-X.Y.Z-x86_64-windows.zip` | Unzip and run `juttusihti.exe`. |
 | Debian, Ubuntu 22.04+ | `juttusihti_X.Y.Z_amd64.deb` | `sudo apt install ./juttusihti_X.Y.Z_amd64.deb` |
+| Fedora, openSUSE, RHEL 10 and other RPM systems | `juttusihti-X.Y.Z-1.x86_64.rpm` | `sudo dnf install ./juttusihti-X.Y.Z-1.x86_64.rpm` (openSUSE: `sudo zypper install`) |
 | Other Linux (x86_64) | `juttusihti_X.Y.Z_x86_64.AppImage` | `chmod +x` it and run it. |
 | Linux, plain binary | `juttusihti-X.Y.Z-x86_64-linux.tar.gz` | Unpack and run `juttusihti`; needs the libraries listed under [Build from source](#build-from-source). |
 
@@ -245,7 +246,7 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 - **CI** (`.github/workflows/ci.yml`, on pushes to `master` and pull requests): `cargo fmt`,
   clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows, and `cargo audit`.
 - **Release** (`.github/workflows/release.yml`, on `v*` tags): runs CI, builds the Linux
-  `.deb`, AppImage and tarball with checksums and provenance attestations, and puts them on a
+  `.deb`, `.rpm`, AppImage and tarball with checksums and provenance attestations, and puts them on a
   **draft** GitHub Release. The Windows installer is built and signed locally with
   `packaging/release-windows.ps1` and added to the draft, which is then published by hand.
   Step by step: [RELEASING.md](RELEASING.md).
@@ -260,12 +261,17 @@ Unsigned local packages, for testing:
 cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
+cargo install cargo-generate-rpm --version 0.21.1 --locked
+cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm
 ```
 
 - **Build Linux packages on Ubuntu 22.04** (glibc 2.35), for example in a container. Built on
   Fedora 44 instead, the binary needs glibc 2.43 and will not run on Ubuntu 24.04 (glibc 2.39).
 - **`name` is set in `Packager.toml` on purpose.** Without it, cargo-packager 0.11.8 tries to
   change directory into the config file.
+- **The `.rpm` comes from cargo-generate-rpm**, because cargo-packager has no rpm format. Its
+  files and run-time library requirements are in `[package.metadata.generate-rpm]` in
+  `crates/app/Cargo.toml`; it lands in `target/generate-rpm/`.
 - Packages land in `target/packages/`.
 
 ## Milestone 0 findings (verified 2026-10-25, Windows 11 x64, rustc 1.99.1, MSVC 14.44)
@@ -456,6 +462,9 @@ tokenizer, or AI-assisted query expansion.
     nothing behind.
   - `.deb` and AppImage built on Ubuntu 22.04: the `.deb` installs with apt on a clean Ubuntu
     24.04 with all libraries resolved, and the AppImage runs on Fedora 44.
+  - `.rpm` from cargo-generate-rpm: `rpm -U --test` resolves every requirement on Fedora 44.
+    Built on Ubuntu 22.04 it needs glibc 2.35, so RHEL 9 and its rebuilds (glibc 2.34) cannot
+    install it; they can use the AppImage.
   - Not verified: native GNOME/KDE sessions on real hardware (WSLg's GPU passthrough made wgpu
     fall back), the OS secret store on Linux desktops, code signing with a real certificate
     (`packaging/release-windows.ps1` was only run with a stand-in signing command), and
