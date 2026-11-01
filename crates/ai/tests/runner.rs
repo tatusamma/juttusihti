@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use juttusihti_ai::chatgpt::{AuthError, PendingSignIn, Registration, Servers, Session};
 use juttusihti_ai::{AiError, Approval, Auth, Client, Control, Endpoint, Progress, RetryPolicy, RunError, Runner};
-use juttusihti_core::analysis::{AnalysisConfig, Depth, Task};
+use juttusihti_core::analysis::{AnalysisConfig, ClickbaitCheck, Depth, Task};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::estimate;
 use juttusihti_core::pricing::{Billing, Catalog, Provider};
@@ -270,6 +270,8 @@ fn config(provider: Provider, tasks: &[Task]) -> AnalysisConfig {
         use_batch: false,
         billing: Default::default(),
         relevance_criteria: Some("työttömyysturva".into()),
+        clickbait: juttusihti_core::analysis::ClickbaitCheck::off(),
+        parallel_requests: 4,
     }
 }
 
@@ -938,4 +940,269 @@ async fn chatgpt_sign_in_registers_then_returns() {
     assert_eq!(result.unwrap_err(), AuthError::DifferentAccount);
     let (_, result) = sign_in(&m, &script, reg, "user-1", "openid profile email offline_access").await;
     assert_eq!(result.unwrap_err(), AuthError::NotEligible);
+}
+
+// ---- clickbait check -----------------------------------------------------------------
+
+/// Test headlines with how likely the fake classifier rates each one clickbait.
+const HEADLINES: &[(&str, Option<&str>, f64)] = &[
+    ("Et usko, mitä eduskunnassa tapahtui", Some("Eduskunta hyväksyi budjetin äänin 101–90."), 0.95),
+    ("Eduskunta hyväksyi ensi vuoden budjetin", Some("Äänestys päättyi lukemiin 101–90."), 0.05),
+    // Dramatic but factual.
+    ("Maanjäristys tuhosi kaupungin keskustan", Some("Järistyksen voimakkuus oli 7,1."), 0.20),
+    // Ambiguous, exactly at the threshold.
+    ("Onko tämä talven kylmin päivä?", Some("Lämpötila laski Sallassa -38 asteeseen."), 0.70),
+    // A quotation, just below it.
+    ("Pääministeri: \"Emme nosta veroja\"", Some("Pääministeri lupasi pitää verot ennallaan."), 0.69),
+    // No summary: no rewrite could be grounded, so it is never sent.
+    ("Tämä yksi asia muutti kaiken", None, 0.99),
+];
+
+/// The headlines above, plus a copy of the first under another address
+/// (same content, so it is rated once).
+fn seed_headlines() -> Arc<Mutex<Store>> {
+    let mut s = Store::open_in_memory().unwrap();
+    let f =
+        s.add_feed(&NewFeed { url: "https://f.example/rss".into(), title: "F".into(), ..Default::default() }).unwrap();
+    let mut entries: Vec<NewArticle> = HEADLINES
+        .iter()
+        .enumerate()
+        .map(|(i, (title, summary, _))| NewArticle {
+            guid: format!("h{i}"),
+            url: Some(format!("https://f.example/h{i}")),
+            title: (*title).into(),
+            summary: summary.map(str::to_string),
+            content: None,
+            author: None,
+            published_at: Some(OCT1 + i as i64 * 600),
+        })
+        .collect();
+    entries.push(NewArticle {
+        guid: "copy".into(),
+        url: Some("https://other.example/copy".into()),
+        published_at: Some(OCT1 + DAY),
+        ..entries[0].clone()
+    });
+    s.ingest(f, &entries).unwrap();
+    Arc::new(Mutex::new(s))
+}
+
+fn check_config(tasks: &[Task]) -> AnalysisConfig {
+    let mut c = config(Provider::Openai, tasks);
+    c.clickbait = ClickbaitCheck { batch_size: 2, ..Default::default() };
+    c.relevance_criteria = None;
+    c
+}
+
+fn is_decision(r: &Recorded) -> bool {
+    r.path.ends_with("/v1/decisions")
+}
+
+/// Rates titles from [`HEADLINES`] (answers in reverse order, so mapping
+/// must go by name) and rewrites headlines from the article's own text.
+fn classifier_and_rewriter(r: &Recorded, _: usize) -> MockReply {
+    if is_decision(r) {
+        let titles: std::collections::HashMap<i64, String> = r.body["input"][1]["content"][0]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| (a["id"].as_i64().unwrap(), a["title"].as_str().unwrap().to_string()))
+            .collect();
+        let mut answers: Vec<Value> = r.body["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| {
+                let name = q["name"].as_str().unwrap();
+                let id: i64 = name.strip_prefix("article-").unwrap().parse().unwrap();
+                let p = HEADLINES.iter().find(|h| h.0 == titles[&id]).map_or(0.0, |h| h.2);
+                json!({"type": "predicate", "name": name, "probability": p})
+            })
+            .collect();
+        answers.reverse();
+        return ok(json!({"answers": answers, "model": "gpt-6-luna",
+            "usage": {"input_tokens": 400, "output_tokens": 8, "total_tokens": 408}}));
+    }
+    let items = articles_in(&user_text(Provider::Openai, &r.body));
+    let wants_headline = asks_headline(r);
+    let payload = json!({"articles": items.iter().map(|a| json!({
+        "id": a["id"],
+        "labels": ["Politiikka"],
+        "headline": if wants_headline { a["text"].as_str().unwrap_or_default().trim_end_matches('.') } else { "" },
+    })).collect::<Vec<_>>()});
+    ok(envelope(Provider::Openai, &payload, 1_000, 200))
+}
+
+fn asks_headline(r: &Recorded) -> bool {
+    r.body["text"]["format"]["schema"]["properties"]["articles"]["items"]["properties"].get("headline").is_some()
+}
+
+fn titles_sent(r: &Recorded) -> Vec<String> {
+    let mut titles: Vec<String> = articles_in(&user_text(Provider::Openai, &r.body))
+        .iter()
+        .map(|a| a["title"].as_str().unwrap_or_default().to_string())
+        .collect();
+    titles.sort();
+    titles
+}
+
+fn rewritten(db: &Arc<Mutex<Store>>) -> Vec<String> {
+    let s = db.lock().unwrap();
+    let mut stmt = s.conn().prepare("SELECT headline FROM article_headlines ORDER BY headline").unwrap();
+    stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+#[tokio::test]
+async fn clickbait_check_sends_only_likely_clickbait_to_the_rewriting_model() {
+    let db = seed_headlines();
+    let sid = session(&db, &check_config(&[Task::Headlines]));
+    let m = mock(Arc::new(classifier_and_rewriter)).await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+
+    let (checks, rewrites): (Vec<Recorded>, Vec<Recorded>) = m.requests().into_iter().partition(is_decision);
+    // Five distinct contents with text, two questions per request.
+    let questions: Vec<usize> = checks.iter().map(|c| c.body["questions"].as_array().unwrap().len()).collect();
+    assert_eq!(questions.iter().sum::<usize>(), 5, "the copy is rated once, the one without text never");
+    assert!(questions.iter().all(|n| *n <= 2), "{questions:?}");
+    assert!(checks.iter().all(|c| c.headers.contains(API_KEY) && c.body["model"] == "gpt-6-luna"));
+
+    assert_eq!(rewrites.len(), 1, "one rewriting request for all likely clickbait");
+    assert_eq!(
+        titles_sent(&rewrites[0]),
+        [
+            "Et usko, mitä eduskunnassa tapahtui",
+            "Et usko, mitä eduskunnassa tapahtui",
+            "Onko tämä talven kylmin päivä?"
+        ],
+        "factual, dramatic, quoted and summary-less headlines never reach the rewriting model"
+    );
+    assert_eq!(
+        rewritten(&db),
+        [
+            "Eduskunta hyväksyi budjetin äänin 101–90",
+            "Eduskunta hyväksyi budjetin äänin 101–90",
+            "Lämpötila laski Sallassa -38 asteeseen"
+        ]
+    );
+    let h = &r.headlines;
+    assert_eq!((h.considered, h.classified, h.cached), (6, 5, 0));
+    assert_eq!((h.clickbait, h.rewrites_avoided, h.fallbacks), (3, 3, 0));
+    assert_eq!((h.check_requests, h.check_errors), (3, 0));
+    let ledger = ledger_rows(&db);
+    let checks: Vec<&(String, Option<i64>)> = ledger.iter().filter(|(op, _)| op == "clickbait_check").collect();
+    assert_eq!(checks.len(), 3);
+    // 400 uncached input tokens at $0.10 / M; output tokens are not charged.
+    assert!(checks.iter().all(|(_, c)| *c == Some(40)), "{ledger:?}");
+}
+
+#[tokio::test]
+async fn clickbait_results_are_cached_and_a_new_threshold_reuses_them() {
+    let db = seed_headlines();
+    let m = mock(Arc::new(classifier_and_rewriter)).await;
+    let cfg = check_config(&[Task::Headlines]);
+    runner(&db, Provider::Openai, &m.base, Control::default()).run(session(&db, &cfg), YES).await.unwrap();
+    let first = m.count();
+
+    // The same run again needs nothing at all.
+    let again = runner(&db, Provider::Openai, &m.base, Control::default()).run(session(&db, &cfg), YES).await.unwrap();
+    assert_eq!(again.final_status, Some(SessionStatus::Completed));
+    assert_eq!(m.count(), first, "no request repeats paid work");
+
+    // A lower threshold rewrites more, from the cached probabilities.
+    let mut strict = cfg.clone();
+    strict.clickbait.threshold_percent = 15;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(session(&db, &strict), YES).await.unwrap();
+    let new: Vec<Recorded> = m.requests().split_off(first);
+    assert!(new.iter().all(|r| !is_decision(r)), "probabilities are reused");
+    assert_eq!(new.len(), 1);
+    assert_eq!(
+        titles_sent(&new[0]),
+        ["Maanjäristys tuhosi kaupungin keskustan", "Pääministeri: \"Emme nosta veroja\""]
+    );
+    assert_eq!((r.headlines.cached, r.headlines.classified), (2, 0));
+}
+
+#[tokio::test]
+async fn non_clickbait_articles_skip_the_headline_field_when_combined_with_labels() {
+    let db = seed_headlines();
+    let sid = session(&db, &check_config(&[Task::Labels, Task::Headlines]));
+    let m = mock(Arc::new(classifier_and_rewriter)).await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    let rewrites: Vec<Recorded> = m.requests().into_iter().filter(|r| !is_decision(r)).collect();
+    assert_eq!(rewrites.len(), 2, "one batch with headlines, one without");
+    let (with, without): (Vec<&Recorded>, Vec<&Recorded>) = rewrites.iter().partition(|r| asks_headline(r));
+    assert_eq!(titles_sent(with[0]).len(), 3);
+    assert_eq!(titles_sent(without[0]).len(), 4, "labels still cover every article");
+    assert_eq!(rewritten(&db).len(), 3);
+    let s = db.lock().unwrap();
+    let labeled: i64 =
+        s.conn().query_row("SELECT count(DISTINCT article_id) FROM article_labels", [], |r| r.get(0)).unwrap();
+    assert_eq!(labeled, 7);
+}
+
+#[tokio::test]
+async fn a_failing_clickbait_check_falls_back_to_the_rewriting_model() {
+    let db = seed_headlines();
+    let mut cfg = check_config(&[Task::Headlines]);
+    cfg.clickbait.batch_size = 50;
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(|r: &Recorded, n| {
+        if is_decision(r) {
+            MockReply { status: 503, body: json!({"error": {"message": "overloaded"}}), delay: Duration::ZERO }
+        } else {
+            classifier_and_rewriter(r, n)
+        }
+    }))
+    .await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).with_progress(tx).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed), "the run is not interrupted");
+    let checks = m.requests().into_iter().filter(is_decision).count();
+    assert_eq!(checks, 3, "transient errors are retried with backoff, then the check gives up");
+    assert_eq!((r.headlines.fallbacks, r.headlines.check_errors, r.headlines.rewrites_avoided), (6, 1, 0));
+    assert_eq!(rewritten(&db).len(), 6, "every headline with text went to the rewriting model, as without the check");
+    assert!(ledger_rows(&db).iter().all(|(op, _)| !op.starts_with("clickbait_check")), "errors are not charged");
+    let mut notes = Vec::new();
+    while let Ok(p) = rx.try_recv() {
+        if let Progress::Note(n) = p {
+            notes.push(n);
+        }
+    }
+    assert!(notes.iter().any(|n| n.contains("Clickbait check failed")), "{notes:?}");
+}
+
+#[tokio::test]
+async fn a_clickbait_check_timeout_is_counted_at_its_maximum_and_falls_back() {
+    let db = seed_headlines();
+    let mut cfg = check_config(&[Task::Headlines]);
+    (cfg.clickbait.batch_size, cfg.clickbait.timeout_secs) = (50, 1);
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(|r: &Recorded, n| {
+        let mut reply = classifier_and_rewriter(r, n);
+        if is_decision(r) {
+            reply.delay = Duration::from_secs(3);
+        }
+        reply
+    }))
+    .await;
+    let r = runner(&db, Provider::Openai, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!(r.headlines.fallbacks, 6);
+    assert_eq!(m.requests().into_iter().filter(is_decision).count(), 1, "an unknown outcome is not retried");
+    assert!(ledger_rows(&db).iter().any(|(op, _)| op == "clickbait_check:unknown_outcome"));
+}
+
+#[tokio::test]
+async fn clickbait_check_is_skipped_on_other_providers() {
+    let db = seed_headlines();
+    let mut cfg = check_config(&[Task::Headlines]);
+    (cfg.provider, cfg.model) = (Provider::Anthropic, model_for(Provider::Anthropic).into());
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(good_model(Provider::Anthropic))).await;
+    let r = runner(&db, Provider::Anthropic, &m.base, Control::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert!(m.requests().iter().all(|r| !is_decision(r)));
+    assert_eq!((r.headlines.considered, r.headlines.check_requests), (0, 0));
 }

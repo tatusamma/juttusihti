@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::{AnalysisConfig, Depth, Task};
+use crate::analysis::{AnalysisConfig, ClickbaitCheck, DEFAULT_PARALLEL_REQUESTS, Depth, Task};
 use crate::budget::Limits;
 use crate::pricing::{Billing, Provider};
 use crate::search::SearchQuery;
@@ -123,6 +123,16 @@ pub struct AiDefaults {
     /// Per-run limits.
     pub max_cost: Option<Micros>,
     pub max_tokens: Option<u64>,
+    /// Clickbait check before headline rewriting (OpenAI API key runs).
+    #[serde(default)]
+    pub clickbait: ClickbaitCheck,
+    /// Provider requests in flight at once.
+    #[serde(default = "default_parallel_requests")]
+    pub parallel_requests: u32,
+}
+
+fn default_parallel_requests() -> u32 {
+    DEFAULT_PARALLEL_REQUESTS
 }
 
 impl Default for AiDefaults {
@@ -136,6 +146,8 @@ impl Default for AiDefaults {
             max_articles: 50,
             max_cost: Some(250_000),
             max_tokens: Some(500_000),
+            clickbait: ClickbaitCheck::default(),
+            parallel_requests: DEFAULT_PARALLEL_REQUESTS,
         }
     }
 }
@@ -173,6 +185,8 @@ impl AiDefaults {
             reuse_cached: true,
             use_batch: false,
             relevance_criteria: None,
+            clickbait: self.clickbait.clone(),
+            parallel_requests: self.parallel_requests,
         }
     }
 }

@@ -8,6 +8,7 @@
 //! stored, and nothing in a response is ever executed.
 
 pub mod chatgpt;
+pub mod decisions;
 pub mod prompts;
 mod providers;
 pub mod runner;
@@ -226,7 +227,7 @@ impl Client {
         {
             o.remove("reasoning");
         }
-        let json = match self.post_with_retries(&url, &body).await {
+        let json = match self.post_with_retries(&url, &body, None).await {
             // Not every model accepts every effort level; a rejected request is not billed.
             Err(AiError::Status { status: 400, message })
                 if body.get("reasoning").is_some() && message.to_ascii_lowercase().contains("reasoning") =>
@@ -236,7 +237,7 @@ impl Client {
                 if let Some(o) = body.as_object_mut() {
                     o.remove("reasoning");
                 }
-                self.post_with_retries(&url, &body).await?
+                self.post_with_retries(&url, &body, None).await?
             }
             other => other?,
         };
@@ -254,16 +255,30 @@ impl Client {
             return Err(AiError::Unsupported("token counting is not available with a ChatGPT plan"));
         }
         let (url, body) = providers::count_tokens(&self.endpoint, req);
-        let json = self.post_with_retries(&url, &body).await?;
+        let json = self.post_with_retries(&url, &body, None).await?;
         providers::parse_count(self.endpoint.provider, &json)
     }
 
-    async fn post_with_retries(&self, url: &str, body: &Value) -> Result<Value, AiError> {
+    /// Sends a Decisions API request ([`decisions::request`]), retrying
+    /// transient failures. Needs OpenAI with an API key.
+    pub async fn decide(&self, body: &Value, timeout: Duration) -> Result<Value, AiError> {
+        if !body["model"].as_str().is_some_and(valid_model) {
+            return Err(AiError::InvalidModel);
+        }
+        if self.endpoint.provider != Provider::Openai || self.billing() != Billing::ApiKey {
+            return Err(AiError::Unsupported("the Decisions API needs an OpenAI API key"));
+        }
+        let url = format!("{}/v1/decisions", self.endpoint.base_url.trim_end_matches('/'));
+        self.post_with_retries(&url, body, Some(timeout)).await
+    }
+
+    /// `timeout` overrides the client's for this request.
+    async fn post_with_retries(&self, url: &str, body: &Value, timeout: Option<Duration>) -> Result<Value, AiError> {
         let mut attempt = 0;
         let mut reauthorized = false;
         loop {
             attempt += 1;
-            match self.post_once(url, body).await {
+            match self.post_once(url, body, timeout).await {
                 Ok(v) => return Ok(v),
                 // A plan access token can be revoked or expire early: refresh once.
                 Err((AiError::Status { status: 401, .. }, _))
@@ -286,7 +301,12 @@ impl Client {
         }
     }
 
-    async fn post_once(&self, url: &str, body: &Value) -> Result<Value, (AiError, Option<Duration>)> {
+    async fn post_once(
+        &self,
+        url: &str,
+        body: &Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, (AiError, Option<Duration>)> {
         let token = match &self.endpoint.auth {
             Auth::ApiKey(k) => k.clone(),
             Auth::ChatGpt(s) => s.access_token().await.map_err(|e| (AiError::Auth(e), None))?,
@@ -294,6 +314,9 @@ impl Client {
         let mut req = self.http.post(url).header(reqwest::header::CONTENT_TYPE, "application/json");
         for (k, v) in providers::auth_headers(self.endpoint.provider, &token) {
             req = req.header(k, v);
+        }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
         }
         let mut resp = req.body(body.to_string()).send().await.map_err(|e| {
             let err = if e.is_connect() || e.is_builder() {

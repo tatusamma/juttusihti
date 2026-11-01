@@ -986,11 +986,12 @@ impl App {
             }
             Message::Quick(msg) => {
                 // Show results as they arrive: rewritten headlines and labels.
+                // The clickbait check changes nothing shown, so it does not reload the list.
                 let refresh = matches!(
                     msg,
-                    crate::quick::Msg::Run(crate::research::RunEvent::Progress(juttusihti_ai::Progress::Call { .. }))
-                        | crate::quick::Msg::Run(crate::research::RunEvent::Finished(_))
-                );
+                    crate::quick::Msg::Run(crate::research::RunEvent::Progress(juttusihti_ai::Progress::Call { stage, .. }))
+                        if stage != "clickbait_check"
+                ) || matches!(msg, crate::quick::Msg::Run(crate::research::RunEvent::Finished(_)));
                 let task = self.quick.update(msg).map(Message::Quick);
                 // A run that finished while the popover was closed reports in the status bar.
                 if let Some((line, session, failed)) = self.quick.take_finished() {

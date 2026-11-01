@@ -287,6 +287,8 @@ impl State {
             }
         };
         let tz = iana_hint();
+        // The clickbait check and parallelism follow the AI defaults.
+        let defaults = self.lists.as_ref().and_then(|l| l.defaults.clone()).unwrap_or_default();
         Ok(AnalysisConfig {
             scope: SearchQuery {
                 text: self.query.trim().to_string(),
@@ -315,6 +317,8 @@ impl State {
             use_batch: false,
             relevance_criteria: (self.tasks.contains(&Task::Relevance) && !self.criteria.trim().is_empty())
                 .then(|| self.criteria.trim().to_string()),
+            clickbait: defaults.clickbait,
+            parallel_requests: defaults.parallel_requests,
         })
     }
 

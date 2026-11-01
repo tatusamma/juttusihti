@@ -266,13 +266,21 @@ impl State {
                         let status = s.final_status.map(|st| st.as_str()).unwrap_or("finished");
                         let what =
                             if status == "completed" { "Done".to_string() } else { format!("Stopped ({status})") };
-                        format!(
+                        let mut line = format!(
                             "{what}: {} results from {} requests, {} tokens, {}.",
                             s.suggestions,
                             s.calls,
                             thousands(s.usage.total()),
                             cost_text(billing, s.cost)
-                        )
+                        );
+                        let h = &s.headlines;
+                        if h.considered > 0 {
+                            line.push_str(&format!(
+                                " {} of {} headlines looked like clickbait; {} kept as they are.",
+                                h.clickbait, h.considered, h.rewrites_avoided
+                            ));
+                        }
+                        line
                     }),
                     session,
                 ));

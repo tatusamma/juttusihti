@@ -39,6 +39,10 @@ const EXTRACT_BATCH: usize = 20;
 const PAIR_BATCH: usize = 10;
 const SUMMARY_CHUNK: usize = 40;
 
+/// Clickbait check: fixed criteria per request, and per headline its question.
+const CHECK_OVERHEAD: u64 = 400;
+const CHECK_QUESTION: u64 = 30;
+
 const OUT_LABELS: u64 = 30;
 const OUT_ENTITIES: u64 = 90;
 const OUT_RELEVANCE: u64 = 25;
@@ -50,6 +54,8 @@ const OUT_FINAL_SUMMARY: u64 = 2_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    /// Decisions API clickbait check before headline rewriting.
+    ClickbaitCheck,
     Extraction,
     RelationshipValidation,
     ChunkSummaries,
@@ -59,6 +65,7 @@ pub enum Stage {
 impl Stage {
     pub fn label(self) -> &'static str {
         match self {
+            Stage::ClickbaitCheck => "Clickbait check",
             Stage::Extraction => "Labels / entities / relevance",
             Stage::RelationshipValidation => "Related-story validation",
             Stage::ChunkSummaries => "Partial summaries",
@@ -138,6 +145,28 @@ pub fn plan(config: &AnalysisConfig, scope: &Scope, label_vocabulary: usize) -> 
     let by_id: std::collections::HashMap<i64, &crate::analysis::ArticleRecord> =
         scope.records.iter().map(|r| (r.id, r)).collect();
     let record_tokens = |id: &i64| by_id.get(id).map_or(0, |r| approx_tokens(&r.prompt_text()) + RECORD_OVERHEAD);
+
+    // Stage 0: the clickbait check classifies headlines that could be
+    // rewritten. The Decisions API does not charge output tokens. The
+    // extraction stage below still assumes every headline is rewritten, so
+    // the estimate stays an upper bound.
+    if let Some(check) = config.clickbait_check() {
+        let with_text: Vec<i64> = scope
+            .needs_processing
+            .iter()
+            .copied()
+            .filter(|id| by_id.get(id).is_some_and(|r| !r.body.trim().is_empty()))
+            .collect();
+        for chunk in with_text.chunks(check.batch_size()) {
+            out.push(PlannedRequest {
+                stage: Stage::ClickbaitCheck,
+                overhead_tokens: CHECK_OVERHEAD,
+                content_tokens: chunk.iter().map(|id| record_tokens(id) + CHECK_QUESTION).sum(),
+                expected_output: 0,
+                max_output: 0,
+            });
+        }
+    }
 
     // Stage 1: one combined pass for all per-article tasks.
     let per_article_out: u64 = config
@@ -291,12 +320,25 @@ pub fn estimate(
     let price = catalog.price_for(config.provider, &config.model, config.billing, today);
     let price = price.as_ref();
     let caching_supported = price.is_some_and(|p| p.rates.cached_input.is_some());
+    // The clickbait check is priced at its own model's rates.
+    let (checks, main): (Vec<PlannedRequest>, Vec<PlannedRequest>) =
+        requests.iter().partition(|r| r.stage == Stage::ClickbaitCheck);
+    let check_price =
+        config.clickbait_check().and_then(|c| catalog.price_for(Provider::Openai, &c.model, Billing::ApiKey, today));
     let scenarios: BTreeMap<Scenario, ScenarioTotals> =
         [Scenario::Optimistic, Scenario::Expected, Scenario::Conservative]
             .into_iter()
             // Runs are sent as normal requests and charged at standard prices
             // (the runner never uses provider batch APIs), so never discount here.
-            .map(|s| (s, scenario_totals(&requests, s, price, false, caching_supported)))
+            .map(|s| {
+                let mut totals = scenario_totals(&main, s, price, false, caching_supported);
+                if !checks.is_empty() {
+                    let c = scenario_totals(&checks, s, check_price.as_ref(), false, false);
+                    totals.usage += c.usage;
+                    totals.cost = totals.cost.zip(c.cost).map(|(a, b)| a + b);
+                }
+                (s, totals)
+            })
             .collect();
 
     let mut stages: Vec<StageTotals> = Vec::new();
@@ -356,6 +398,14 @@ pub fn estimate(
             "Rewriting headlines needs the article description or text; with headlines only, none are rewritten."
                 .into(),
         );
+    }
+    if let Some(check) = config.clickbait_check()
+        && !checks.is_empty()
+    {
+        warnings.push(format!(
+            "A clickbait check ({}, OpenAI Decisions API) runs first; only headlines it rates at least {}% likely              clickbait go to {} for a rewrite, so the run usually costs less than this estimate.",
+            check.model, check.threshold_percent, config.model
+        ));
     }
     if s.truncated > 0 {
         warnings.push(format!("{} long articles are shortened before analysis.", s.truncated));

@@ -9,6 +9,16 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Changed
+
+- **Clickbait headlines** (OpenAI with an API key): a fast clickbait check on OpenAI's
+  Decisions API (`gpt-6-luna`) now rates every headline first, in batches, and only headlines
+  rated at least 70% likely clickbait are sent to the rewriting model. Ratings are cached, so a
+  new threshold costs nothing, and articles without a description are no longer sent at all.
+  If the check fails, headlines go to the rewriting model as before. Turn the check off or
+  change its threshold under AI setup.
+- AI requests now start as soon as an earlier one returns, instead of in waves of four.
+
 ## [0.1.1] - 2026-11-01
 
 ### Fixed
