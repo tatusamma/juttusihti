@@ -24,9 +24,13 @@ On a `tero-k/release-X.Y.Z` branch:
 1. Set the same version in `Cargo.toml` (`[workspace.package] version`) and `Packager.toml`
    (`version`). The release workflow fails if they differ from the tag.
 2. `cargo check` so `Cargo.lock` picks up the new version.
-3. Run `cargo audit` and update the dependency audit in `SECURITY.md` if anything changed.
-4. Update the milestones in `README.md` if needed.
-5. Commit, merge into `master`, and wait for CI to pass.
+3. In `CHANGELOG.md`, move the `[Unreleased]` items under a new `## [X.Y.Z] - YYYY-MM-DD`
+   heading (highlights first, then known issues) and add its link at the bottom. This section
+   becomes the release notes; the release workflow fails without it. Use absolute links there,
+   because relative links break on the release page.
+4. Run `cargo audit` and update the dependency audit in `SECURITY.md` if anything changed.
+5. Update the milestones in `README.md` if needed.
+6. Commit, merge into `master`, and wait for CI to pass.
 
 ## 2. Tag and push
 
@@ -41,8 +45,10 @@ A tag with a suffix such as `v0.2.0-rc.1` makes a pre-release.
 
 The **Release** workflow runs CI (fmt, clippy, tests, audit), builds the Linux packages on
 Ubuntu 22.04, attests them (public repositories only), and creates a draft release named
-"Juttusihti X.Y.Z" with generated notes. Re-running the workflow replaces the Linux files on
-the draft; it refuses to touch a release that is already published.
+"Juttusihti X.Y.Z". Its notes are the tag's `CHANGELOG.md` section followed by the download
+and verify text in `packaging/release-notes.md`. Re-running the workflow replaces the Linux
+files on the draft but keeps its notes; it refuses to touch a release that is already
+published.
 
 ```sh
 gh run watch                       # or follow it under Actions
@@ -95,7 +101,7 @@ gh release upload vX.Y.Z (Get-ChildItem dist -File).FullName --clobber
    gh attestation verify juttusihti_X.Y.Z_amd64.deb --repo tero-k/juttusihti
    ```
 
-4. Edit the generated notes (highlights first, known issues), then press **Publish release**.
+4. Read the notes, edit them on the draft if needed, then press **Publish release**.
 
 ## If something goes wrong
 

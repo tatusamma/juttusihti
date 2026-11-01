@@ -27,7 +27,7 @@ jobs:
         with:
           persist-credentials: false
       - id: check
-        name: Tag matches Cargo.toml and Packager.toml
+        name: Tag matches Cargo.toml and Packager.toml, and CHANGELOG.md has its section
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -37,6 +37,10 @@ jobs:
           echo "tag $version, Cargo.toml $cargo_version, Packager.toml $packager_version"
           if [ "$version" != "$cargo_version" ] || [ "$version" != "$packager_version" ]; then
             echo "::error::Tag $TAG does not match the versions in Cargo.toml and Packager.toml"
+            exit 1
+          fi
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -107,10 +111,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            CHANGELOG.md
+            packaging/release-notes.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: linux
           path: dist
+      # The tag's CHANGELOG.md section, then the download and verify text.
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## \[/ { if (on) exit; if (index($0, "## [" v "]") == 1) { on = 1; next } }
+            /^\[[^]]+\]: / { next }
+            on' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+          sed -e "s/RPMVER/${VERSION//-/\~}/g" -e "s/X\.Y\.Z/$VERSION/g" packaging/release-notes.md >> notes.md
+          cat notes.md
       - name: Create or update the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -123,11 +149,12 @@ jobs:
               echo "::error::Release $TAG is already published; not touching it"
               exit 1
             fi
+            # Keeps the notes: they may have been edited on the draft.
             gh release upload "$TAG" dist/* --clobber
           else
             prerelease=()
             case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
             # Never publishes: the maintainer adds the signed Windows build, then publishes.
             gh release create "$TAG" dist/* --draft --verify-tag "${prerelease[@]}" \
-              --title "Juttusihti $VERSION" --generate-notes
+              --title "Juttusihti $VERSION" --notes-file notes.md
           fi
