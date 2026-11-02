@@ -323,6 +323,9 @@ cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linu
   files and run-time library requirements are in `[package.metadata.generate-rpm]` in
   `crates/app/Cargo.toml`; it lands in `target/generate-rpm/`.
 - Packages land in `target/packages/`.
+- **No Windows machine?** Run the **Windows package** workflow (Actions → Windows package →
+  Run workflow). It builds the same unsigned NSIS installer plus a portable zip on GitHub's
+  Windows runner and attaches them, with `SHA256SUMS-windows.txt`, as a downloadable artifact.
 
 ## Milestone 0 findings (verified 2026-10-25, Windows 11 x64, rustc 1.99.1, MSVC 14.44)
 

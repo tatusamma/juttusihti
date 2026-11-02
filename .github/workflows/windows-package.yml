@@ -1,0 +1,66 @@
+# Builds an UNSIGNED Windows x64 installer and portable zip on demand, for testing or
+# personal use: Actions → "Windows package" → Run workflow, then download the artifact.
+# Signed release builds are made locally with packaging/release-windows.ps1 (RELEASING.md).
+name: Windows package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nsis:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-package
+      - run: cargo install cargo-packager --version 0.11.8 --locked
+      # Packager.toml's beforePackagingCommand then finds the binary up to date.
+      - run: cargo build --release -p juttusihti --locked
+      - run: cargo packager --release -f nsis -c Packager.toml
+      - name: Installer, portable zip and checksums
+        id: dist
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Packager.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\packages\*-setup.exe dist\
+          # Entries are written by hand with forward slashes, as in release-windows.ps1, so
+          # the zip also unpacks into a folder on Linux and macOS.
+          $portable = "juttusihti-$version-x86_64-windows"
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::Open((Join-Path $PWD "dist\$portable.zip"), 'Create')
+          try {
+              foreach ($file in 'target\release\juttusihti.exe', 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE') {
+                  $item = Get-Item $file
+                  [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $item.FullName, "$portable/$($item.Name)", 'Optimal') | Out-Null
+              }
+          } finally {
+              $zip.Dispose()
+          }
+          Get-ChildItem dist | ForEach-Object {
+              "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii dist\SHA256SUMS-windows.txt
+          Get-Content dist\SHA256SUMS-windows.txt
+          "name=juttusihti-$version-$sha-windows-x64-unsigned" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.dist.outputs.name }}
+          path: dist/
+          if-no-files-found: error
