@@ -510,7 +510,8 @@ impl App {
             async move {
                 let _permit = slots.acquire_owned().await.map_err(|e| e.to_string())?;
                 let outcome = fetcher.fetch(&url, etag.as_deref(), last_modified.as_deref()).await;
-                db.call(move |s| juttusihti_fetch::apply(s, id, outcome).map(|st| st.inserted)).await
+                let parsed = juttusihti_fetch::parse(outcome).await;
+                db.call(move |s| juttusihti_fetch::apply(s, id, parsed).map(|st| st.inserted)).await
             },
             move |r| Message::Refreshed(id, r),
         ))

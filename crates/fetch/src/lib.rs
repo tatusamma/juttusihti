@@ -2,15 +2,15 @@
 //! timeouts, bounded retries with backoff, response size limits and
 //! website feed discovery.
 //!
-//! Parsing and storage stay in `juttusihti-core`; [`apply`] glues a fetch
-//! outcome onto the store.
+//! Parsing and storage stay in `juttusihti-core`; [`parse`] and [`apply`]
+//! glue a fetch outcome onto the store.
 
 pub mod tiles;
 
 use std::time::Duration;
 
 use juttusihti_core::discovery::{self, DiscoveredFeed};
-use juttusihti_core::feed::{self, MAX_FEED_BYTES};
+use juttusihti_core::feed::{self, MAX_FEED_BYTES, ParsedFeed};
 use juttusihti_core::store::Store;
 use juttusihti_core::{FeedId, IngestStats};
 use reqwest::header::{ETAG, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RETRY_AFTER};
@@ -200,35 +200,77 @@ pub fn normalize_input_url(input: &str) -> String {
     if t.contains("://") { t.to_string() } else { format!("https://{t}") }
 }
 
-/// Stores a fetch outcome for a feed: parses the document, ingests entries
-/// and records cache validators, or records the error.
-pub fn apply(
-    store: &mut Store,
-    feed_id: FeedId,
+/// A fetch outcome with its document parsed, ready for [`apply`].
+#[derive(Debug)]
+pub enum ParsedOutcome {
+    NotModified,
+    Feed { feed: ParsedFeed, etag: Option<String>, last_modified: Option<String> },
+    Failed(FetchError),
+}
+
+/// Parses a fetched document on a blocking thread. Feeds are untrusted, so call this before
+/// locking the store: a parser panic then fails this one feed and can't poison the store's lock.
+pub async fn parse(outcome: Result<FetchOutcome, FetchError>) -> ParsedOutcome {
+    parse_with(outcome, feed::parse).await
+}
+
+async fn parse_with(
     outcome: Result<FetchOutcome, FetchError>,
-) -> Result<IngestStats, FetchError> {
+    parser: fn(&[u8], Option<&str>) -> juttusihti_core::Result<ParsedFeed>,
+) -> ParsedOutcome {
+    let (body, final_url, etag, last_modified) = match outcome {
+        Ok(FetchOutcome::NotModified) => return ParsedOutcome::NotModified,
+        Ok(FetchOutcome::Fetched { body, final_url, etag, last_modified }) => (body, final_url, etag, last_modified),
+        Err(e) => return ParsedOutcome::Failed(e),
+    };
+    match tokio::task::spawn_blocking(move || parser(&body, Some(&final_url))).await {
+        Ok(Ok(feed)) => ParsedOutcome::Feed { feed, etag, last_modified },
+        Ok(Err(e)) => ParsedOutcome::Failed(e.into()),
+        Err(e) => {
+            tracing::error!(error = %e, "feed parser failed");
+            let message = "internal error while reading this feed".to_string();
+            ParsedOutcome::Failed(juttusihti_core::Error::FeedParse(message).into())
+        }
+    }
+}
+
+/// Stores a parsed fetch outcome for a feed: ingests entries and records
+/// cache validators, or records the error.
+pub fn apply(store: &mut Store, feed_id: FeedId, outcome: ParsedOutcome) -> Result<IngestStats, FetchError> {
     match outcome {
-        Ok(FetchOutcome::NotModified) => {
+        ParsedOutcome::NotModified => {
             store.record_not_modified(feed_id)?;
             Ok(IngestStats::default())
         }
-        Ok(FetchOutcome::Fetched { body, final_url, etag, last_modified }) => {
-            match feed::parse(&body, Some(&final_url)) {
-                Ok(parsed) => {
-                    let stats = store.ingest(feed_id, &parsed.entries)?;
-                    store.adopt_feed_metadata(feed_id, parsed.title.as_deref(), parsed.site_url.as_deref())?;
-                    store.record_fetch_ok(feed_id, etag.as_deref(), last_modified.as_deref())?;
-                    Ok(stats)
-                }
-                Err(e) => {
-                    store.record_fetch_error(feed_id, &e.to_string())?;
-                    Err(e.into())
-                }
-            }
+        ParsedOutcome::Feed { feed, etag, last_modified } => {
+            let stats = store.ingest(feed_id, &feed.entries)?;
+            store.adopt_feed_metadata(feed_id, feed.title.as_deref(), feed.site_url.as_deref())?;
+            store.record_fetch_ok(feed_id, etag.as_deref(), last_modified.as_deref())?;
+            Ok(stats)
         }
-        Err(e) => {
+        ParsedOutcome::Failed(e) => {
             store.record_fetch_error(feed_id, &e.to_string())?;
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use juttusihti_core::NewFeed;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_parser_panic_fails_only_that_feed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let url = "https://example.com/rss".to_string();
+        let feed_id = store.add_feed(&NewFeed { url: url.clone(), ..Default::default() }).unwrap();
+        let fetched = FetchOutcome::Fetched { body: vec![], final_url: url, etag: None, last_modified: None };
+
+        let parsed = parse_with(Ok(fetched), |_, _| panic!("hostile feed")).await;
+
+        assert!(apply(&mut store, feed_id, parsed).is_err());
+        assert!(store.feed(feed_id).unwrap().last_error.unwrap().contains("internal error"));
     }
 }

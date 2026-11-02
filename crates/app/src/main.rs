@@ -6,6 +6,7 @@
 
 mod ai_setup;
 mod app;
+mod crash_log;
 mod db;
 mod feeds_menu;
 mod format;
@@ -50,6 +51,7 @@ fn main() -> iced::Result {
         eprintln!("cannot create data directory {}: {e}", dir.display());
         std::process::exit(1);
     }
+    crash_log::install(dir.join("crash.log"));
     let db_path = dir.join("juttusihti.db");
     let store = match juttusihti_core::store::Store::open(&db_path) {
         Ok(s) => s,

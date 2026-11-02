@@ -42,6 +42,10 @@ pub async fn readiness(d: &AiDefaults) -> Result<(), String> {
     let provider = d.provider;
     match d.billing() {
         Billing::ChatGptPlan => match plan::status().await? {
+            Some(_) if d.check_on_api_credit() => match blocking(move || secrets::get(provider)).await? {
+                Some(_) => Ok(()),
+                None => Err("Add an OpenAI API key under AI setup for the clickbait check first.".into()),
+            },
             Some(_) => Ok(()),
             None => Err("Sign in with ChatGPT under AI setup first.".into()),
         },
@@ -55,7 +59,29 @@ pub async fn readiness(d: &AiDefaults) -> Result<(), String> {
 /// "gpt-6-luna on your ChatGPT plan" / "claude-haiku-5-5 (API key)".
 pub fn describe(d: &AiDefaults) -> String {
     match d.billing() {
+        Billing::ChatGptPlan if d.check_on_api_credit() => {
+            format!("{} on your ChatGPT plan, clickbait check on API credit", d.model())
+        }
         Billing::ChatGptPlan => format!("{} on your ChatGPT plan", d.model()),
         Billing::ApiKey => format!("{} · {}", d.provider, d.model()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use juttusihti_core::ai_defaults::PayWith;
+
+    use super::*;
+
+    #[test]
+    fn describe_names_every_way_of_paying() {
+        let with = |choice: PayWith| {
+            let mut d = AiDefaults::default();
+            choice.apply(&mut d.billing, &mut d.clickbait);
+            describe(&d)
+        };
+        assert_eq!(with(PayWith::ChatGptPlan), "gpt-6-luna on your ChatGPT plan");
+        assert_eq!(with(PayWith::Split), "gpt-6-luna on your ChatGPT plan, clickbait check on API credit");
+        assert_eq!(with(PayWith::ApiKey), "OpenAI · gpt-6-luna");
     }
 }

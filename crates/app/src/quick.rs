@@ -238,8 +238,15 @@ impl State {
                     tokens: 0,
                     cost: Some(0),
                 });
-                let stream =
-                    run_session(self.db.shared(), self.catalog.clone(), id, config.provider, config.billing, control);
+                let stream = run_session(
+                    self.db.shared(),
+                    self.catalog.clone(),
+                    id,
+                    config.provider,
+                    config.billing,
+                    config.check_on_api_credit(),
+                    control,
+                );
                 return Cmd::run(stream, Msg::Run);
             }
             Msg::Saved(Err(e)) => self.result = Some((Err(e), None)),

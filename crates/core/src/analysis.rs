@@ -156,14 +156,21 @@ impl AnalysisConfig {
     /// The clickbait check, if it runs for this configuration. It needs the
     /// headline task with article text (a rewrite must be grounded in it)
     /// and an OpenAI API key: the Decisions API is OpenAI's and is not
-    /// documented for ChatGPT plans, so plan runs keep the one-stage rewrite.
+    /// documented for ChatGPT plans, so plan runs keep the one-stage rewrite
+    /// unless the user chose to pay for the check with API credit.
     pub fn clickbait_check(&self) -> Option<&ClickbaitCheck> {
         (self.clickbait.enabled
             && self.tasks.contains(&Task::Headlines)
             && self.depth != Depth::Headlines
             && self.provider == Provider::Openai
-            && self.billing == Billing::ApiKey)
+            && (self.billing == Billing::ApiKey || self.clickbait.on_api_credit))
             .then_some(&self.clickbait)
+    }
+
+    /// Whether this run's check is paid with API credit while the rest of
+    /// the run is on a ChatGPT plan, so it needs both credentials.
+    pub fn check_on_api_credit(&self) -> bool {
+        self.billing == Billing::ChatGptPlan && self.clickbait_check().is_some()
     }
 
     /// Requests in flight at once (at least one).
@@ -187,11 +194,20 @@ pub struct ClickbaitCheck {
     pub batch_size: u32,
     /// Seconds to wait for one classification request.
     pub timeout_secs: u32,
+    /// On a ChatGPT plan run, pay for the check with API credit.
+    pub on_api_credit: bool,
 }
 
 impl Default for ClickbaitCheck {
     fn default() -> Self {
-        Self { enabled: true, model: "gpt-6-luna".into(), threshold_percent: 70, batch_size: 50, timeout_secs: 30 }
+        Self {
+            enabled: true,
+            model: "gpt-6-luna".into(),
+            threshold_percent: 70,
+            batch_size: 50,
+            timeout_secs: 30,
+            on_api_credit: false,
+        }
     }
 }
 

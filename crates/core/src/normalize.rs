@@ -180,7 +180,8 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Searched as bytes: a limit of 12 can fall inside a multibyte character.
+        let Some(semi) = rest.as_bytes().iter().take(12).position(|&b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -263,5 +264,19 @@ mod tests {
         let html = "<p>Hei &amp; tervetuloa</p><script>alert('x')</script><p>S&auml;&auml; &#8211; ok&nbsp;!</p>";
         assert_eq!(html_to_text(html), "Hei & tervetuloa\nSää – ok !");
         assert_eq!(html_to_text("a &bogus; b & c"), "a &bogus; b & c");
+    }
+
+    #[test]
+    fn html_to_text_keeps_multibyte_text_after_an_ampersand() {
+        for fill in 0..16 {
+            let filler = "a".repeat(fill);
+            for ch in ["ä", "–", "😀"] {
+                let plain = format!("Q&{filler}{ch} tail");
+                assert_eq!(html_to_text(&plain), plain);
+                let unknown = format!("Q&{filler}{ch}; tail");
+                assert_eq!(html_to_text(&unknown), unknown);
+            }
+        }
+        assert_eq!(html_to_text("Q&amp;A: 1234567ä"), "Q&A: 1234567ä");
     }
 }

@@ -169,12 +169,23 @@ spending limits.
 a fast, cheap classifier (OpenAI's Decisions API, `gpt-6-luna`) rates how likely each headline
 is clickbait, in batches, and only those at or above the threshold (70% by default) are sent
 to the rewriting model. Ratings are cached, so a new threshold costs nothing. Turn the check off
-or change the threshold on **AI setup**. On a ChatGPT plan, or with Claude or Gemini, headlines
-are rewritten in one step without the check.
+or change the threshold on **AI setup**. With Claude or Gemini, headlines are rewritten in one
+step without the check.
+
+**Ways to pay with OpenAI.** **Pay with** on **AI setup** and in **Custom analysis** has three
+choices:
+
+- **My ChatGPT plan**: everything counts against the plan, and headlines are rewritten in one
+  step without the check.
+- **API key**: everything is billed per token to the API account, including the check.
+- **ChatGPT plan, with API credit for the clickbait check**: the check is billed to the API
+  account and everything else counts against the plan. This needs both the sign-in and a key.
 
 **API credit.** An API key is billed to the provider account behind it, which needs credit; a
 ChatGPT plan is not. If your OpenAI API account runs out of credit, the run pauses at once and
-says so instead of retrying. Add credit on
+says so instead of retrying. The exception is the split choice above: the plan still pays for
+the rewrites, so the run goes on without the check and sends every headline for a rewrite. Add
+credit on
 [OpenAI's billing page](https://platform.openai.com/settings/organization/billing/), then press
 **Resume** under **Custom analysis**: finished work is kept and never paid for twice.
 
@@ -255,7 +266,8 @@ cargo run -p juttusihti         # data in the OS data dir; override with JUTTUSI
 Debug info is turned off for dependencies (`[profile.dev.package."*"]`): with it on, the debug
 `target/` grew past 16 GB.
 
-Logging: `JUTTUSIHTI_LOG=debug`. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
+Logging: `JUTTUSIHTI_LOG=debug`. Panics also go to `crash.log` in the data dir, which stays on the
+computer and can quote feed text, so read it before sharing it. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
 Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
 ### CI and releases
@@ -423,7 +435,9 @@ tokenizer, or AI-assisted query expansion.
     127.0.0.1, no client secret). Only the rotating refresh token is stored, in the secret
     store; access tokens stay in memory. On a plan, requests stream and cannot cap output
     length, token counting is unavailable, and estimates show "on your ChatGPT plan" (a known
-    zero API cost) instead of dollars. Reaching the plan's limit pauses the run. Tested
+    zero API cost) instead of dollars, plus the check's dollars when it is paid with API credit
+    (the check goes on the API key, everything else on the plan). Reaching the plan's limit
+    pauses the run. Tested
     against a local fake of OpenAI's endpoints only; **not tried against the real service
     yet**, and structured JSON output on a plan is not documented by OpenAI.
   - Claude and Gemini have no such option: Anthropic's terms forbid third-party apps from
