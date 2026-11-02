@@ -104,6 +104,35 @@ pub fn task_hint(task: Task) -> &'static str {
     }
 }
 
+/// How an OpenAI run pays: the choices offered to the user. Stored as the
+/// run's billing plus [`ClickbaitCheck::on_api_credit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayWith {
+    ChatGptPlan,
+    /// The clickbait check on API credit, everything else on the plan.
+    Split,
+    ApiKey,
+}
+
+impl PayWith {
+    pub fn of(billing: Billing, check: &ClickbaitCheck) -> Self {
+        match billing {
+            Billing::ApiKey => PayWith::ApiKey,
+            Billing::ChatGptPlan if check.on_api_credit => PayWith::Split,
+            Billing::ChatGptPlan => PayWith::ChatGptPlan,
+        }
+    }
+
+    pub fn apply(self, billing: &mut Billing, check: &mut ClickbaitCheck) {
+        *billing = if self == PayWith::ApiKey { Billing::ApiKey } else { Billing::ChatGptPlan };
+        check.on_api_credit = self == PayWith::Split;
+        // Paying for the check separately only means something if it runs.
+        if self == PayWith::Split {
+            check.enabled = true;
+        }
+    }
+}
+
 /// What the user set up once: used by the quick analysis and as the
 /// starting point of a custom analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +152,7 @@ pub struct AiDefaults {
     /// Per-run limits.
     pub max_cost: Option<Micros>,
     pub max_tokens: Option<u64>,
-    /// Clickbait check before headline rewriting (OpenAI API key runs).
+    /// Clickbait check before headline rewriting (OpenAI, on API credit).
     #[serde(default)]
     pub clickbait: ClickbaitCheck,
     /// Provider requests in flight at once.
@@ -161,6 +190,15 @@ impl AiDefaults {
     /// Only OpenAI can be billed to a ChatGPT plan.
     pub fn billing(&self) -> Billing {
         if self.provider == Provider::Openai { self.billing } else { Billing::ApiKey }
+    }
+
+    pub fn pay_with(&self) -> PayWith {
+        PayWith::of(self.billing(), &self.clickbait)
+    }
+
+    /// Whether runs need an API key for the check on top of the plan sign-in.
+    pub fn check_on_api_credit(&self) -> bool {
+        self.pay_with() == PayWith::Split && self.clickbait.enabled
     }
 
     /// A quick analysis of the newest articles matching `scope`, with
@@ -234,6 +272,28 @@ mod tests {
         assert_eq!(c.limits.max_cost, Some(250_000));
         assert!(!c.limits.allow_unknown_cost);
         assert_eq!(c.scope.text, "sähkö");
+    }
+
+    #[test]
+    fn pay_with_round_trips_through_billing_and_the_check() {
+        for choice in [PayWith::ChatGptPlan, PayWith::Split, PayWith::ApiKey] {
+            let mut d = AiDefaults::default();
+            choice.apply(&mut d.billing, &mut d.clickbait);
+            assert_eq!(d.pay_with(), choice);
+            assert_eq!(d.check_on_api_credit(), choice == PayWith::Split);
+        }
+        // Choosing the split turns a disabled check on.
+        let mut d = AiDefaults::default();
+        d.clickbait.enabled = false;
+        PayWith::Split.apply(&mut d.billing, &mut d.clickbait);
+        assert!(d.clickbait.enabled);
+        // Unticking the check keeps the split but needs no key.
+        d.clickbait.enabled = false;
+        assert_eq!(d.pay_with(), PayWith::Split);
+        assert!(!d.check_on_api_credit());
+        // Other providers have no plan to split.
+        let d = AiDefaults { provider: Provider::Gemini, billing: Billing::ChatGptPlan, ..d };
+        assert_eq!(d.pay_with(), PayWith::ApiKey);
     }
 
     #[test]

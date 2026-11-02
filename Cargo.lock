@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "directories",
@@ -2696,6 +2696,7 @@ dependencies = [
  "open",
  "rfd",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2703,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-ai"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2722,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-analytics"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "duckdb",
  "juttusihti-core",
@@ -2734,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-bench"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "juttusihti-analytics",
@@ -2744,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "dom_smoothie",
@@ -2762,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-fetch"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "encoding_rs",

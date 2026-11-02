@@ -26,6 +26,24 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - Database schema version 6: a `fetch_full_text` feed setting, an `article_extracts` table, and
   a search index with an `extracted_text` column. Upgrading rebuilds the search index once.
 
+## [0.3.0] - 2026-11-02
+
+### Added
+
+- **Split billing for OpenAI**: "Pay with" has a third choice, ChatGPT plan with API credit for
+  the clickbait check. The check goes through the API key and everything else counts against the
+  plan, so plan runs can skip rewriting headlines that aren't clickbait. Estimates and run
+  results show the API credit separately. If the credit runs out, the run continues on the plan
+  without the check. Not yet tried against the real service.
+
+### Fixed
+
+- **"database lock poisoned" errors**: a headline with an `&` followed by text such as `ä` could
+  crash the feed reader, and every database action then failed until the app was restarted. That
+  headline now reads normally. Feeds are also read before the database is locked, so a feed that
+  fails to read affects only itself.
+- **Crash details are kept**: the app writes crash messages to `crash.log` in its data folder.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed
@@ -122,7 +140,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tero-k/juttusihti/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tero-k/juttusihti/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tero-k/juttusihti/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/tero-k/juttusihti/compare/v0.1.0...v0.1.1

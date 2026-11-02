@@ -149,6 +149,8 @@ pub enum RunError {
     ProviderMismatch { provider: juttusihti_core::pricing::Provider, session: juttusihti_core::pricing::Provider },
     #[error("the session is billed to {session}, but the client uses {client}")]
     BillingMismatch { client: juttusihti_core::pricing::Billing, session: juttusihti_core::pricing::Billing },
+    #[error("the clickbait check is paid with API credit, but the run has no OpenAI API key for it")]
+    NoCheckClient,
 }
 
 /// A sent request's budget reservation, settled when it returns.
@@ -176,6 +178,8 @@ enum Stop {
 pub struct Runner {
     db: Arc<Mutex<Store>>,
     client: Client,
+    /// Sends the clickbait check when it is paid differently from the run.
+    check_client: Option<Client>,
     catalog: Catalog,
     control: Control,
     progress: Option<mpsc::UnboundedSender<Progress>>,
@@ -193,7 +197,13 @@ struct Ctx {
 
 impl Runner {
     pub fn new(db: Arc<Mutex<Store>>, client: Client, catalog: Catalog, control: Control) -> Self {
-        Self { db, client, catalog, control, progress: None }
+        Self { db, client, check_client: None, catalog, control, progress: None }
+    }
+
+    /// The API-key client for a plan run's clickbait check.
+    pub fn with_check_client(mut self, client: Client) -> Self {
+        self.check_client = Some(client);
+        self
     }
 
     pub fn with_progress(mut self, tx: mpsc::UnboundedSender<Progress>) -> Self {
@@ -231,12 +241,15 @@ impl Runner {
         if config.billing != self.client.billing() {
             return Err(RunError::BillingMismatch { client: self.client.billing(), session: config.billing });
         }
+        if config.check_on_api_credit() && !self.check_client.as_ref().is_some_and(|c| c.billing() == Billing::ApiKey) {
+            return Err(RunError::NoCheckClient);
+        }
         let started = std::time::Instant::now();
         let today = Utc::now().date_naive();
         let price = self.catalog.price_for(config.provider, &config.model, config.billing, today);
         let check_price = config
             .clickbait_check()
-            .and_then(|c| self.catalog.price_for(config.provider, &c.model, config.billing, today));
+            .and_then(|c| self.catalog.price_for(config.provider, &c.model, Billing::ApiKey, today));
         let spent = self.db(|s| s.session_usage(session))?;
         let guard = Guard::new(config.limits, spent);
         self.control.reset();
@@ -596,7 +609,8 @@ impl Runner {
 
     /// Sends the classification batches, a few at a time, and caches each
     /// probability. Errors end the check without stopping the run; only
-    /// pause and cancel stop it.
+    /// pause, cancel and an empty account that also pays for the rewrites
+    /// stop it.
     async fn rate_headlines(
         &self,
         ctx: &mut Ctx,
@@ -609,9 +623,10 @@ impl Runner {
         self.emit(Progress::Stage { name: "Clickbait check", requests: bodies.len() });
         let timeout = std::time::Duration::from_secs(u64::from(check.timeout_secs.max(1)));
         let bodies = &bodies;
+        let client = self.check_client.as_ref().unwrap_or(&self.client);
         let send = |i: usize| async move {
             let reply = tokio::select! {
-                r = self.client.decide(&bodies[i], timeout) => Some(r),
+                r = client.decide(&bodies[i], timeout) => Some(r),
                 _ = self.control.cancelled() => None,
             };
             (i, reply)
@@ -700,16 +715,21 @@ impl Runner {
                     ctx.summary.headlines.check_errors += 1;
                     tracing::warn!(error = %e, "clickbait check failed");
                     // The rewrite would be refused too: pause, resumable after topping up.
-                    if matches!(e, AiError::NoCredit(_)) {
+                    if matches!(e, AiError::NoCredit(_)) && !ctx.config.check_on_api_credit() {
                         stop.get_or_insert(no_credit());
                         broken = true;
                         done += 1;
                         continue;
                     }
+                    // On a split run the plan still pays for the rewrites.
                     if !broken {
-                        self.emit(Progress::Note(format!(
-                            "Clickbait check failed ({e}); headlines go to the rewriting model without it."
-                        )));
+                        self.emit(Progress::Note(if matches!(e, AiError::NoCredit(_)) {
+                            "Your OpenAI API account has no credit left, so the clickbait check stopped; headlines \
+                                go to the rewriting model without it."
+                                .into()
+                        } else {
+                            format!("Clickbait check failed ({e}); headlines go to the rewriting model without it.")
+                        }));
                     }
                     broken = true;
                 }
