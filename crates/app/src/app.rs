@@ -521,7 +521,8 @@ impl App {
             async move {
                 let permit = slots.acquire_owned().await.map_err(|e| e.to_string())?;
                 let outcome = fetcher.fetch(&url, etag.as_deref(), last_modified.as_deref()).await;
-                let inserted = db.call(move |s| juttusihti_fetch::apply(s, id, outcome).map(|st| st.inserted)).await?;
+                let parsed = juttusihti_fetch::parse(outcome).await;
+                let inserted = db.call(move |s| juttusihti_fetch::apply(s, id, parsed).map(|st| st.inserted)).await?;
                 // Article pages are paced per host, not by the feed slots.
                 drop(permit);
                 if let Some(articles) = articles {

@@ -416,12 +416,17 @@ pub fn estimate(
     }
     if config.billing == Billing::ChatGptPlan {
         if config.provider == Provider::Openai {
-            warnings.push(
-                "Runs use your ChatGPT plan allowance instead of API credit. OpenAI does not publish plan allowances \
-                    in tokens; the run pauses if the plan or the app's weekly cap is reached. Output length cannot \
-                    be capped on the plan, so token use may exceed the estimate."
-                    .into(),
-            );
+            let paying = if config.check_on_api_credit() {
+                "The clickbait check is paid with API credit, and the cost shown is for the check. Everything else \
+                    uses your ChatGPT plan allowance."
+            } else {
+                "Runs use your ChatGPT plan allowance instead of API credit."
+            };
+            warnings.push(format!(
+                "{paying} OpenAI does not publish plan allowances in tokens; the run pauses if the plan or the app's \
+                    weekly cap is reached. Output length cannot be capped on the plan, so token use may exceed the \
+                    estimate."
+            ));
         } else {
             warnings.push(format!("{} cannot be billed to a ChatGPT plan.", config.provider));
         }

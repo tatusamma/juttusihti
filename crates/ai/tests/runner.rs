@@ -1253,6 +1253,156 @@ async fn no_credit_on_the_clickbait_check_pauses_before_any_rewrite() {
     assert!(r.stop_reason.as_deref().unwrap().contains("platform.openai.com"), "{:?}", r.stop_reason);
 }
 
+// ---- the clickbait check on API credit, everything else on the plan -------------------
+
+fn split_config() -> AnalysisConfig {
+    let mut c = check_config(&[Task::Headlines]);
+    c.billing = Billing::ChatGptPlan;
+    c.clickbait.on_api_credit = true;
+    c
+}
+
+/// A runner paying with the plan, and with the API key for the check.
+fn split_runner(db: &Arc<Mutex<Store>>, m: &Mock, saved: &Saved) -> Runner {
+    let session = Session::resume(servers(m), "oaiapp_test".into(), "r1".into(), persist(saved)).unwrap();
+    let plan = Client::new(Endpoint::chatgpt(Arc::new(session)), fast()).unwrap();
+    let key = Endpoint { provider: Provider::Openai, base_url: m.base.clone(), auth: Auth::ApiKey(API_KEY.into()) };
+    let check = Client::new(key, fast()).unwrap();
+    Runner::new(db.clone(), plan, Catalog::builtin(), Control::default()).with_check_client(check)
+}
+
+/// The classifier answers with JSON, the rewriter streams on the plan.
+fn split_reply(r: &Recorded, n: usize) -> MockReply {
+    if r.path == "/api/accounts/oauth/token" {
+        return refresh_reply(r);
+    }
+    let reply = classifier_and_rewriter(r, n);
+    if is_decision(r) { reply } else { ok(sse_completed(&reply.body)) }
+}
+
+fn has_bearer(r: &Recorded, token: &str) -> bool {
+    r.headers.to_ascii_lowercase().contains(&format!("authorization: bearer {token}"))
+}
+
+#[tokio::test]
+async fn a_split_run_sends_the_check_on_the_key_and_the_rewrites_on_the_plan() {
+    let db = seed_headlines();
+    let sid = session(&db, &split_config());
+    let m = mock(Arc::new(split_reply)).await;
+    let r = split_runner(&db, &m, &Default::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!((r.headlines.clickbait, r.headlines.rewrites_avoided), (3, 3));
+
+    let reqs = m.requests();
+    let checks: Vec<_> = reqs.iter().filter(|r| is_decision(r)).collect();
+    let rewrites: Vec<_> = reqs.iter().filter(|r| r.path == "/v1/responses").collect();
+    assert_eq!(checks.len(), 3);
+    assert_eq!(rewrites.len(), 1, "one rewriting request for all likely clickbait");
+    let key = API_KEY.to_ascii_lowercase();
+    assert!(checks.iter().all(|r| has_bearer(r, &key) && !has_bearer(r, "plan-access")), "check on the key");
+    assert!(rewrites.iter().all(|r| has_bearer(r, "plan-access") && !has_bearer(r, &key)), "rewrites on the plan");
+
+    // The check is real money, the rewrites a known zero; the summary adds them up.
+    let ledger = ledger_rows(&db);
+    let cost_of = |op: &str| -> Vec<Option<i64>> {
+        ledger.iter().filter(|(o, _)| (o == "clickbait_check") == (op == "check")).map(|(_, c)| *c).collect()
+    };
+    assert_eq!(cost_of("check"), [Some(40); 3], "{ledger:?}");
+    assert!(cost_of("rest").iter().all(|c| *c == Some(0)), "{ledger:?}");
+    assert_eq!(r.cost, Some(120));
+    assert_eq!(rewritten(&db).len(), 3);
+}
+
+#[tokio::test]
+async fn a_split_run_stays_within_the_cost_limit() {
+    let db = seed_headlines();
+    let mut cfg = split_config();
+    cfg.limits.max_cost = Some(1);
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(split_reply)).await;
+    let r = split_runner(&db, &m, &Default::default()).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed), "the check is skipped, the plan work goes on");
+    assert!(m.requests().iter().all(|r| !is_decision(r)), "the limit stops the check before it is sent");
+    assert_eq!(r.cost, Some(0));
+}
+
+#[tokio::test]
+async fn no_credit_on_a_split_run_continues_on_the_plan_without_the_check() {
+    let db = seed_headlines();
+    let mut cfg = split_config();
+    cfg.clickbait.batch_size = 50;
+    let sid = session(&db, &cfg);
+    let m = mock(Arc::new(|r: &Recorded, n| if is_decision(r) { no_credit() } else { split_reply(r, n) })).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let r = split_runner(&db, &m, &Default::default()).with_progress(tx).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed), "the plan still pays for the rewrites");
+    assert_eq!(r.stop_reason, None);
+    assert_eq!(m.requests().iter().filter(|r| is_decision(r)).count(), 1, "an empty account is not retried");
+    assert_eq!((r.headlines.classified, r.headlines.fallbacks, r.headlines.check_errors), (0, 6, 1));
+    assert_eq!(rewritten(&db).len(), 6, "every headline goes to the rewriting model");
+    let mut notes = Vec::new();
+    while let Ok(p) = rx.try_recv() {
+        if let Progress::Note(n) = p {
+            notes.push(n);
+        }
+    }
+    assert!(notes.iter().any(|n| n.contains("no credit left") && !n.contains("  ")), "{notes:?}");
+    assert_eq!(r.cost, Some(0), "a refused check is not charged");
+}
+
+#[tokio::test]
+async fn a_split_run_needs_the_key_for_its_check() {
+    let db = seed_headlines();
+    let sid = session(&db, &split_config());
+    let m = mock(Arc::new(split_reply)).await;
+    let saved: Saved = Default::default();
+    let plan = |m: &Mock| {
+        let session = Session::resume(servers(m), "oaiapp_test".into(), "r1".into(), persist(&saved)).unwrap();
+        Client::new(Endpoint::chatgpt(Arc::new(session)), fast()).unwrap()
+    };
+    let without = Runner::new(db.clone(), plan(&m), Catalog::builtin(), Control::default());
+    assert!(matches!(without.run(sid, YES).await.unwrap_err(), RunError::NoCheckClient));
+    // The plan's own token does not count as the key.
+    let wrong = Runner::new(db.clone(), plan(&m), Catalog::builtin(), Control::default()).with_check_client(plan(&m));
+    assert!(matches!(wrong.run(sid, YES).await.unwrap_err(), RunError::NoCheckClient));
+    assert_eq!(m.count(), 0, "nothing is sent");
+    // An API key can't stand in for the plan either.
+    let key = runner(&db, Provider::Openai, &m.base, Control::default());
+    assert!(matches!(key.run(sid, YES).await.unwrap_err(), RunError::BillingMismatch { .. }));
+}
+
+#[tokio::test]
+async fn a_paused_split_run_resumes_and_repeats_nothing() {
+    let db = seed_headlines();
+    let sid = session(&db, &split_config());
+    let plan_back = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let back = plan_back.clone();
+    let m = mock(Arc::new(move |r: &Recorded, n| {
+        // The plan's limit on the rewrite pauses the run after the check.
+        if r.path == "/v1/responses" && !back.load(Ordering::SeqCst) {
+            return MockReply {
+                status: 429,
+                body: json!({"error": {"code": "subscription_sharing_usage_limit_exceeded", "message": "limit"}}),
+                delay: Duration::ZERO,
+            };
+        }
+        split_reply(r, n)
+    }))
+    .await;
+    let saved: Saved = Default::default();
+    let r = split_runner(&db, &m, &saved).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Paused));
+    let checks = |m: &Mock| m.requests().iter().filter(|r| is_decision(r)).count();
+    let first = checks(&m);
+    assert_eq!(first, 3);
+
+    plan_back.store(true, Ordering::SeqCst);
+    let r = split_runner(&db, &m, &saved).run(sid, YES).await.unwrap();
+    assert_eq!(r.final_status, Some(SessionStatus::Completed));
+    assert_eq!(checks(&m), first, "ratings are remembered");
+    assert_eq!(rewritten(&db).len(), 3);
+}
+
 #[tokio::test]
 async fn a_rate_limit_is_still_retried() {
     let db = seed(3);

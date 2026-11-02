@@ -51,3 +51,6 @@ keyring = { version = "3.6", features = ["windows-native", "apple-native", "sync
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile.workspace = true

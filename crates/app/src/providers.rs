@@ -4,8 +4,8 @@
 
 use iced::widget::{column, container, pick_list, row, rule, scrollable, text, text_input};
 use iced::{Center, Element, Task as Cmd};
-use juttusihti_core::ai_defaults::{AiDefaults, Tier, recommended};
-use juttusihti_core::pricing::{Billing, Provider, format_usd, usd_to_micros};
+use juttusihti_core::ai_defaults::{AiDefaults, PayWith, Tier, recommended};
+use juttusihti_core::pricing::{Provider, format_usd, usd_to_micros};
 
 use crate::db::Db;
 use crate::icons::Icon;
@@ -37,7 +37,7 @@ pub enum Msg {
     SignOut,
     DefaultsLoaded(Result<AiDefaults, String>),
     SetProvider(Provider),
-    SetBilling(Billing),
+    SetPayWith(PayWith),
     SetTier(Tier),
     MaxArticles(String),
     MaxCost(String),
@@ -127,7 +127,7 @@ impl State {
                     d.model = None;
                 });
             }
-            Msg::SetBilling(b) => return self.change(|d| d.billing = b),
+            Msg::SetPayWith(p) => return self.change(|d| p.apply(&mut d.billing, &mut d.clickbait)),
             Msg::SetTier(t) => {
                 return self.change(|d| {
                     d.tier = t;
@@ -294,15 +294,30 @@ impl State {
         ]
         .spacing(SPACE[1]);
         if d.provider == Provider::Openai {
+            let pay_with = Some(d.pay_with());
             col = col.push(
                 row![
                     label("Pay with"),
-                    style::choice("My ChatGPT plan", Billing::ChatGptPlan, Some(d.billing), Msg::SetBilling),
-                    style::choice("API key", Billing::ApiKey, Some(d.billing), Msg::SetBilling),
+                    column![
+                        style::choice("My ChatGPT plan", PayWith::ChatGptPlan, pay_with, Msg::SetPayWith),
+                        style::choice("API key", PayWith::ApiKey, pay_with, Msg::SetPayWith),
+                        style::choice(
+                            "ChatGPT plan, with API credit for the clickbait check",
+                            PayWith::Split,
+                            pay_with,
+                            Msg::SetPayWith
+                        ),
+                    ]
+                    .spacing(SPACE[0]),
                 ]
-                .spacing(SPACE[3])
-                .align_y(Center),
+                .spacing(SPACE[1]),
             );
+            if d.pay_with() == PayWith::Split {
+                col = col.push(style::note(
+                    "Needs both the ChatGPT sign-in and an OpenAI API key with credit, set up below. If the credit \
+                     runs out, headlines are rewritten on the plan without the check.",
+                ));
+            }
         }
         let mut tiers = column![].spacing(SPACE[0]);
         for t in Tier::ALL {
@@ -338,7 +353,7 @@ impl State {
             .align_y(Center),
         );
         // The Decisions API needs an OpenAI API key; other runs rewrite in one stage.
-        if d.provider == Provider::Openai && d.billing() == Billing::ApiKey {
+        if d.provider == Provider::Openai && d.pay_with() != PayWith::ChatGptPlan {
             let c = &d.clickbait;
             let mut check = row![
                 label("Headlines"),

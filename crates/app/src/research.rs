@@ -7,6 +7,7 @@ use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use iced::widget::{Space, button, column, container, pick_list, row, rule, scrollable, text, text_input};
 use iced::{Center, Element, Fill, Length, Task as Cmd};
 use juttusihti_ai::{Approval, Control, Progress, RunSummary};
+use juttusihti_core::ai_defaults::PayWith;
 use juttusihti_core::analysis::{AnalysisConfig, Depth, SessionSummary, Task};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::estimate::{Estimate, Scenario};
@@ -39,7 +40,7 @@ pub enum Msg {
     ToggleLabel(i64, bool),
     RequireDate(bool),
     Provider(Provider),
-    Billing(Billing),
+    PayWith(PayWith),
     LoadPlanModels,
     PlanModels(Result<Vec<String>, String>),
     ModelPicked(String),
@@ -105,7 +106,7 @@ pub struct State {
     labels: BTreeSet<i64>,
     require_date: bool,
     provider: Provider,
-    billing: Billing,
+    pay_with: PayWith,
     /// Models the signed-in ChatGPT plan offers, once loaded.
     plan_models: Option<Vec<String>>,
     model: String,
@@ -168,7 +169,7 @@ impl State {
             labels: BTreeSet::new(),
             require_date: false,
             provider,
-            billing: Billing::ApiKey,
+            pay_with: PayWith::ApiKey,
             plan_models: None,
             model,
             depth: Depth::HeadlinesAndDescriptions,
@@ -220,6 +221,7 @@ impl State {
             return Cmd::none();
         }
         let (id, provider, billing) = (detail.id, detail.config.provider, detail.config.billing);
+        let check_on_api_credit = detail.config.check_on_api_credit();
         let control = Control::default();
         self.run = Some(ActiveRun {
             session: id,
@@ -229,7 +231,10 @@ impl State {
             cost: Some(0),
             billing,
         });
-        Cmd::run(run_session(self.db.shared(), self.catalog.clone(), id, provider, billing, control), Msg::Run)
+        Cmd::run(
+            run_session(self.db.shared(), self.catalog.clone(), id, provider, billing, check_on_api_credit, control),
+            Msg::Run,
+        )
     }
 
     pub fn load(&self) -> Cmd<Msg> {
@@ -289,6 +294,11 @@ impl State {
         let tz = iana_hint();
         // The clickbait check and parallelism follow the AI defaults.
         let defaults = self.lists.as_ref().and_then(|l| l.defaults.clone()).unwrap_or_default();
+        let mut clickbait = defaults.clickbait;
+        let mut billing = Billing::ApiKey;
+        if self.provider == Provider::Openai {
+            self.pay_with.apply(&mut billing, &mut clickbait);
+        }
         Ok(AnalysisConfig {
             scope: SearchQuery {
                 text: self.query.trim().to_string(),
@@ -302,7 +312,7 @@ impl State {
             },
             range_label: format!("{} – {}{tz}", show_date(from), show_date(to)),
             provider: self.provider,
-            billing: if self.provider == Provider::Openai { self.billing } else { Billing::ApiKey },
+            billing,
             model: self.model.trim().to_string(),
             depth: self.depth,
             tasks: self.tasks.clone(),
@@ -317,7 +327,7 @@ impl State {
             use_batch: false,
             relevance_criteria: (self.tasks.contains(&Task::Relevance) && !self.criteria.trim().is_empty())
                 .then(|| self.criteria.trim().to_string()),
-            clickbait: defaults.clickbait,
+            clickbait,
             parallel_requests: defaults.parallel_requests,
         })
     }
@@ -335,7 +345,7 @@ impl State {
                 {
                     self.defaults_applied = true;
                     self.provider = d.provider;
-                    self.billing = d.billing();
+                    self.pay_with = d.pay_with();
                     self.model = d.model();
                     self.tasks = d.tasks.clone();
                     if let Some(c) = d.max_cost {
@@ -385,15 +395,15 @@ impl State {
             Msg::Provider(p) => {
                 self.provider = p;
                 if p != Provider::Openai {
-                    self.billing = Billing::ApiKey;
+                    self.pay_with = PayWith::ApiKey;
                 }
                 self.model = juttusihti_core::ai_defaults::recommended(p, juttusihti_core::ai_defaults::Tier::Fast)
                     .model
                     .to_string();
                 self.invalidate();
             }
-            Msg::Billing(b) => {
-                self.billing = b;
+            Msg::PayWith(p) => {
+                self.pay_with = p;
                 self.invalidate();
             }
             Msg::LoadPlanModels => {
@@ -658,7 +668,7 @@ impl State {
                 .padding(SPACE[1]),
         );
 
-        let on_plan = self.provider == Provider::Openai && self.billing == Billing::ChatGptPlan;
+        let on_plan = self.provider == Provider::Openai && self.pay_with != PayWith::ApiKey;
         let models = match (&self.plan_models, on_plan) {
             (Some(m), true) => m.clone(),
             _ => self.catalog.models(self.provider),
@@ -695,12 +705,19 @@ impl State {
                 provider.push(style::note(format!("Recommended — fast: {} · quality: {}", fast.model, quality.model)));
         }
         if self.provider == Provider::Openai {
+            let pay_with = Some(self.pay_with);
             provider = provider.push(
-                row![
-                    style::choice("API key (billed per token)", Billing::ApiKey, Some(self.billing), Msg::Billing),
-                    style::choice("My ChatGPT plan", Billing::ChatGptPlan, Some(self.billing), Msg::Billing),
+                column![
+                    style::choice("API key (billed per token)", PayWith::ApiKey, pay_with, Msg::PayWith),
+                    style::choice("My ChatGPT plan", PayWith::ChatGptPlan, pay_with, Msg::PayWith),
+                    style::choice(
+                        "ChatGPT plan, with API credit for the clickbait check",
+                        PayWith::Split,
+                        pay_with,
+                        Msg::PayWith
+                    ),
                 ]
-                .spacing(SPACE[3]),
+                .spacing(SPACE[0]),
             );
         }
         if on_plan {
@@ -852,7 +869,10 @@ impl State {
             style::heading("Pre-analysis estimate"),
             style::note(format!(
                 "{} · {} · {} · {}",
-                config.range_label, config.provider, config.model, config.billing
+                config.range_label,
+                config.provider,
+                config.model,
+                paid_with(config)
             )),
             stat("Articles matched", s.matched.to_string()),
             stat("Included (max limit)", s.selected.to_string()),
@@ -961,7 +981,7 @@ impl State {
         let c = &d.config;
         let mut col = column![
             style::heading(format!("Session #{} — {}", d.id, d.status.as_str())),
-            style::note(format!("{} · {} · {} · {}", c.range_label, c.provider, c.model, c.billing)),
+            style::note(format!("{} · {} · {} · {}", c.range_label, c.provider, c.model, paid_with(c))),
             style::note(format!(
                 "Content sent: {}. Tasks: {}.",
                 c.depth,
@@ -1018,7 +1038,13 @@ impl State {
                         "I agree to send the content of these articles ({}) to {}{}.",
                         c.depth.label().to_lowercase(),
                         c.provider,
-                        if c.billing == Billing::ChatGptPlan { ", using my ChatGPT plan" } else { "" }
+                        if c.check_on_api_credit() {
+                            ", using my ChatGPT plan and API credit for the clickbait check"
+                        } else if c.billing == Billing::ChatGptPlan {
+                            ", using my ChatGPT plan"
+                        } else {
+                            ""
+                        }
                     ),
                 )
                 .on_toggle(Msg::Consent),
@@ -1043,7 +1069,8 @@ impl State {
     }
 }
 
-/// Runs an approved session with the stored credentials for its billing,
+/// Runs an approved session with the stored credentials for its billing
+/// (and the OpenAI API key for a clickbait check paid with API credit),
 /// streaming progress. The caller has already obtained the user's consent.
 pub fn run_session(
     shared: std::sync::Arc<std::sync::Mutex<juttusihti_core::store::Store>>,
@@ -1051,22 +1078,25 @@ pub fn run_session(
     id: i64,
     provider: Provider,
     billing: Billing,
+    check_on_api_credit: bool,
     control: Control,
 ) -> impl iced::futures::Stream<Item = RunEvent> {
     iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
         use iced::futures::SinkExt;
         let endpoint = match billing {
             Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
-            Billing::ApiKey => match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
-                Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
-                Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI setup.")),
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(e.to_string()),
-            },
+            Billing::ApiKey => api_key_endpoint(provider).await,
         };
-        let client = match endpoint.and_then(|e| {
-            juttusihti_ai::Client::new(e, juttusihti_ai::RetryPolicy::default()).map_err(|e| e.to_string())
-        }) {
+        let client = |e: Result<juttusihti_ai::Endpoint, String>| {
+            e.and_then(|e| {
+                juttusihti_ai::Client::new(e, juttusihti_ai::RetryPolicy::default()).map_err(|e| e.to_string())
+            })
+        };
+        let check_client = match check_on_api_credit {
+            true => client(api_key_endpoint(Provider::Openai).await).map(Some),
+            false => Ok(None),
+        };
+        let (client, check_client) = match client(endpoint).and_then(|c| check_client.map(|k| (c, k))) {
             Ok(c) => c,
             Err(e) => {
                 let _ = out.send(RunEvent::Finished(Err(e))).await;
@@ -1074,7 +1104,10 @@ pub fn run_session(
             }
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let runner = juttusihti_ai::Runner::new(shared, client, catalog, control).with_progress(tx);
+        let mut runner = juttusihti_ai::Runner::new(shared, client, catalog, control).with_progress(tx);
+        if let Some(c) = check_client {
+            runner = runner.with_check_client(c);
+        }
         let handle = tokio::spawn(async move { runner.run(id, Approval { consent_to_send: true }).await });
         while let Some(p) = rx.recv().await {
             let _ = out.send(RunEvent::Progress(p)).await;
@@ -1088,10 +1121,32 @@ pub fn run_session(
     })
 }
 
-/// Dollar cost, or the plan for runs charged to a ChatGPT plan.
+/// The endpoint for a provider's stored API key.
+async fn api_key_endpoint(provider: Provider) -> Result<juttusihti_ai::Endpoint, String> {
+    match tokio::task::spawn_blocking(move || crate::secrets::get(provider)).await {
+        Ok(Ok(Some(k))) => Ok(juttusihti_ai::Endpoint::official(provider, k)),
+        Ok(Ok(None)) => Err(format!("No API key for {provider}. Add one under AI setup.")),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// How a session pays, for the estimate and session headers.
+fn paid_with(c: &AnalysisConfig) -> String {
+    if c.check_on_api_credit() {
+        format!("{} + API credit for the clickbait check", c.billing)
+    } else {
+        c.billing.to_string()
+    }
+}
+
+/// Dollar cost, or the plan for runs charged to a ChatGPT plan. A plan's own
+/// cost is a known zero, so any other cost is a clickbait check on API credit.
 pub fn cost_text(billing: Option<Billing>, cost: Option<Micros>) -> String {
     match (billing, cost) {
-        (Some(Billing::ChatGptPlan), _) => "on your ChatGPT plan".into(),
+        (Some(Billing::ChatGptPlan), Some(0)) => "on your ChatGPT plan".into(),
+        (Some(Billing::ChatGptPlan), Some(c)) => format!("{} API credit, the rest on your ChatGPT plan", format_usd(c)),
+        (Some(Billing::ChatGptPlan), None) => "API credit unknown, the rest on your ChatGPT plan".into(),
         (_, Some(c)) => format_usd(c),
         (_, None) => "cost unknown".into(),
     }
@@ -1139,6 +1194,18 @@ fn iana_hint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_text_separates_api_credit_from_the_plan() {
+        assert_eq!(cost_text(Some(Billing::ChatGptPlan), Some(0)), "on your ChatGPT plan");
+        assert_eq!(
+            cost_text(Some(Billing::ChatGptPlan), Some(1_200)),
+            "$0.0012 API credit, the rest on your ChatGPT plan"
+        );
+        assert_eq!(cost_text(Some(Billing::ChatGptPlan), None), "API credit unknown, the rest on your ChatGPT plan");
+        assert_eq!(cost_text(Some(Billing::ApiKey), Some(1_200)), "$0.0012");
+        assert_eq!(cost_text(Some(Billing::ApiKey), None), "cost unknown");
+    }
 
     #[test]
     fn parses_finnish_and_iso_dates() {
