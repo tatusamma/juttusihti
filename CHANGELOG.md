@@ -17,6 +17,14 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   results show the API credit separately. If the credit runs out, the run continues on the plan
   without the check. Not yet tried against the real service.
 
+### Fixed
+
+- **"database lock poisoned" errors**: a headline with an `&` followed by text such as `ä` could
+  crash the feed reader, and every database action then failed until the app was restarted. That
+  headline now reads normally. Feeds are also read before the database is locked, so a feed that
+  fails to read affects only itself.
+- **Crash details are kept**: the app writes crash messages to `crash.log` in its data folder.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed

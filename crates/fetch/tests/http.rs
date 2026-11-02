@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use juttusihti_core::NewFeed;
 use juttusihti_core::store::Store;
-use juttusihti_fetch::{FetchError, FetchOutcome, Fetcher, Policy, apply};
+use juttusihti_fetch::{FetchError, FetchOutcome, Fetcher, Policy, apply, parse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -90,7 +90,7 @@ async fn conditional_requests_round_trip_into_store() {
     let mut store = Store::open_in_memory().unwrap();
     let feed_id = store.add_feed(&NewFeed { url: url.clone(), ..Default::default() }).unwrap();
 
-    let stats = apply(&mut store, feed_id, fetcher.fetch(&url, None, None).await).unwrap();
+    let stats = apply(&mut store, feed_id, parse(fetcher.fetch(&url, None, None).await).await).unwrap();
     assert_eq!(stats.inserted, 3);
     let feed = store.feed(feed_id).unwrap();
     assert_eq!(feed.etag.as_deref(), Some("\"v1\""));
@@ -129,9 +129,25 @@ async fn client_errors_are_not_retried_and_are_recorded() {
     let fetcher = Fetcher::new(fast_policy()).unwrap();
     let mut store = Store::open_in_memory().unwrap();
     let feed_id = store.add_feed(&NewFeed { url: url.clone(), ..Default::default() }).unwrap();
-    assert!(apply(&mut store, feed_id, fetcher.fetch(&url, None, None).await).is_err());
+    assert!(apply(&mut store, feed_id, parse(fetcher.fetch(&url, None, None).await).await).is_err());
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert!(store.feed(feed_id).unwrap().last_error.unwrap().contains("404"));
+}
+
+#[tokio::test]
+async fn a_headline_with_multibyte_text_after_an_ampersand_is_stored() {
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>T</title>
+<item><guid>1</guid><title>Q&amp;A: 1234567ä tail</title><link>https://example.com/1</link></item>
+</channel></rss>"#;
+    let (base, _) = serve(vec![Reply::ok(rss)]).await;
+    let url = format!("{base}/rss");
+    let fetcher = Fetcher::new(fast_policy()).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let feed_id = store.add_feed(&NewFeed { url: url.clone(), ..Default::default() }).unwrap();
+
+    let stats = apply(&mut store, feed_id, parse(fetcher.fetch(&url, None, None).await).await).unwrap();
+
+    assert_eq!(stats.inserted, 1);
 }
 
 #[tokio::test]

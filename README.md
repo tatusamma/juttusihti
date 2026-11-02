@@ -266,7 +266,8 @@ cargo run -p juttusihti         # data in the OS data dir; override with JUTTUSI
 Debug info is turned off for dependencies (`[profile.dev.package."*"]`): with it on, the debug
 `target/` grew past 16 GB.
 
-Logging: `JUTTUSIHTI_LOG=debug`. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
+Logging: `JUTTUSIHTI_LOG=debug`. Panics also go to `crash.log` in the data dir, which stays on the
+computer and can quote feed text, so read it before sharing it. Renderer: GPU by default; `ICED_BACKEND=tiny-skia` or
 Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
 ### CI and releases

@@ -2558,6 +2558,7 @@ dependencies = [
  "open",
  "rfd",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

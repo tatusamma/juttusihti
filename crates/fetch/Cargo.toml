@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 juttusihti-core = { path = "../core" }
 reqwest = { version = "0.13", default-features = false, features = ["default-tls", "charset", "http2", "system-proxy", "gzip", "brotli", "deflate"] }
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

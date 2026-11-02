@@ -42,6 +42,7 @@ Valuables:
 | Arbitrary SQL from AI or users in analytics | DuckDB runs only fixed report queries; no free-form SQL entry point. | — |
 | DuckDB extension / file / network abuse | Autoload and autoinstall off, external access off, community extensions off, memory and threads bounded, `lock_configuration`. | `locked_connection_blocks_extensions_files_and_reconfiguration` |
 | Malicious feed content (HTML/script) | Content is reduced to plain text for display; HTML is never rendered or executed. | `html_to_text_strips_tags_scripts_and_entities` |
+| Feed content that crashes the parser | Feeds are parsed before the database is locked, so a panic fails that feed and leaves the database usable. | `a_parser_panic_fails_only_that_feed` |
 | `javascript:` / `file:` links | Only http(s) URLs are stored, opened in the browser, followed as redirects, or imported from OPML. | `parses_atom_and_drops_unsafe_links`, OPML tests, `refuses_non_web_urls` |
 | Oversized or hostile documents | Size limits on feeds (16 MB), OPML (8 MB), stored fields (512 KB), AI responses (4 MB), tiles (1 MB). Limits are checked after decompression. | `rejects_oversized_bodies`, `rejects_non_images_and_oversized_tiles` |
 | XML entity expansion / XXE | feed-rs (quick-xml) does not resolve external entities or expand DTD entities. | — (library property) |
