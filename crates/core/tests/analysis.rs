@@ -200,6 +200,55 @@ fn clickbait_check_plans_its_own_stage_and_settles_headlines() {
 }
 
 #[test]
+fn a_plan_run_can_pay_for_the_clickbait_check_with_api_credit() {
+    let s = seeded();
+    let mut cfg = config(&[Task::Headlines]);
+    (cfg.provider, cfg.model, cfg.billing) = (Provider::Openai, "model-only-on-the-plan".into(), Billing::ChatGptPlan);
+    cfg.clickbait = ClickbaitCheck::default();
+    assert!(cfg.clickbait_check().is_none(), "plan runs have no check unless asked");
+    assert!(!cfg.check_on_api_credit());
+    let scope = s.analysis_scope(&cfg).unwrap();
+    assert_eq!(estimate(&cfg, &scope, 0, &Catalog::builtin(), today()).expected().cost, Some(0));
+
+    cfg.clickbait.on_api_credit = true;
+    assert!(cfg.clickbait_check().is_some());
+    assert!(cfg.check_on_api_credit());
+    let e = estimate(&cfg, &scope, 0, &Catalog::builtin(), today());
+    assert_eq!(e.stages[0].stage, Stage::ClickbaitCheck);
+    assert!(e.price_known);
+    assert!(e.expected().cost.unwrap() > 0, "the check is real money; the plan part is a known zero");
+    assert!(e.warnings.iter().any(|w| w.contains("paid with API credit")), "{:?}", e.warnings);
+    assert!(e.warnings.iter().all(|w| !w.contains("  ")), "no runs of spaces: {:?}", e.warnings);
+
+    // The cached ratings stay valid whichever way the check is paid for.
+    let mut on_key = cfg.clickbait.clone();
+    on_key.on_api_credit = false;
+    assert_eq!(clickbait_key("h", &cfg.clickbait, cfg.depth), clickbait_key("h", &on_key, cfg.depth));
+
+    // An API-key run is unaffected, and so is one that turned the check off.
+    let mut key = cfg.clone();
+    key.billing = Billing::ApiKey;
+    assert!(key.clickbait_check().is_some() && !key.check_on_api_credit());
+    cfg.clickbait.enabled = false;
+    assert!(!cfg.check_on_api_credit());
+    // So are other providers.
+    cfg.clickbait.enabled = true;
+    cfg.provider = Provider::Anthropic;
+    assert!(cfg.clickbait_check().is_none());
+}
+
+#[test]
+fn sessions_saved_before_the_split_stay_without_it() {
+    let mut cfg = config(&[Task::Headlines]);
+    (cfg.provider, cfg.billing, cfg.clickbait) = (Provider::Openai, Billing::ChatGptPlan, ClickbaitCheck::default());
+    let mut v = serde_json::to_value(&cfg).unwrap();
+    v["clickbait"].as_object_mut().unwrap().remove("on_api_credit");
+    let old: AnalysisConfig = serde_json::from_value(v).unwrap();
+    assert!(!old.clickbait.on_api_credit);
+    assert!(old.clickbait_check().is_none(), "approved without a check, runs without one");
+}
+
+#[test]
 fn sessions_saved_before_the_clickbait_check_run_without_it() {
     let mut v = serde_json::to_value(config(&[Task::Headlines])).unwrap();
     v.as_object_mut().unwrap().remove("clickbait");

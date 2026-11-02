@@ -9,6 +9,14 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Split billing for OpenAI**: "Pay with" has a third choice, ChatGPT plan with API credit for
+  the clickbait check. The check goes through the API key and everything else counts against the
+  plan, so plan runs can skip rewriting headlines that aren't clickbait. Estimates and run
+  results show the API credit separately. If the credit runs out, the run continues on the plan
+  without the check. Not yet tried against the real service.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed
