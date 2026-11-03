@@ -555,7 +555,8 @@ pub fn search_capped(conn: &rusqlite::Connection, q: &SearchQuery, page: Page, c
         p.push(Value::Integer(page.limit as i64));
         p.push(Value::Integer(page.offset as i64));
         let sql = format!(
-            "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved, NULL, NULL{from_where}
+            "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved, NULL, NULL,
+                    {HAS_FULL_TEXT}{from_where}
              ORDER BY a.effective_at DESC, a.id DESC LIMIT ? OFFSET ?"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -590,7 +591,8 @@ pub fn search_capped(conn: &rusqlite::Connection, q: &SearchQuery, page: Page, c
     let placeholders = vec!["?"; ranked.len()].join(",");
     let sql = format!(
         "SELECT a.id, a.feed_id, f.title, a.title, a.url, a.effective_at, a.is_read, a.is_saved,
-                snippet(articles_fts, -1, '{HIGHLIGHT_START}', '{HIGHLIGHT_END}', '…', 16), NULL
+                snippet(articles_fts, -1, '{HIGHLIGHT_START}', '{HIGHLIGHT_END}', '…', 16), NULL,
+                {HAS_FULL_TEXT}
          FROM articles_fts JOIN articles a ON a.id = articles_fts.rowid JOIN feeds f ON f.id = a.feed_id
          WHERE articles_fts MATCH ? AND articles_fts.rowid IN ({placeholders})"
     );
@@ -608,6 +610,10 @@ pub fn search_capped(conn: &rusqlite::Connection, q: &SearchQuery, page: Page, c
     Ok(SearchResults { items, total, total_is_exact, ranked_window, interpreted })
 }
 
+/// List-row flag: the article has text fetched from its page.
+const HAS_FULL_TEXT: &str =
+    "EXISTS (SELECT 1 FROM article_extracts fx WHERE fx.article_id = a.id AND fx.status = 'ok')";
+
 fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleSummary> {
     Ok(ArticleSummary {
         id: r.get(0)?,
@@ -620,6 +626,7 @@ fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleSummary> {
         is_saved: r.get(7)?,
         snippet: r.get(8)?,
         rank: r.get(9)?,
+        has_full_text: r.get(10)?,
     })
 }
 

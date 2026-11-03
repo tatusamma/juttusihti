@@ -7,12 +7,13 @@ use crate::app::Message;
 use crate::style::{self, SIZE_BODY, SPACE};
 
 /// Keyboard shortcuts in the reader, as (keys, action).
-const SHORTCUTS: [(&str, &str); 10] = [
+const SHORTCUTS: [(&str, &str); 11] = [
     ("j / ↓", "Next article"),
     ("k / ↑", "Previous article"),
     ("o / Enter", "Open the article in the browser"),
     ("s", "Save or unsave the article"),
     ("m", "Mark the article read or unread"),
+    ("f", "Fetch the article's full text from its page"),
     ("n / p", "Next or previous page of the list"),
     ("/ or Ctrl+F", "Search"),
     ("Ctrl+R", "Refresh all feeds"),
@@ -48,6 +49,7 @@ const SECTIONS: [(&str, &[&str]); 9] = [
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
             "Labels can be added to an article from its preview. The Labels screen renames, merges and deletes them.",
             "Feeds that only send a teaser can fetch the full article: open the feed's edit form (pencil in the feed menu) and tick \"Fetch full articles for short entries\". On refresh, Juttusihti reads each short entry's page once, keeps its main text for reading, search and AI, and shows \"full text fetched from …\" under the title. No JavaScript is run, and private or local addresses are never contacted.",
+            "Any article can also get its full text on request: hover over it in the list and click the download icon at the right, press f, or use the button in the reading pane. Articles with full text show a small book icon after the date. The reading pane says where the text came from, or why there is none (for example a paywall or a blocked request), with a button to try again.",
             "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
         ],
     ),

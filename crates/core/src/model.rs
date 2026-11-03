@@ -83,6 +83,8 @@ pub struct ArticleSummary {
     pub snippet: Option<String>,
     /// FTS5 bm25 rank (lower is better) when produced by a search.
     pub rank: Option<f64>,
+    /// Text was fetched from the article page (full-article text).
+    pub has_full_text: bool,
 }
 
 /// Which built-in collection an article list shows.

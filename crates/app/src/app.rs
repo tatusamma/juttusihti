@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, pick_list, responsive, rich_text, row, rule, scrollable, span, stack,
-    text, text_input, tooltip,
+    Space, button, column, container, hover, operation, pick_list, responsive, rich_text, row, rule, scrollable, span,
+    stack, text, text_input, tooltip,
 };
 use iced::{Center, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
+use juttusihti_core::extract::{ArticleExtract, ExtractStatus, TEASER_MAX_CHARS};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::ListFilter;
 use juttusihti_core::{
@@ -29,6 +30,9 @@ use crate::{feeds_menu, format, rail};
 const PAGE_SIZE: u32 = 50;
 const MAX_PARALLEL_FETCHES: usize = 4;
 const SEARCH_ID: &str = "search";
+/// Why a fetched article page gave no text.
+const NO_TEXT_FOUND: &str =
+    "no article text found on the page (often a paywall, a cookie wall or a page that needs JavaScript)";
 /// Fixed heights, so the feeds dropdown can be anchored under its button.
 const TOP_BAR_HEIGHT: f32 = 52.0;
 const LIST_HEADER_HEIGHT: f32 = 44.0;
@@ -135,8 +139,8 @@ pub struct Preview {
     article: Article,
     feed_title: String,
     body: String,
-    /// The page `body` was extracted from, when it is fetched full-article text.
-    full_text_from: Option<String>,
+    /// The stored full-article result, if the page was ever tried.
+    extract: Option<ArticleExtract>,
     labels: Vec<ArticleLabel>,
     headline: Option<juttusihti_core::headlines::Headline>,
 }
@@ -214,6 +218,10 @@ pub enum Message {
     FeedTitle(String),
     FeedFolder(FolderChoice),
     FeedFullText(bool),
+    /// Fetch one article's page now, whatever its feed's setting.
+    FetchFullText(ArticleId),
+    /// How that went, and why when no text came of it.
+    FullTextFetched(ArticleId, Result<(ExtractStatus, Option<String>), String>),
     NewFolder(String),
     SaveFeed,
     CancelEditFeed,
@@ -228,6 +236,8 @@ pub struct App {
     fetcher: Option<Fetcher>,
     /// Article pages for feeds with full-article text on.
     articles: Option<ArticleFetcher>,
+    /// Articles whose page is being fetched on request.
+    full_text_pending: std::collections::HashSet<ArticleId>,
     fetch_slots: Arc<Semaphore>,
     sidebar: Sidebar,
     place: Place,
@@ -299,6 +309,7 @@ impl App {
             db,
             fetcher,
             articles,
+            full_text_pending: Default::default(),
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
             sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![], labels: vec![] },
             place: Place::News,
@@ -511,6 +522,32 @@ impl App {
         )
     }
 
+    /// Loads the reading pane for an article, marking it read when `mark_read`.
+    fn load_preview(&self, id: ArticleId, mark_read: bool) -> Task<Message> {
+        let db = self.db.clone();
+        Task::perform(
+            async move {
+                db.call(move |s| -> juttusihti_core::Result<Box<Preview>> {
+                    if mark_read {
+                        s.set_read(id, true)?;
+                    }
+                    let article = s.article(id)?;
+                    let feed_title = s.feed(article.feed_id)?.title;
+                    Ok(Box::new(Preview {
+                        body: s.article_text(id)?,
+                        extract: s.article_extract(id)?,
+                        labels: s.article_labels(id)?,
+                        headline: s.headline(id)?,
+                        feed_title,
+                        article,
+                    }))
+                })
+                .await
+            },
+            Message::PreviewLoaded,
+        )
+    }
+
     fn refresh_feed(&self, feed: &Feed) -> Option<Task<Message>> {
         let fetcher = self.fetcher.clone()?;
         let db = self.db.clone();
@@ -638,35 +675,62 @@ impl App {
                 Task::none()
             }
             Message::Open(id) => {
-                let db = self.db.clone();
                 let was_unread = self.listing.items.iter().any(|a| a.id == id && !a.is_read);
                 if let Some(item) = self.listing.items.iter_mut().find(|a| a.id == id) {
                     item.is_read = true;
                 }
-                let load = Task::perform(
-                    async move {
-                        db.call(move |s| -> juttusihti_core::Result<Box<Preview>> {
-                            s.set_read(id, true)?;
-                            let article = s.article(id)?;
-                            let feed_title = s.feed(article.feed_id)?.title;
-                            let full_text_from = s
-                                .article_extract(id)?
-                                .filter(|e| e.status == juttusihti_core::extract::ExtractStatus::Ok)
-                                .map(|e| e.url);
-                            Ok(Box::new(Preview {
-                                body: s.article_text(id)?,
-                                full_text_from,
-                                labels: s.article_labels(id)?,
-                                headline: s.headline(id)?,
-                                feed_title,
-                                article,
-                            }))
-                        })
-                        .await
-                    },
-                    Message::PreviewLoaded,
-                );
+                let load = self.load_preview(id, true);
                 if was_unread { Task::batch([load, self.load_sidebar()]) } else { load }
+            }
+            Message::FetchFullText(id) => {
+                let Some(articles) = self.articles.clone() else {
+                    self.show_error("Networking unavailable: article pages cannot be fetched.".into());
+                    return Task::none();
+                };
+                if !self.full_text_pending.insert(id) {
+                    return Task::none();
+                }
+                let db = self.db.clone();
+                Task::perform(
+                    async move {
+                        let target = db.call(move |s| s.full_text_target(id)).await?;
+                        let (url, result) = articles.extract(&target).await;
+                        let why = match &result {
+                            juttusihti_core::extract::Extraction::Failed(e) => Some(e.clone()),
+                            juttusihti_core::extract::Extraction::NoText => Some(NO_TEXT_FOUND.to_string()),
+                            juttusihti_core::extract::Extraction::Text(_) => None,
+                        };
+                        let status = db.call(move |s| s.save_extract(id, &url, result)).await?;
+                        Ok((status, why))
+                    },
+                    move |r| Message::FullTextFetched(id, r),
+                )
+            }
+            Message::FullTextFetched(id, result) => {
+                self.full_text_pending.remove(&id);
+                let ok = matches!(result, Ok((ExtractStatus::Ok, _)));
+                let title = self.listing.items.iter().find(|a| a.id == id).map(|a| a.title.clone());
+                if let Some(item) = self.listing.items.iter_mut().find(|a| a.id == id) {
+                    item.has_full_text |= ok;
+                }
+                match &result {
+                    Ok((ExtractStatus::Ok, _)) => {}
+                    Ok((ExtractStatus::Empty, _)) => self.show_status(format!(
+                        "No longer article text found{}.",
+                        title.map(|t| format!(" for “{t}”")).unwrap_or_default()
+                    )),
+                    Ok((_, why)) => self.show_error(format!(
+                        "Full article not fetched{}: {}",
+                        title.map(|t| format!(" for “{t}”")).unwrap_or_default(),
+                        why.as_deref().unwrap_or("unknown error")
+                    )),
+                    Err(e) => self.show_error(format!("Full article not fetched: {e}")),
+                }
+                if self.preview.as_ref().is_some_and(|p| p.article.id == id) {
+                    self.load_preview(id, false)
+                } else {
+                    Task::none()
+                }
             }
             Message::PreviewLoaded(Ok(preview)) => {
                 self.preview = Some(*preview);
@@ -1217,6 +1281,10 @@ impl App {
             Key::Character("k") | Key::Named(keyboard::key::Named::ArrowUp) => self.open_relative(-1),
             Key::Character("s") => self.update(Message::ToggleSaved),
             Key::Character("m") => self.update(Message::ToggleRead),
+            Key::Character("f") => match &self.preview {
+                Some(p) => self.update(Message::FetchFullText(p.article.id)),
+                None => Task::none(),
+            },
             Key::Character("o") | Key::Named(keyboard::key::Named::Enter) => self.update(Message::OpenInBrowser),
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
@@ -1283,38 +1351,41 @@ impl App {
         }
         // The menus and the AI popover open just under the list header.
         let below_header = TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT;
-        if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
-            // Under the dropdown button at the left of the list header.
-            let anchor = Point::new(rail::WIDTH + 1.0 + LIST_HEADER_PAD, below_header);
-            let panel = feeds_menu::panel(
-                &self.sidebar,
-                self.scope,
-                &self.add_feed,
-                self.feed_edit.as_ref(),
-                self.confirm_unsubscribe,
-                self.fetcher.is_some(),
-                feeds_menu::list_max_height(
-                    size.height - below_header - if self.status.is_some() { STATUS_BAR_HEIGHT } else { 0.0 },
-                    self.feed_edit.is_some(),
-                    self.confirm_unsubscribe.is_some(),
-                ),
-            );
-            return style::overlay(layout, panel, anchor, Message::CloseOverlays);
-        }
-        if self.list_menu_open && self.screen == Screen::Reader {
-            // Right-aligned under the ⋯ button at the right of the list header.
-            let left = rail::WIDTH + 1.0;
-            let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
-            return style::overlay(layout, self.view_list_menu(), Point::new(x, below_header), Message::CloseOverlays);
-        }
-        if self.quick.open && self.screen == Screen::Reader {
-            // Right-aligned under the ✨ button, like the ⋯ menu.
-            let left = rail::WIDTH + 1.0;
-            let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
-            let panel = self.quick.view().map(Message::Quick);
-            return style::overlay(layout, panel, Point::new(x, below_header), Message::CloseOverlays);
-        }
-        layout.into()
+        let popup: Option<(Element<'_, Message>, Point)> =
+            if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
+                // Under the dropdown button at the left of the list header.
+                let anchor = Point::new(rail::WIDTH + 1.0 + LIST_HEADER_PAD, below_header);
+                let panel = feeds_menu::panel(
+                    &self.sidebar,
+                    self.scope,
+                    &self.add_feed,
+                    self.feed_edit.as_ref(),
+                    self.confirm_unsubscribe,
+                    self.fetcher.is_some(),
+                    feeds_menu::list_max_height(
+                        size.height - below_header - if self.status.is_some() { STATUS_BAR_HEIGHT } else { 0.0 },
+                        self.feed_edit.is_some(),
+                        self.confirm_unsubscribe.is_some(),
+                    ),
+                );
+                Some((panel, anchor))
+            } else if self.list_menu_open && self.screen == Screen::Reader {
+                // Right-aligned under the ⋯ button at the right of the list header.
+                let left = rail::WIDTH + 1.0;
+                let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
+                Some((self.view_list_menu(), Point::new(x, below_header)))
+            } else if self.quick.open && self.screen == Screen::Reader {
+                // Right-aligned under the ✨ button, like the ⋯ menu.
+                let left = rail::WIDTH + 1.0;
+                let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
+                let panel = self.quick.view().map(Message::Quick);
+                Some((panel, Point::new(x, below_header)))
+            } else {
+                None
+            };
+        // The window is a layer stack whether or not a popup is open, so opening one
+        // does not rebuild the list underneath (which would scroll it back to the top).
+        style::layers(layout, popup, Message::CloseOverlays)
     }
 
     fn view_top_bar(&self) -> Element<'_, Message> {
@@ -1466,6 +1537,15 @@ impl App {
         if a.is_saved {
             meta = meta.push(icon(Icon::Star).size(SIZE_SMALL).style(style::accent));
         }
+        if a.has_full_text {
+            meta = meta.push(tooltip(
+                icon(Icon::FullText).size(SIZE_SMALL).style(style::faint),
+                style::tip("Full article text fetched"),
+                tooltip::Position::Top,
+            ));
+        } else if self.full_text_pending.contains(&a.id) {
+            meta = meta.push(text("fetching full article…").size(SIZE_SMALL).style(style::faint));
+        }
         let mut entry = column![title, meta].spacing(2).width(Fill);
         if let Some(snippet) = &a.snippet {
             let spans: Vec<_> = format::snippet_segments(snippet)
@@ -1490,12 +1570,21 @@ impl App {
             .padding([SPACE[1], SPACE[2]])
             .style(if selected { style::row_selected } else { style::row })
             .on_press(Message::Open(a.id));
-        if selected {
+        let row: Element<'a, Message> = if selected {
             let edge = container(Space::new().width(2).height(Fill)).style(style::accent_edge);
             stack![row_button, edge].width(Fill).into()
         } else {
             row_button.into()
+        };
+        // On hover, a button at the right edge fetches the full article.
+        let offer_fetch =
+            self.articles.is_some() && a.url.is_some() && !a.has_full_text && !self.full_text_pending.contains(&a.id);
+        if !offer_fetch {
+            return row;
         }
+        let fetch =
+            style::icon_button(Icon::FetchArticle, "Fetch full article", SIZE_BODY, Some(Message::FetchFullText(a.id)));
+        hover(row, container(fetch).align_right(Fill).center_y(Fill).padding(Padding::ZERO.right(SPACE[1])))
     }
 
     /// Range, page arrows and notes about the search under the list.
@@ -1633,12 +1722,58 @@ impl App {
         }
     }
 
+    /// One line under the article actions on its full-article text: where it came
+    /// from, why there is none, or a button to fetch it.
+    fn view_full_text_status<'a>(&'a self, p: &'a Preview) -> Option<Element<'a, Message>> {
+        let id = p.article.id;
+        let can_fetch = self.articles.is_some() && p.article.url.is_some();
+        let fetch = |label: &'a str| {
+            style::quiet_button(
+                Some(Icon::FetchArticle),
+                label,
+                style::quiet,
+                can_fetch.then_some(Message::FetchFullText(id)),
+            )
+        };
+        let note = |t: String| text(t).size(SIZE_SMALL).style(style::faint);
+        let line = if self.full_text_pending.contains(&id) {
+            row![note("Fetching the full article…".into())]
+        } else {
+            match &p.extract {
+                Some(e) if e.status == ExtractStatus::Ok => {
+                    let host = url_host(&e.url).unwrap_or(e.url.as_str()).to_string();
+                    row![
+                        icon(Icon::FullText).size(SIZE_SMALL).style(style::faint),
+                        note(format!("Full text from {host}, {}", format::full_date(e.fetched_at))),
+                        fetch("Fetch again"),
+                    ]
+                }
+                Some(e) => {
+                    let why = match (e.status, &e.error) {
+                        (ExtractStatus::Failed, Some(err)) => err.clone(),
+                        (ExtractStatus::Failed, None) => "the page could not be fetched".into(),
+                        _ => NO_TEXT_FOUND.into(),
+                    };
+                    row![note(format!("Full text not available: {why}.")), fetch("Try again")]
+                }
+                // Only offered where the feed text looks like a teaser; `f` works everywhere.
+                None if can_fetch && p.body.chars().count() < TEASER_MAX_CHARS => {
+                    row![note("Only the feed's teaser is shown.".into()), fetch("Fetch full article")]
+                }
+                None => return None,
+            }
+        };
+        Some(line.spacing(SPACE[1]).align_y(Center).wrap().into())
+    }
+
     fn view_preview(&self) -> Element<'_, Message> {
         let Some(p) = &self.preview else {
             return container(
                 column![
                     text("Select an article").size(SIZE_BODY).style(style::faint),
-                    text("j/k move · s save · m read/unread · o open · / search").size(SIZE_SMALL).style(style::faint),
+                    text("j/k move · s save · m read/unread · o open · f full article · / search")
+                        .size(SIZE_SMALL)
+                        .style(style::faint),
                 ]
                 .spacing(SPACE[1])
                 .align_x(Center),
@@ -1653,10 +1788,6 @@ impl App {
         }
         if let Some(author) = &a.author {
             meta.push_str(&format!(" · {author}"));
-        }
-        if let Some(from) = &p.full_text_from {
-            let host = url_host(from).unwrap_or(from.as_str());
-            meta.push_str(&format!(" · full text fetched from {host}"));
         }
         let save = if a.is_saved {
             style::quiet_button(Some(Icon::Star), "Saved", style::quiet_active, Some(Message::ToggleSaved))
@@ -1721,10 +1852,17 @@ impl App {
         } else {
             &p.body
         };
+        let mut top = column![
+            column![text(meta).size(SIZE_SMALL).style(style::muted), self.view_headline(p)].spacing(SPACE[1]),
+            actions,
+        ]
+        .spacing(SPACE[2]);
+        if let Some(line) = self.view_full_text_status(p) {
+            top = top.push(line);
+        }
         scrollable(
             column![
-                column![text(meta).size(SIZE_SMALL).style(style::muted), self.view_headline(p)].spacing(SPACE[1]),
-                actions,
+                top,
                 text(body).size(SIZE_BODY).line_height(1.6).style(style::body),
                 rule::horizontal(1),
                 column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]),
@@ -1782,6 +1920,142 @@ mod tests {
         fn db_has_feed(&self, id: FeedId) -> bool {
             self.db.shared().lock().unwrap().feeds().unwrap().iter().any(|f| f.id == id)
         }
+    }
+
+    /// The widget types along a tree, depth first: equal shapes keep their state.
+    fn shape(tree: &iced::advanced::widget::Tree) -> Vec<(usize, iced::advanced::widget::tree::Tag)> {
+        fn walk(
+            t: &iced::advanced::widget::Tree,
+            depth: usize,
+            out: &mut Vec<(usize, iced::advanced::widget::tree::Tag)>,
+        ) {
+            out.push((depth, t.tag));
+            for c in &t.children {
+                walk(c, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(tree, 0, &mut out);
+        out
+    }
+
+    #[test]
+    fn popups_do_not_rebuild_the_list_underneath() {
+        use iced::advanced::widget::Tree;
+        let (mut app, _) = app_with_feed();
+        let size = Size::new(1200.0, 800.0);
+        let base = |app: &App| {
+            let view = app.view_sized(size);
+            let tree = Tree::new(&view);
+            assert!(!tree.children.is_empty(), "the window is a layer stack");
+            shape(&tree.children[0])
+        };
+        let closed = base(&app);
+        for open in [Message::ToggleListMenu, Message::ToggleFeedsMenu] {
+            let _ = app.update(open);
+            assert_eq!(base(&app), closed, "the window under a popup keeps its widget tree");
+            let _ = app.update(Message::CloseOverlays);
+            assert_eq!(base(&app), closed);
+        }
+    }
+
+    fn app_with_articles() -> (App, Vec<ArticleId>) {
+        let (mut app, feed) = app_with_feed();
+        let ids = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let entry = |guid: &str, url: Option<&str>| juttusihti_core::NewArticle {
+                guid: guid.into(),
+                url: url.map(str::to_string),
+                title: format!("Juttu {guid}"),
+                summary: Some("Lyhyt teaser.".into()),
+                content: None,
+                author: None,
+                published_at: Some(juttusihti_core::now()),
+            };
+            s.ingest(feed, &[entry("a", Some("https://example.com/a")), entry("b", None)]).unwrap();
+            app.listing.items = s.list_articles(ListFilter::default(), Page::first(10)).unwrap().0;
+            // [with a link, without one]
+            let by_url = |has: bool| app.listing.items.iter().find(|a| a.url.is_some() == has).unwrap().id;
+            vec![by_url(true), by_url(false)]
+        };
+        (app, ids)
+    }
+
+    #[test]
+    fn fetching_an_article_on_request_tracks_progress_and_marks_the_row() {
+        let (mut app, ids) = app_with_articles();
+        let id = ids[0];
+        let _ = app.update(Message::FetchFullText(id));
+        assert!(app.full_text_pending.contains(&id));
+        let _ = app.update(Message::FetchFullText(id));
+        assert_eq!(app.full_text_pending.len(), 1, "one fetch per article at a time");
+
+        let _ = app.update(Message::FullTextFetched(id, Ok((ExtractStatus::Ok, None))));
+        assert!(app.full_text_pending.is_empty());
+        assert!(app.listing.items.iter().find(|a| a.id == id).unwrap().has_full_text);
+        assert!(app.status.is_none(), "success needs no message");
+
+        let other = ids[1];
+        let _ = app.update(Message::FetchFullText(other));
+        let _ = app
+            .update(Message::FullTextFetched(other, Ok((ExtractStatus::Failed, Some("server returned 403".into())))));
+        assert!(!app.listing.items.iter().find(|a| a.id == other).unwrap().has_full_text);
+        assert!(app.status_error && app.status.as_deref().unwrap().contains("403"), "{:?}", app.status);
+    }
+
+    #[test]
+    fn f_fetches_the_open_article_and_does_nothing_without_one() {
+        let (mut app, ids) = app_with_articles();
+        let key = || Message::Key(Key::Character("f".into()), Default::default());
+        let _ = app.update(key());
+        assert!(app.full_text_pending.is_empty());
+        let article = app.db.shared().lock().unwrap().article(ids[0]).unwrap();
+        app.preview = Some(Preview {
+            article,
+            feed_title: "Example".into(),
+            body: "Lyhyt teaser.".into(),
+            extract: None,
+            labels: vec![],
+            headline: None,
+        });
+        let _ = app.update(key());
+        assert!(app.full_text_pending.contains(&ids[0]));
+    }
+
+    #[test]
+    fn reading_pane_explains_the_full_text_state() {
+        let (mut app, ids) = app_with_articles();
+        let article = |i| app.db.shared().lock().unwrap().article(i).unwrap();
+        let preview = |a, extract| Preview {
+            article: a,
+            feed_title: "Example".into(),
+            body: "Lyhyt teaser.".into(),
+            extract,
+            labels: vec![],
+            headline: None,
+        };
+        // Teaser without an attempt: offered. Without a link: nothing to offer.
+        let p = preview(article(ids[0]), None);
+        assert!(app.view_full_text_status(&p).is_some());
+        let p = preview(article(ids[1]), None);
+        assert!(app.view_full_text_status(&p).is_none());
+        // A long feed text is not a teaser: no line (f still works).
+        let mut p = preview(article(ids[0]), None);
+        p.body = "x".repeat(TEASER_MAX_CHARS);
+        assert!(app.view_full_text_status(&p).is_none());
+        // Any stored attempt is always explained.
+        let failed = ArticleExtract {
+            url: "https://example.com/a".into(),
+            status: ExtractStatus::Failed,
+            text: None,
+            error: Some("server returned 403".into()),
+            fetched_at: 0,
+        };
+        let p = preview(article(ids[0]), Some(failed));
+        assert!(app.view_full_text_status(&p).is_some());
+        app.full_text_pending.insert(ids[0]);
+        assert!(app.view_full_text_status(&p).is_some());
     }
 
     #[test]
