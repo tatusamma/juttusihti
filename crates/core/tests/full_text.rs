@@ -234,3 +234,55 @@ fn upgrading_a_version_5_database_indexes_existing_articles() {
     assert!(!off);
     conn.execute("INSERT INTO articles_fts(articles_fts) VALUES ('integrity-check')", []).unwrap();
 }
+
+#[test]
+fn list_rows_flag_articles_with_full_text() {
+    let (s, feed) = seeded();
+    let id = id_of(&s, "1");
+    let flagged = |q: &str| -> Vec<(ArticleId, bool)> {
+        let filter = juttusihti_core::store::ListFilter { feed_id: Some(feed), ..Default::default() };
+        let items = if q.is_empty() {
+            s.list_articles(filter, Page::first(10)).unwrap().0
+        } else {
+            s.search(&SearchQuery { text: q.into(), ..Default::default() }, Page::first(10)).unwrap().items
+        };
+        items.into_iter().map(|a| (a.id, a.has_full_text)).collect()
+    };
+    assert!(flagged("").iter().all(|(_, f)| !f));
+
+    s.save_extract(id, "https://news.example/1", Extraction::Failed("403".into())).unwrap();
+    assert!(flagged("").iter().all(|(_, f)| !f), "a failed attempt is not full text");
+
+    s.save_extract(id, "https://news.example/1", Extraction::Text(full_text())).unwrap();
+    for q in ["", "sataman", "kallioperän"] {
+        let rows = flagged(q);
+        assert!(rows.contains(&(id, true)), "{q:?}: {rows:?}");
+        assert!(rows.iter().filter(|(_, f)| *f).count() == 1, "{q:?}: {rows:?}");
+    }
+}
+
+#[test]
+fn any_linked_article_can_be_fetched_on_request() {
+    let (s, feed) = seeded();
+    // The feed setting is off and entry 2 is not a teaser: still a valid target.
+    let long = id_of(&s, "2");
+    let c = s.full_text_target(long).unwrap();
+    assert_eq!(c.url, "https://news.example/2");
+    assert!(s.full_text_candidates(feed, 10).unwrap().is_empty());
+    assert!(matches!(s.full_text_target(id_of(&s, "3")), Err(Error::Invalid(_))), "no link");
+    assert!(matches!(s.full_text_target(9_999), Err(Error::NotFound)));
+}
+
+#[test]
+fn a_failed_refetch_keeps_the_earlier_text() {
+    let (s, _) = seeded();
+    let id = id_of(&s, "1");
+    s.save_extract(id, "https://news.example/1", Extraction::Text(full_text())).unwrap();
+    let failed = s.save_extract(id, "https://news.example/1", Extraction::Failed("server returned 503".into()));
+    assert_eq!(failed.unwrap(), ExtractStatus::Failed, "the attempt itself is reported");
+    assert_eq!(s.save_extract(id, "https://news.example/1", Extraction::NoText).unwrap(), ExtractStatus::Empty);
+    let kept = s.article_extract(id).unwrap().unwrap();
+    assert_eq!(kept.status, ExtractStatus::Ok);
+    assert_eq!(kept.text.as_deref(), Some(full_text().as_str()));
+    assert_eq!(hits(&s, "kallioperän"), 1);
+}

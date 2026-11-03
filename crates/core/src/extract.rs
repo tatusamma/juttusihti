@@ -15,7 +15,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::normalize::{html_to_text, sha256_hex};
 use crate::store::Store;
-use crate::{ArticleId, FeedId, Result, now};
+use crate::{ArticleId, Error, FeedId, Result, now};
 
 /// Entries whose feed content and summary are both shorter than this (in
 /// characters of plain text) count as teasers.
@@ -124,9 +124,25 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Records the result of fetching an article page. Text no longer than
-    /// the feed's own text is recorded as [`ExtractStatus::Empty`]. An
-    /// article deleted in the meantime is ignored.
+    /// The page to fetch for one article on request, whatever its feed's
+    /// setting, length or age. Fails with [`Error::Invalid`] when the entry
+    /// has no web link.
+    pub fn full_text_target(&self, article_id: ArticleId) -> Result<Candidate> {
+        let url: Option<String> = self
+            .conn()
+            .query_row("SELECT url FROM articles WHERE id = ?1", [article_id], |r| r.get(0))
+            .optional()?
+            .ok_or(Error::NotFound)?;
+        match url {
+            Some(url) if crate::feed::is_web_url(&url) => Ok(Candidate { article_id, url }),
+            _ => Err(Error::Invalid("this entry has no link to an article page".into())),
+        }
+    }
+
+    /// Records the result of fetching an article page and returns how it
+    /// went. Text no longer than the feed's own text counts as
+    /// [`ExtractStatus::Empty`]. A failed or empty attempt does not replace
+    /// text stored earlier. An article deleted in the meantime is ignored.
     pub fn save_extract(&self, article_id: ArticleId, url: &str, result: Extraction) -> Result<ExtractStatus> {
         let feed_len: Option<i64> = self
             .conn()
@@ -143,6 +159,12 @@ impl Store {
             Extraction::Text(_) | Extraction::NoText => (ExtractStatus::Empty, None, None),
             Extraction::Failed(e) => (ExtractStatus::Failed, None, Some(e)),
         };
+        // A failed or empty re-fetch never replaces text fetched earlier.
+        if status != ExtractStatus::Ok
+            && self.article_extract(article_id)?.is_some_and(|e| e.status == ExtractStatus::Ok)
+        {
+            return Ok(status);
+        }
         let hash = text.as_deref().map(sha256_hex);
         self.conn().execute(
             "INSERT INTO article_extracts(article_id, url, status, text, text_hash, error, fetched_at)

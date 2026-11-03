@@ -126,15 +126,23 @@ menu) and tick **Fetch full articles for short entries**. It is off for every fe
   ([dom_smoothie](https://crates.io/crates/dom_smoothie)). Up to 20 pages per feed per refresh,
   only entries from the last 14 days, at most one request per site every 2 seconds.
 - The text is stored apart from the feed's own content, which is never changed. When present it
-  is what the reading pane shows (the article's details then say *full text fetched from
-  …*), it is indexed for search (`content:` covers it too), and it is the AI input at the
-  "Archived article text" depth. Cached AI results for the teaser are not reused for it.
+  is what the reading pane shows, it is indexed for search (`content:` covers it too), and it
+  is the AI input at the "Archived article text" depth. Cached AI results for the teaser are
+  not reused for it.
+- **On request, for any article**, whatever its feed's setting, length or age: hover over it
+  in the list and click the download icon at the right edge, press **f**, or use the button in
+  the reading pane.
+- Articles with full text show a small book icon after the date in the list. Under the article
+  actions, the reading pane says where the text came from (*Full text from yle.fi, …*) or why
+  there is none (*page returned 403*, *no article text found on the page*), with **Fetch
+  again** / **Try again**.
 - Pages are treated as untrusted: no JavaScript is run, pages are capped at 4 MB (never more
   than the feed limit), only `text/html` is read, and every redirect is checked: only http(s),
   and never to `localhost`, private, link-local or other non-public addresses. Timeouts and
   system proxy settings are the same as for feeds.
-- A page that fails or has no usable article text (paywalls, cookie walls) is remembered and
-  not fetched again; the entry keeps showing the feed's teaser.
+- A page that fails or has no usable article text (paywalls, cookie walls, pages that need
+  JavaScript) is not fetched again automatically; the entry keeps showing the feed's teaser and
+  the reading pane says why. A failed retry never replaces text fetched earlier.
 
 ### Searching
 
@@ -160,6 +168,7 @@ not pending AI suggestions); it works with or without search text, and **Clear**
 | `o` / `Enter` | open the article in the browser |
 | `s` | save or unsave |
 | `m` | mark read or unread |
+| `f` | fetch the full article text |
 | `n` / `p` | next / previous page |
 | `/` or `Ctrl+F` | search |
 | `Ctrl+R` | refresh all feeds |

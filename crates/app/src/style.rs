@@ -507,6 +507,20 @@ pub fn tip<'a, M: 'a>(label: impl text::IntoFragment<'a>) -> Element<'a, M> {
 /// A transparent backdrop covers all of `base` while the panel is shown: pressing anywhere outside
 /// the panel emits `on_close` and does not reach `base`. Presses inside the panel stay in the panel.
 /// Give `panel` its own surface (usually [`popover`]) and size; the result takes `base`'s size.
+/// The window with an optional popup over it: `(panel, anchor)` as for [`overlay`].
+/// Always a layer stack with `base` first, so opening or closing a popup keeps the
+/// state of everything in `base` (such as a list's scroll position).
+pub fn layers<'a, M: Clone + 'a>(
+    base: impl Into<Element<'a, M>>,
+    popup: Option<(Element<'a, M>, Point)>,
+    on_close: M,
+) -> Element<'a, M> {
+    match popup {
+        Some((panel, anchor)) => overlay(base, panel, anchor, on_close),
+        None => stack![base.into()].into(),
+    }
+}
+
 pub fn overlay<'a, M: Clone + 'a>(
     base: impl Into<Element<'a, M>>,
     panel: impl Into<Element<'a, M>>,

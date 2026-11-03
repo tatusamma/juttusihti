@@ -20,11 +20,23 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - Article pages are fetched with the existing timeouts and proxy settings, capped at 4 MB,
   paced to one request per site every 2 seconds, and refused when a URL or any redirect points
   to a non-web scheme, `localhost`, or a private, link-local or otherwise non-public address.
+- **Full article on request**: hover over an article in the list and click the download icon at
+  the right, press **f**, or use the button in the reading pane. Works for any article with a
+  link, whatever its feed's setting.
+- Articles with full text show a book icon after the date in the list. The reading pane says
+  where the full text came from, or why there is none (for example *page returned 403* or *no
+  article text found on the page*), with a button to try again. A failed retry keeps text
+  fetched earlier.
 
 ### Changed
 
 - Database schema version 6: a `fetch_full_text` feed setting, an `article_extracts` table, and
   a search index with an `extracted_text` column. Upgrading rebuilds the search index once.
+
+### Fixed
+
+- Opening a menu or panel above the article list (the feed menu, ⋯ or ✨) no longer scrolls
+  the list back to the top.
 
 ## [0.3.0] - 2026-11-02
 
