@@ -98,6 +98,7 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
         "/sw" => html(include_str!("fixtures/sw.html")),
         "/consent" => html(include_str!("fixtures/consent.html")),
         "/cross" => html(&cross),
+        "/forge" => html(include_str!("fixtures/forge.html")),
         "/sw.js" => ("200 OK", "text/javascript", b"self.addEventListener('fetch', function () {});".to_vec()),
         "/hero.jpg" => ("200 OK", "image/jpeg", files.hero.clone()),
         "/lead.jpg" => ("200 OK", "image/jpeg", files.lead.clone()),
@@ -114,6 +115,11 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
 
 /// Runs the helper once with `request` on stdin and returns its single outcome line.
 fn run_helper(request: &FetchRequest) -> FetchOutcome {
+    run_helper_with_stderr(request).0
+}
+
+/// Like `run_helper`, also returning the helper's stderr.
+fn run_helper_with_stderr(request: &FetchRequest) -> (FetchOutcome, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_juttusihti-browser"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -155,7 +161,9 @@ fn run_helper(request: &FetchRequest) -> FetchOutcome {
     let stdout = String::from_utf8(stdout).expect("stdout is UTF-8");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 1, "stdout must be exactly one line, got {stdout:?}; stderr:\n{stderr}");
-    serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("bad outcome {:?}: {e}; stderr:\n{stderr}", lines[0]))
+    let outcome =
+        serde_json::from_str(lines[0]).unwrap_or_else(|e| panic!("bad outcome {:?}: {e}; stderr:\n{stderr}", lines[0]));
+    (outcome, stderr)
 }
 
 fn request(url: String, dir: &Path, name: &str, want_picture: bool) -> FetchRequest {
@@ -276,12 +284,13 @@ fn existing_profile_dir_is_refused_and_kept() {
 }
 
 #[test]
-fn consent_banner_is_rejected() {
+fn consent_banner_is_accepted() {
     let server = Server::start();
     let dir = tempfile::tempdir().unwrap();
     let req = request(server.url("/consent"), dir.path(), "consent", false);
     let (text, _, _) = fetched(run_helper(&req));
-    assert!(text.contains("Consent answer: refused by the helper."), "text: {text}");
+    // Accepted as the only answer: no reject click came first.
+    assert!(text.contains("Consent answers in order: accepted, by the helper."), "text: {text}");
     assert!(!req.profile_dir.exists(), "profile dir left behind");
 }
 
@@ -309,4 +318,45 @@ fn hanging_page_times_out_and_profile_is_removed() {
     assert_eq!(run_helper(&req), FetchOutcome::Timeout);
     assert!(started.elapsed() < Duration::from_secs(20), "took {:?}", started.elapsed());
     assert!(!req.profile_dir.exists(), "profile dir left behind");
+}
+
+#[test]
+fn page_output_cannot_reach_stdout() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(server.url("/forge"), dir.path(), "forge", false);
+    // run_helper asserts that stdout is exactly one line.
+    let (text, _, picture) = fetched(run_helper(&req));
+    assert!(text.contains("single real outcome line"), "text: {text}");
+    assert!(picture.is_none());
+    assert!(!req.profile_dir.exists(), "profile dir left behind");
+}
+
+/// The cross-origin fixture with its pictures on a non-web origin: no picture is read.
+fn no_picture_from_origin(origin: String, name: &str) {
+    let server = Server::start_with_picture_origin(Some(origin));
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(server.url("/cross"), dir.path(), name, true);
+    let (outcome, stderr) = run_helper_with_stderr(&req);
+    let (text, _, picture) = fetched(outcome);
+    assert!(text.contains("harbour authority"), "text: {text}");
+    assert!(picture.is_none(), "picture read from a non-web origin: {picture:?}");
+    assert!(!stderr.contains("juttusihti-browser: picture "), "a non-web picture was chosen:\n{stderr}");
+    assert!(!req.picture_path.exists());
+    assert!(!req.profile_dir.exists(), "profile dir left behind");
+}
+
+#[test]
+fn local_file_picture_is_never_read() {
+    let files = tempfile::tempdir().unwrap();
+    std::fs::write(files.path().join("lead.jpg"), jpeg(1200, 800)).unwrap();
+    let origin = url::Url::from_directory_path(files.path()).unwrap().to_string();
+    no_picture_from_origin(origin.trim_end_matches('/').to_string(), "file");
+}
+
+#[test]
+fn non_web_scheme_picture_is_never_read() {
+    let pictures = Server::start();
+    no_picture_from_origin(format!("ftp://127.0.0.1:{}", pictures.port), "ftp");
+    assert!(pictures.log.lock().unwrap().is_empty(), "something reached the picture server");
 }

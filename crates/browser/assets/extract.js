@@ -61,8 +61,9 @@
     }
   }
 
+  // Only web pictures: never file:, data:, blob: or any other scheme a page could point at.
   function usable(url) {
-    return !!url && !/^data:/i.test(url) && !undecodable(url) && !isSiteDefault(url);
+    return !!url && /^https?:\/\//i.test(url) && !undecodable(url) && !isSiteDefault(url);
   }
 
   // The best candidate of a srcset: the widest up to 2000 px, else the narrowest wider one.

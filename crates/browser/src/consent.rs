@@ -3,9 +3,10 @@
 //! The autoconsent bundle runs as a user script in every frame of the page, from the moment the
 //! document's `<head>` exists (so it can also hide a banner before it shows). A small driver plays
 //! the part of autoconsent's "background" side: it hands over the configuration and the bundled
-//! rules, first asks for an opt-out (reject, "only necessary"), and only when that fails asks for an
-//! opt-in. The state of the top frame is kept in `window.__juttusihtiConsent` for the engine to
-//! poll. Nothing is downloaded: the rules are pinned in `assets/` (see `assets/LICENSES.md`).
+//! rules with `autoAction: "optIn"`, so a banner is accepted straight away (the user's choice),
+//! with no opt-out attempt first. The reader never clicks, and the whole profile, cookies
+//! included, is deleted after the article is extracted. The state of the top frame is kept in
+//! `window.__juttusihtiConsent` for the engine to poll. Nothing is downloaded: the rules are pinned in `assets/` (see `assets/LICENSES.md`).
 
 use std::time::Duration;
 
@@ -17,7 +18,8 @@ pub const NO_CMP_GRACE: Duration = Duration::from_millis(2500);
 const AUTOCONSENT_JS: &str = include_str!("../assets/autoconsent.js");
 const AUTOCONSENT_RULES: &str = include_str!("../assets/autoconsent-rules.json");
 
-/// Runs before the bundle; `__RULES__` is replaced with the bundled compact rule set.
+/// Runs before the bundle; `__RULES__` is replaced with the bundled rule set. It is the full
+/// `rules/rules.json`, not `compact-rules.json`: autoconsent's compact rules carry no opt-in steps.
 const DRIVER_JS: &str = r#"
 // Only web pages get autoconsent. Throwing stops this user script before the bundle runs: in
 // Servo 0.7 reading location.ancestorOrigins (autoconsent's top-frame check) panics the script
@@ -27,11 +29,11 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
 }
 (function () {
   if (window.__juttusihtiConsent) return;
-  var state = { lifecycle: null, detected: null, cmp: null, optOut: null, optIn: null };
+  var state = { lifecycle: null, detected: null, cmp: null, optIn: null };
   window.__juttusihtiConsent = state;
   var config = {
     enabled: true,
-    autoAction: "optOut",
+    autoAction: "optIn",
     isMainWorld: true,
     enablePrehide: true,
     enableCosmeticRules: true,
@@ -48,7 +50,7 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
   window.autoconsentSendMessage = function (message) {
     switch (message.type) {
       case "init":
-        reply({ type: "initResp", config: config, rules: { autoconsent: [], compact: rules } });
+        reply({ type: "initResp", config: config, rules: { autoconsent: rules.autoconsent } });
         break;
       case "eval":
         // Only the bundled rules send code here (normally evaluated inline, as isMainWorld is set).
@@ -64,11 +66,6 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
         break;
       case "popupFound":
         state.cmp = message.cmp;
-        break;
-      case "optOutResult":
-        state.optOut = !!message.result;
-        // No reject choice worked: accept instead, as the design allows when rejecting is impossible.
-        if (!message.result) reply({ type: "optIn" });
         break;
       case "optInResult":
         state.optIn = !!message.result;
@@ -98,17 +95,17 @@ pub struct ConsentState {
     pub detected: Option<String>,
     /// The consent platform whose banner was found open.
     pub cmp: Option<String>,
-    pub opt_out: Option<bool>,
+    /// Result of accepting the banner.
     pub opt_in: Option<bool>,
 }
 
 impl ConsentState {
-    /// Autoconsent has nothing more to do: no banner, or the banner has been answered (rejected,
-    /// or accepted after rejecting failed), successfully or not. `waited` is the time since the
+    /// Autoconsent has nothing more to do: no banner, or the banner has been accepted,
+    /// successfully or not. `waited` is the time since the
     /// page finished loading: with no consent platform recognised by `NO_CMP_GRACE`, there is
     /// none to wait for (autoconsent itself would keep looking for a minute on a quiet page).
     pub fn settled(&self, waited: Duration) -> bool {
-        if self.opt_out == Some(true) || self.opt_in.is_some() {
+        if self.opt_in.is_some() {
             return true;
         }
         if self.detected.is_none() && self.cmp.is_none() && waited >= NO_CMP_GRACE {
@@ -129,26 +126,31 @@ mod tests {
     const SOON: Duration = Duration::from_millis(100);
 
     #[test]
-    fn settles_on_no_banner_or_an_answer() {
-        assert!(state(r#"{"lifecycle":"nothingDetected","cmp":null,"optOut":null,"optIn":null}"#).settled(SOON));
-        assert!(state(r#"{"lifecycle":"optOutSucceeded","cmp":"x","optOut":true,"optIn":null}"#).settled(SOON));
-        assert!(state(r#"{"lifecycle":"optInFailed","cmp":"x","optOut":false,"optIn":false}"#).settled(SOON));
+    fn settles_on_no_banner_or_an_accept() {
+        assert!(state(r#"{"lifecycle":"nothingDetected","cmp":null,"optIn":null}"#).settled(SOON));
+        assert!(state(r#"{"lifecycle":"optInSucceeded","cmp":"x","optIn":true}"#).settled(SOON));
+        assert!(state(r#"{"lifecycle":"optInFailed","cmp":"x","optIn":false}"#).settled(SOON));
     }
 
     #[test]
-    fn failed_opt_out_waits_for_the_opt_in() {
-        let failed = state(r#"{"lifecycle":"optOutFailed","detected":"x","cmp":"x","optOut":false,"optIn":null}"#);
-        assert!(!failed.settled(SOON));
-        assert!(!failed.settled(NO_CMP_GRACE * 2));
+    fn open_banner_waits_for_the_accept() {
+        let running = state(r#"{"lifecycle":"runningOptIn","detected":"x","cmp":"x","optIn":null}"#);
+        assert!(!running.settled(SOON));
+        assert!(!running.settled(NO_CMP_GRACE * 2));
+    }
+
+    #[test]
+    fn driver_accepts_without_opting_out_first() {
+        assert!(DRIVER_JS.contains(r#"autoAction: "optIn""#));
+        assert!(!DRIVER_JS.contains("optOut"));
     }
 
     #[test]
     fn stops_looking_soon_when_no_platform_is_recognised() {
-        let looking = state(r#"{"lifecycle":"started","detected":null,"cmp":null,"optOut":null,"optIn":null}"#);
+        let looking = state(r#"{"lifecycle":"started","detected":null,"cmp":null,"optIn":null}"#);
         assert!(!looking.settled(SOON));
         assert!(looking.settled(NO_CMP_GRACE));
-        let detected =
-            state(r#"{"lifecycle":"cmpDetected","detected":"Sourcepoint","cmp":null,"optOut":null,"optIn":null}"#);
+        let detected = state(r#"{"lifecycle":"cmpDetected","detected":"Sourcepoint","cmp":null,"optIn":null}"#);
         assert!(!detected.settled(NO_CMP_GRACE * 2));
     }
 

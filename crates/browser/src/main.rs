@@ -8,6 +8,7 @@
 mod blocker;
 mod consent;
 mod engine;
+mod outcome_stdout;
 mod profile;
 
 // Exports the GPU selection symbols surfman looks for, so it can pick the low-power adapter
@@ -27,14 +28,24 @@ use crate::engine::{EngineError, PageLoad};
 use crate::profile::Profile;
 
 fn main() {
+    // Before anything can print: the real stdout is kept for the outcome line only, and all other
+    // stdout output (Servo's, including page-chosen text) goes to stderr.
+    let mut out = match outcome_stdout::take() {
+        Ok(out) => out,
+        Err(e) => {
+            // Without a protected stdout the outcome could be forged by the page; do not load it.
+            let outcome = FetchOutcome::Failed { message: format!("cannot set up the output: {e}") };
+            println!("{}", serde_json::to_string(&outcome).expect("FetchOutcome serializes"));
+            return;
+        }
+    };
     let outcome = match read_request() {
         Ok(request) => fetch(&request),
         Err(message) => FetchOutcome::Failed { message },
     };
     let line = serde_json::to_string(&outcome).expect("FetchOutcome serializes");
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{line}");
-    let _ = stdout.flush();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 fn read_request() -> Result<FetchRequest, String> {

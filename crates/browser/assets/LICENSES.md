@@ -10,7 +10,7 @@ All files are unmodified copies of the upstream files.
 | `easylist.txt` | EasyList | `! Version: 202611062013` (commit `4e3005b0331c271bae3094cfcdb6a403d6998a81`) | https://easylist.to/easylist/easylist.txt | CC BY-SA 3.0 (dual GPLv3+ / CC BY-SA 3.0; see below) |
 | `easyprivacy.txt` | EasyPrivacy | `! Version: 202611062013` (commit `4e3005b0331c271bae3094cfcdb6a403d6998a81`) | https://easylist.to/easylist/easyprivacy.txt | CC BY-SA 3.0 (dual GPLv3+ / CC BY-SA 3.0; see below) |
 | `autoconsent.js` | DuckDuckGo autoconsent, `dist/autoconsent.playwright.js` (in-page bundle, no rules) | `@duckduckgo/autoconsent` 18.0.0 | https://registry.npmjs.org/@duckduckgo/autoconsent/-/autoconsent-18.0.0.tgz | MPL-2.0 |
-| `autoconsent-rules.json` | DuckDuckGo autoconsent bundled rule set, `rules/compact-rules.json` | `@duckduckgo/autoconsent` 18.0.0 | same package as above | MPL-2.0 |
+| `autoconsent-rules.json` | DuckDuckGo autoconsent bundled rule set, `rules/rules.json` (full rules; the compact set carries no opt-in steps, and Juttusihti accepts banners) | `@duckduckgo/autoconsent` 18.0.0 | same package as above | MPL-2.0 |
 | `extract.js` | Juttusihti's own extraction script | — | this repository | MIT OR Apache-2.0 |
 
 SHA-256 of the vendored copies:
@@ -19,7 +19,7 @@ SHA-256 of the vendored copies:
 ca0a580473d71a1f01edcba8cf7e6337d634f5d31f8bcf244faf3dc98b11c3c4  easylist.txt
 8aba04de2d50a394f1d28f43fc3e29fd7a510683a519b763cea47d07b0ab2854  easyprivacy.txt
 08698eb12abc227ff03a3503cec101c97904cc3bcc28075ee1f7cf70615a7f2d  autoconsent.js
-783b7820ca4a9acf8703323d90f3cfecffd285d341e8417a203515913d8f2280  autoconsent-rules.json
+1d70481c72c5667b50b96d007ca2f1da28bec9854dc53cf2b8695b9e3c6dfccf  autoconsent-rules.json
 ```
 
 ## Licence decisions

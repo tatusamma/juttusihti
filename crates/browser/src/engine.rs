@@ -343,6 +343,11 @@ impl Session<'_> {
     /// (the article is already extracted) and read from there, where it is same-origin. Any
     /// failure means no picture.
     fn download_picture(&self, url: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        // The URL comes from the page: never read or open anything but a web address.
+        let Some(picture_url) = web_url(url) else {
+            eprintln!("juttusihti-browser: picture refused, not a web address");
+            return None;
+        };
         let page_url = self.delegate.page_url.borrow().clone().map(String::from).unwrap_or_default();
         if self.delegate.blocker.should_block(url, &page_url, ResourceKind::Image) {
             return None;
@@ -361,7 +366,6 @@ impl Session<'_> {
             }
         }
 
-        let picture_url = Url::parse(url).ok()?;
         let navigations = self.delegate.navigations.get();
         self.webview.load(picture_url);
         self.spin_until(budget, &|| {
@@ -534,6 +538,11 @@ fn with_current_gl_context<T>(create: impl FnOnce() -> T) -> Result<T, EngineErr
     Ok(created)
 }
 
+/// `url` parsed, when it is an http or https address.
+fn web_url(url: &str) -> Option<Url> {
+    Url::parse(url).ok().filter(|u| matches!(u.scheme(), "http" | "https"))
+}
+
 /// Article text with paragraph breaks kept and site controls dropped.
 pub fn article_text(raw: &str) -> String {
     juttusihti_article::normalize_text(raw)
@@ -592,6 +601,22 @@ mod tests {
     fn article_text_keeps_paragraphs_and_drops_ui_labels() {
         let raw = "Lue tiivistelmä\n\nFirst  paragraph.\n\n\n  Second paragraph. \n\nLuitko jo nämä?\n\nMAINOS\n\nTilaajille\n\nThird.";
         assert_eq!(article_text(raw), "First  paragraph.\n\nSecond paragraph.\n\nThird.");
+    }
+
+    #[test]
+    fn only_web_addresses_are_picture_urls() {
+        assert!(web_url("https://images.example/a.jpg").is_some());
+        assert!(web_url("http://127.0.0.1:8080/a.jpg").is_some());
+        for bad in [
+            "file:///C:/Windows/win.ini",
+            "ftp://example.com/a.jpg",
+            "data:image/png;base64,AAAA",
+            "blob:x",
+            "javascript:alert(1)",
+            "a.jpg",
+        ] {
+            assert!(web_url(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]

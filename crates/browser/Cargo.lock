@@ -3392,6 +3392,7 @@ dependencies = [
  "http",
  "image",
  "juttusihti-article",
+ "libc",
  "serde",
  "serde_json",
  "servo",

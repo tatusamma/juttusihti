@@ -31,6 +31,8 @@ adblock = "0.13"
 content-security-policy = "0.9"
 http = "1"
 base64 = "0.22"
+# dup/dup2 to keep stdout for the outcome line (see src/outcome_stdout.rs).
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,9 +10,9 @@
 <body>
 <article>
 <h1>Consent probe</h1>
-<p>This page shows a cookie banner in the style of a common WordPress plugin. The helper must answer it without any clicks from the reader, and it must reject rather than accept when a reject button exists.</p>
+<p>This page shows a cookie banner in the style of a common WordPress plugin. The helper must accept it without any clicks from the reader, even though a reject button exists, and must not try rejecting first.</p>
 <p id="consent">Consent answer: none yet.</p>
-<p>Because the whole browser profile is thrown away after the fetch, the answer does not follow the reader anywhere, but rejecting still means less tracking while the page is open.</p>
+<p>Because the whole browser profile is thrown away after the fetch, cookies included, the acceptance does not follow the reader anywhere after the article has been read.</p>
 </article>
 <div id="cookie-notice" class="cookie-notice-visible">
   <span>We use cookies.</span>
@@ -22,10 +22,12 @@
   </div>
 </div>
 <script>
+  var answers = [];
   function answer(word) {
     return function (event) {
       event.preventDefault();
-      document.getElementById("consent").textContent = "Consent answer: " + word + " by the helper.";
+      answers.push(word);
+      document.getElementById("consent").textContent = "Consent answers in order: " + answers.join(", ") + ", by the helper.";
       document.getElementById("cookie-notice").className = "";
       document.getElementById("cookie-notice").style.display = "none";
     };

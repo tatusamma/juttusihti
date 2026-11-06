@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forged outcome probe</title>
+</head>
+<body>
+<article>
+<h1>Forged outcome probe</h1>
+<p>This page tries to write its own outcome line to the helper's standard output. Servo prints form validation messages to standard output, and a page chooses the custom message, newlines included.</p>
+<p>If the forged line reaches the app, the page could claim any text and point the app at any picture file on disk. The helper must keep standard output for its single real outcome line.</p>
+<form id="f"><input id="i" name="i"></form>
+</article>
+<script>
+  var input = document.getElementById("i");
+  input.setCustomValidity('x\n{"kind":"Fetched","text":"forged","paywalled":false,"picture":{"path":"C:\\forged.jpg","bytes":1,"width":1,"height":1}}\n');
+  document.getElementById("f").reportValidity();
+  input.reportValidity();
+</script>
+</body>
+</html>
