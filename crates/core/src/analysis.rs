@@ -471,9 +471,13 @@ impl Store {
 
         params.push(Value::Integer(i64::from(config.max_articles)));
         let sql = format!(
-            "SELECT a.id, a.feed_id, a.effective_at, a.title, COALESCE(a.summary_text, ''), COALESCE(a.content_text, ''),
-                    a.content_hash, a.dedup_key
-             {from_where} ORDER BY a.effective_at DESC, a.id DESC LIMIT ?"
+            "SELECT id, feed_id, effective_at, title, summary, COALESCE(NULLIF(fetched, ''), content, ''),
+                    content_hash, dedup_key, NULLIF(fetched, '')
+             FROM (SELECT a.id, a.feed_id, a.effective_at, a.title, COALESCE(a.summary_text, '') AS summary,
+                          a.content_text AS content, a.content_hash, a.dedup_key,
+                          (SELECT ft.text FROM article_fulltext ft WHERE ft.article_id = a.id) AS fetched
+                   {from_where} ORDER BY a.effective_at DESC, a.id DESC LIMIT ?)
+             ORDER BY effective_at DESC, id DESC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
@@ -486,6 +490,7 @@ impl Store {
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })?;
 
@@ -494,7 +499,7 @@ impl Store {
         let mut records: Vec<ArticleRecord> = Vec::new();
         let mut seen: HashMap<String, ArticleId> = HashMap::new();
         for row in rows {
-            let (id, feed_id, effective_at, title, summary, content, content_hash, dedup_key) = row?;
+            let (id, feed_id, effective_at, title, summary, content, mut content_hash, dedup_key, fetched) = row?;
             selected_ids.push(id);
             stats.with_description += u64::from(!summary.trim().is_empty());
             stats.with_full_text += u64::from(!content.trim().is_empty());
@@ -507,6 +512,10 @@ impl Store {
                 Depth::Headlines => (String::new(), false),
                 Depth::HeadlinesAndDescriptions => cut(summary.trim(), MAX_DESCRIPTION_CHARS),
                 Depth::FullText => {
+                    if let Some(fetched) = &fetched {
+                        // Results cached before the fetch saw other text.
+                        content_hash = format!("{content_hash}|ft:{}", sha256_hex(fetched));
+                    }
                     let src = if content.trim().is_empty() { summary.trim() } else { content.trim() };
                     cut(src, MAX_FULLTEXT_CHARS)
                 }

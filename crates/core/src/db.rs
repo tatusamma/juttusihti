@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_relevance.sql"),
     include_str!("../migrations/0004_list_indexes.sql"),
     include_str!("../migrations/0005_headlines.sql"),
+    include_str!("../migrations/0006_fulltext.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -84,6 +85,30 @@ mod tests {
         migrate(&conn).unwrap();
         let fk: i64 = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn fulltext_migration_keeps_articles_and_rebuilds_the_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        for (i, sql) in MIGRATIONS[..5].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO feeds(id, url, title, created_at) VALUES (1, 'https://a.example/rss', 'A', 0);
+             INSERT INTO articles(id, feed_id, guid, title, summary_text, fetched_at, effective_at, dedup_key, content_hash)
+             VALUES (7, 1, 'g', 'Kuntavaalit lähestyvät', 'Ehdokkaita on paljon.', 0, 0, 'k', 'h');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let hit: i64 = conn
+            .query_row("SELECT rowid FROM articles_fts WHERE articles_fts MATCH 'ehdokkaita'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hit, 7);
+        conn.execute("INSERT INTO articles_fts(articles_fts, rank) VALUES ('integrity-check', 1)", []).unwrap();
     }
 
     #[test]

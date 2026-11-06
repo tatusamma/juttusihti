@@ -10,6 +10,7 @@ pub mod db;
 pub mod discovery;
 pub mod estimate;
 pub mod feed;
+pub mod fulltext;
 pub mod graph;
 pub mod headlines;
 pub mod model;
