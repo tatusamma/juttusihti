@@ -1,0 +1,29 @@
+# Its own workspace: Servo depends on rusqlite 0.38, which cannot share a lock file with the main
+# workspace's rusqlite 0.41 (both link the native sqlite3 library). Build with
+# `cargo build --manifest-path crates/browser/Cargo.toml`.
+[workspace]
+
+[package]
+name = "juttusihti-browser"
+description = "Headless Servo helper that loads one article in a throwaway profile and extracts its text"
+version = "0.3.0"
+edition = "2024"
+# Servo 0.7 needs Rust 1.88; the main workspace stays at 1.85.
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tero-k/juttusihti"
+
+[dependencies]
+# `webcrypto` provides `window.crypto`, without which HS's scripts crash. Its RSA crate needs
+# pkcs1 0.8.0-rc.4 (locked in Cargo.lock; pkcs1 0.8.0 does not compile with rsa 0.10.0-rc.18).
+servo = { version = "0.7", features = ["webcrypto"] }
+url = "2"
+dpi = "0.1"
+# Same version Servo uses: a bootstrap GL context works around Servo 0.7 on WGL (see engine.rs).
+surfman = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[profile.dev.package."*"]
+debug = false

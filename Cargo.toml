@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/core", "crates/fetch", "crates/ai", "crates/analytics", "crates/app", "crates/bench"]
+# Servo pins rusqlite 0.38 (libsqlite3-sys links = "sqlite3"), which cannot share a lock file with
+# the workspace rusqlite 0.41, so the browser helper is its own workspace with its own Cargo.lock.
+exclude = ["crates/browser"]
 
 [workspace.package]
 version = "0.3.0"
