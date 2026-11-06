@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>State probe</title>
+</head>
+<body>
+<article>
+<h1>State probe</h1>
+<p>This page checks that a private fetch starts from nothing. It reads a cookie and a local storage value that an earlier visit would have left behind, writes them into the next paragraph, and then sets both for the next visit.</p>
+<p id="state">The script did not run.</p>
+<p>If the second visit sees anything from the first, the browser profile was not thrown away, which would let a news site recognise the reader across fetches. That would be a privacy bug in the helper.</p>
+</article>
+<script>
+  var cookie = (document.cookie.match(/(?:^|; )visit=([^;]*)/) || [])[1] || "";
+  var storage = "";
+  try { storage = localStorage.getItem("visit") || ""; } catch (e) { storage = "error"; }
+  document.getElementById("state").textContent =
+    "The page remembered cookie=" + cookie + " and storage=" + storage + " from an earlier visit, which a private fetch must never allow.";
+  document.cookie = "visit=seen; Path=/; Max-Age=86400";
+  try { localStorage.setItem("visit", "seen"); } catch (e) {}
+</script>
+</body>
+</html>

@@ -24,6 +24,17 @@ surfman = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+juttusihti-article = { path = "../article" }
+# Brave's EasyList/EasyPrivacy matcher (MPL-2.0); the lists themselves are vendored in assets/.
+adblock = "0.13"
+# Same versions Servo uses, for the types in its resource-load API (`Destination`, `StatusCode`).
+content-security-policy = "0.9"
+http = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.dev.package."*"]
 debug = false

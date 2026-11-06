@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Service worker probe</title>
+</head>
+<body>
+<article>
+<h1>Service worker probe</h1>
+<p>This page tries to register a service worker, which could keep running and keep state between two private fetches. The helper must refuse it, so a later visit must never find a registration.</p>
+<p id="sw">The script did not run.</p>
+<p>A news site could use a service worker to recognise the reader on the next fetch or to make requests after the page is gone. Neither is acceptable for a reader that promises a stranger's visit every time.</p>
+</article>
+<script>
+  var out = document.getElementById("sw");
+  if (!("serviceWorker" in navigator) || !navigator.serviceWorker) {
+    out.textContent = "Service worker state: sw=unsupported in this browser, so nothing could be registered.";
+  } else {
+    out.textContent = "Service worker state: sw=pending while the registrations are listed.";
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+      out.textContent = "Service worker state: sw=registrations-" + regs.length + " found on this visit.";
+      return navigator.serviceWorker.register("/sw.js");
+    }).catch(function () {});
+  }
+</script>
+</body>
+</html>
