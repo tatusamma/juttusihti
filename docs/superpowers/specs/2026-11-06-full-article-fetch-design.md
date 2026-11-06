@@ -67,8 +67,16 @@ Known risk, accepted by the user: Servo is pre-1.0 with monthly breaking API cha
 compatibility with heavy news sites is unproven. **The first implementation step is a compatibility
 check against real IS and HS article URLs from the user's database** (does the site serve Servo, does
 the article render, can the text and picture be extracted, which cookies appear). Report the result
-before building the rest. If IS/HS do not work, stop and bring it back to the user; do not work
-around a refusal.
+before building the rest. Do not work around a refusal.
+
+Gate (decided with the user): build the full feature if **at least one** of IS and HS yields full
+article text (for HS, a subscriber-only article that gives its public opening paragraphs counts as
+a paywalled result, not as a working site; at least one free HS article must come through for HS
+to count). If **neither** site works, stop and bring it back to the user.
+
+Browser identity (decided with the user): use Servo's default user agent exactly as Servo ships it,
+even though it carries a Firefox compatibility token like most browsers do. Never change it, and
+never change it as a retry after a refusal.
 
 ### The flow
 
