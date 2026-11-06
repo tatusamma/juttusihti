@@ -87,10 +87,25 @@ async fn fetch_with_timeout(
         picture_path: fulltext.join(format!("{article_id}.jpg")),
         timeout_secs: HELPER_TIMEOUT_SECS,
     };
-    let outcome = run_helper(&helper, &request, timeout).await;
+    let outcome = check_picture(run_helper(&helper, &request, timeout).await, &request.picture_path);
     // Backstop: the helper removes it, but a kill or crash may leave it behind.
     let _ = std::fs::remove_dir_all(&profile_dir);
     outcome
+}
+
+/// The picture must be exactly the file the app asked for; anything else is
+/// dropped (text kept) so a foreign path never reaches the database.
+fn check_picture(outcome: FetchOutcome, expected: &Path) -> FetchOutcome {
+    match outcome {
+        FetchOutcome::Fetched { text, paywalled, picture } => {
+            let ok = picture.as_ref().is_some_and(|p| p.path == expected && expected.is_file());
+            if !ok {
+                let _ = std::fs::remove_file(expected);
+            }
+            FetchOutcome::Fetched { text, paywalled, picture: if ok { picture } else { None } }
+        }
+        other => other,
+    }
 }
 
 async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) -> FetchOutcome {
@@ -279,16 +294,77 @@ mod tests {
         assert!(delete_cache_files(&sub, &["fulltext/missing.jpg".into()]).is_ok());
     }
 
+    #[tokio::test]
+    async fn foreign_or_missing_picture_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        for u in ["https://x.fi/foreignpic", "https://x.fi/missingpic"] {
+            let out = fetch(fake_helper(), dir.path().into(), 5, url(u), true).await;
+            match out {
+                FetchOutcome::Fetched { picture, .. } => assert!(picture.is_none(), "{u}"),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(!dir.path().join(FULLTEXT_DIR).join("5.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn expected_picture_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = fetch(fake_helper(), dir.path().into(), 5, url("https://x.fi/goodpic"), true).await;
+        match out {
+            FetchOutcome::Fetched { picture, .. } => {
+                assert_eq!(picture.unwrap().path, dir.path().join(FULLTEXT_DIR).join("5.jpg"))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     #[test]
     fn startup_sweep_removes_leftovers_and_orphans() {
+        use juttusihti_core::{NewArticle, NewFeed};
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        let mut store = Store::open(&dir.path().join("t.db")).unwrap();
+        let feed = store
+            .add_feed(&NewFeed { url: "https://f.example/rss".into(), title: "F".into(), ..Default::default() })
+            .unwrap();
+        let entries: Vec<NewArticle> = (1..=2)
+            .map(|i| NewArticle {
+                guid: i.to_string(),
+                url: Some(format!("https://n.example/{i}")),
+                title: format!("T{i}"),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800 + i),
+            })
+            .collect();
+        store.ingest(feed, &entries).unwrap();
+        let ids: Vec<i64> = {
+            let mut st = store.conn().prepare("SELECT id FROM articles ORDER BY id").unwrap();
+            st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        let ft = dir.path().join(FULLTEXT_DIR);
+        std::fs::create_dir_all(&ft).unwrap();
         std::fs::create_dir_all(dir.path().join(PROFILES_DIR).join("1-abc")).unwrap();
         std::fs::write(dir.path().join(PROFILES_DIR).join("1-abc").join("f"), "x").unwrap();
-        std::fs::create_dir_all(dir.path().join(FULLTEXT_DIR)).unwrap();
-        std::fs::write(dir.path().join(FULLTEXT_DIR).join("99.jpg"), "x").unwrap();
+        std::fs::write(ft.join("99.jpg"), "x").unwrap();
+        let (a, b) = (format!("fulltext/{}.jpg", ids[0]), format!("fulltext/{}.jpg", ids[1]));
+        std::fs::write(dir.path().join(&a), "x").unwrap();
+        std::fs::write(dir.path().join(&b), "x").unwrap();
+        store.save_fulltext(ids[0], "old", false, Some((&a, 1000))).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.save_fulltext(ids[1], "new", false, Some((&b, 1000))).unwrap();
+
+        // Under the limit: both rows' files survive, orphan and profile go.
         startup_sweep(dir.path(), &store, 1_000_000);
         assert!(!dir.path().join(PROFILES_DIR).exists());
-        assert!(!dir.path().join(FULLTEXT_DIR).join("99.jpg").exists());
+        assert!(!ft.join("99.jpg").exists());
+        assert!(dir.path().join(&a).exists());
+        assert!(dir.path().join(&b).exists());
+
+        // Over the limit: the oldest is evicted with its file, the newer stays.
+        startup_sweep(dir.path(), &store, 1_500);
+        assert!(!dir.path().join(&a).exists());
+        assert!(dir.path().join(&b).exists());
     }
 }
