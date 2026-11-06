@@ -91,7 +91,14 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
 
     let html = |body: &str| ("200 OK", "text/html; charset=utf-8", body.as_bytes().to_vec());
     let cross = include_str!("fixtures/cross.html").replace("PICTURE_ORIGIN", &files.picture_origin);
-    let (status, content_type, body) = match path.as_str() {
+    // The consent wall frame: the "trap" variant labels the accept-all choice with a price.
+    let accept_label = if path.contains("trap=1") { "Hyväksy ja tilaa 7 €/kk" } else { "Hyväksy kaikki" };
+    let wall_frame = include_str!("fixtures/wall-frame.html").replace("ACCEPT_LABEL", accept_label);
+    let wall = |query: &str| {
+        include_str!("fixtures/wall.html").replace("PICTURE_ORIGIN", &files.picture_origin).replace("WALL_QUERY", query)
+    };
+    let route = path.split('?').next().unwrap_or("");
+    let (status, content_type, body) = match route {
         "/article" => html(include_str!("fixtures/article.html")),
         "/lead" => html(include_str!("fixtures/lead.html")),
         "/state" => html(include_str!("fixtures/state.html")),
@@ -99,6 +106,9 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
         "/consent" => html(include_str!("fixtures/consent.html")),
         "/cross" => html(&cross),
         "/forge" => html(include_str!("fixtures/forge.html")),
+        "/wall" => html(&wall("")),
+        "/wall-trap" => html(&wall("&trap=1")),
+        "/index.html" => html(&wall_frame),
         "/sw.js" => ("200 OK", "text/javascript", b"self.addEventListener('fetch', function () {});".to_vec()),
         "/hero.jpg" => ("200 OK", "image/jpeg", files.hero.clone()),
         "/lead.jpg" => ("200 OK", "image/jpeg", files.lead.clone()),
@@ -359,4 +369,29 @@ fn non_web_scheme_picture_is_never_read() {
     let pictures = Server::start();
     no_picture_from_origin(format!("ftp://127.0.0.1:{}", pictures.port), "ftp");
     assert!(pictures.log.lock().unwrap().is_empty(), "something reached the picture server");
+}
+
+/// Loads the consent-or-pay wall page, with its iframe on a second origin, and returns the text.
+fn wall_text(page: &str, name: &str) -> String {
+    let frames = Server::start();
+    let server = Server::start_with_picture_origin(Some(frames.url("")));
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(server.url(page), dir.path(), name, false);
+    let (text, _, _) = fetched(run_helper(&req));
+    assert!(frames.requested("/index.html?message_id=1") || frames.requested("/index.html?message_id=1&trap=1"));
+    assert!(!req.profile_dir.exists(), "profile dir left behind");
+    text
+}
+
+#[test]
+fn consent_or_pay_wall_is_accepted_for_free() {
+    let text = wall_text("/wall", "wall");
+    // Only the free accept-all choice, never the paid one, and the overlay is gone.
+    assert!(text.contains("Wall answers in order: accepted. Overlay removed: yes."), "text: {text}");
+}
+
+#[test]
+fn priced_accept_choice_is_never_clicked() {
+    let text = wall_text("/wall-trap", "trap");
+    assert!(text.contains("Wall answers in order: none. Overlay removed: no."), "text: {text}");
 }

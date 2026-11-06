@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<title>Consent or pay probe</title>
+<style>
+  div[id^="sp_message_container_"] { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.5); }
+  div[id^="sp_message_container_"] iframe { width: 600px; height: 400px; border: 0; background: #fff; }
+</style>
+</head>
+<body>
+<article>
+<h1>Consent or pay probe</h1>
+<p>This page shows a consent wall in the style of Sourcepoint, rendered in a cross-origin iframe. The wall offers a free choice that accepts all cookies and a paid choice that rejects them and removes the adverts for a monthly price.</p>
+<p id="wall">Wall answers in order: none. Overlay removed: no.</p>
+<p>The helper must take the free accept-all choice by itself, and it must never click the paid choice, never start a payment or a login, and never submit anything else. The overlay then goes away.</p>
+</article>
+<div id="sp_message_container_1"><iframe src="PICTURE_ORIGIN/index.html?message_id=1WALL_QUERY"></iframe></div>
+<script>
+  var answers = [];
+  window.addEventListener("message", function (event) {
+    if (!event.data || !event.data.wall) return;
+    answers.push(event.data.wall);
+    var container = document.getElementById("sp_message_container_1");
+    if (container && event.data.wall === "accepted") container.parentNode.removeChild(container);
+    document.getElementById("wall").textContent =
+      "Wall answers in order: " + answers.join(", ") + ". Overlay removed: " +
+      (document.getElementById("sp_message_container_1") ? "no" : "yes") + ".";
+  });
+</script>
+</body>
+</html>

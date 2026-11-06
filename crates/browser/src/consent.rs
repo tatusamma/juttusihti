@@ -5,8 +5,16 @@
 //! the part of autoconsent's "background" side: it hands over the configuration and the bundled
 //! rules with `autoAction: "optIn"`, so a banner is accepted straight away (the user's choice),
 //! with no opt-out attempt first. The reader never clicks, and the whole profile, cookies
-//! included, is deleted after the article is extracted. The state of the top frame is kept in
-//! `window.__juttusihtiConsent` for the engine to poll. Nothing is downloaded: the rules are pinned in `assets/` (see `assets/LICENSES.md`).
+//! included, is deleted after the article is extracted.
+//!
+//! Besides autoconsent's rules, Juttusihti adds its own (`assets/consent-extra-rules.json`): on a
+//! Sourcepoint "consent or pay" wall, which autoconsent deliberately skips, it clicks only the free
+//! accept-all choice, never a paid, subscribe or login one.
+//!
+//! The state of the top frame is kept in `window.__juttusihtiConsent` for the engine to poll.
+//! Frames (Sourcepoint shows its message in an iframe) report the banners they found and their
+//! answers to the top frame, so the engine waits for an answer given inside a frame too.
+//! Nothing is downloaded: the rules are pinned in `assets/` (see `assets/LICENSES.md`).
 
 use std::time::Duration;
 
@@ -15,11 +23,17 @@ use serde::Deserialize;
 /// How long after the load to keep looking when no consent platform has been recognised.
 pub const NO_CMP_GRACE: Duration = Duration::from_millis(2500);
 
+/// How long to wait for a frame to answer a banner the top frame saw but could not answer.
+pub const FRAME_ANSWER_WAIT: Duration = Duration::from_secs(5);
+
 const AUTOCONSENT_JS: &str = include_str!("../assets/autoconsent.js");
 const AUTOCONSENT_RULES: &str = include_str!("../assets/autoconsent-rules.json");
+/// Juttusihti's own rules, in autoconsent's rule format, loaded after the bundled ones.
+const EXTRA_RULES: &str = include_str!("../assets/consent-extra-rules.json");
 
-/// Runs before the bundle; `__RULES__` is replaced with the bundled rule set. It is the full
-/// `rules/rules.json`, not `compact-rules.json`: autoconsent's compact rules carry no opt-in steps.
+/// Runs before the bundle; `__RULES__` is replaced with the bundled rule set and `__EXTRA_RULES__`
+/// with Juttusihti's own. The bundled set is the full `rules/rules.json`, not
+/// `compact-rules.json`: autoconsent's compact rules carry no opt-in steps.
 const DRIVER_JS: &str = r#"
 // Only web pages get autoconsent. Throwing stops this user script before the bundle runs: in
 // Servo 0.7 reading location.ancestorOrigins (autoconsent's top-frame check) panics the script
@@ -29,8 +43,24 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
 }
 (function () {
   if (window.__juttusihtiConsent) return;
-  var state = { lifecycle: null, detected: null, cmp: null, optIn: null };
+  var isTop = window.top === window;
+  var state = { lifecycle: null, detected: null, cmp: null, optIn: null, framePopups: 0, frameAnswers: [] };
   window.__juttusihtiConsent = state;
+  // Frames tell the top frame about the banners they found and how they answered them.
+  function toTop(type, message) {
+    if (isTop) return;
+    try {
+      window.top.postMessage({ juttusihtiConsentFrame: { type: type, result: !!message.result } }, "*");
+    } catch (e) {}
+  }
+  if (isTop) {
+    window.addEventListener("message", function (event) {
+      var report = event.data && event.data.juttusihtiConsentFrame;
+      if (!report) return;
+      if (report.type === "popupFound") state.framePopups += 1;
+      if (report.type === "optInResult") state.frameAnswers.push(report.result);
+    });
+  }
   var config = {
     enabled: true,
     autoAction: "optIn",
@@ -42,6 +72,7 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
     logs: { lifecycle: false, rulesteps: false, detectionsteps: false, evals: false, errors: false, messages: false, waits: false }
   };
   var rules = __RULES__;
+  var extraRules = __EXTRA_RULES__;
   function reply(message) {
     setTimeout(function () {
       try { window.autoconsentReceiveMessage(message); } catch (e) {}
@@ -50,7 +81,7 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
   window.autoconsentSendMessage = function (message) {
     switch (message.type) {
       case "init":
-        reply({ type: "initResp", config: config, rules: { autoconsent: rules.autoconsent } });
+        reply({ type: "initResp", config: config, rules: { autoconsent: rules.autoconsent.concat(extraRules.autoconsent) } });
         break;
       case "eval":
         // Only the bundled rules send code here (normally evaluated inline, as isMainWorld is set).
@@ -66,9 +97,11 @@ if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.c
         break;
       case "popupFound":
         state.cmp = message.cmp;
+        toTop("popupFound", message);
         break;
       case "optInResult":
         state.optIn = !!message.result;
+        toTop("optInResult", message);
         break;
     }
     return Promise.resolve();
@@ -83,7 +116,8 @@ pub const STATE_JS: &str =
 
 /// The user script: driver, then the autoconsent bundle.
 pub fn user_script() -> String {
-    let driver = DRIVER_JS.replace("__RULES__", AUTOCONSENT_RULES.trim());
+    let driver =
+        DRIVER_JS.replace("__RULES__", AUTOCONSENT_RULES.trim()).replace("__EXTRA_RULES__", EXTRA_RULES.trim());
     format!("{driver}\n{AUTOCONSENT_JS}")
 }
 
@@ -97,21 +131,38 @@ pub struct ConsentState {
     pub cmp: Option<String>,
     /// Result of accepting the banner.
     pub opt_in: Option<bool>,
+    /// Banners found open in frames, and the frames' answers so far.
+    #[serde(default)]
+    pub frame_popups: u32,
+    #[serde(default)]
+    pub frame_answers: Vec<bool>,
 }
 
 impl ConsentState {
-    /// Autoconsent has nothing more to do: no banner, or the banner has been accepted,
-    /// successfully or not. `waited` is the time since the
-    /// page finished loading: with no consent platform recognised by `NO_CMP_GRACE`, there is
-    /// none to wait for (autoconsent itself would keep looking for a minute on a quiet page).
+    /// Autoconsent has nothing more to do: no banner, or the banner has been accepted (in the top
+    /// frame or in a frame), successfully or not. `waited` is the time since the page finished
+    /// loading: with no consent platform recognised by `NO_CMP_GRACE`, there is none to wait for
+    /// (autoconsent itself would keep looking for a minute on a quiet page).
     pub fn settled(&self, waited: Duration) -> bool {
-        if self.opt_in.is_some() {
+        // A frame found a banner and is still answering it.
+        if self.frame_popups as usize > self.frame_answers.len() {
+            return false;
+        }
+        if self.opt_in == Some(true) || self.frame_answers.contains(&true) {
             return true;
         }
-        if self.detected.is_none() && self.cmp.is_none() && waited >= NO_CMP_GRACE {
-            return true;
+        let top_done = self.opt_in.is_some()
+            || matches!(self.lifecycle.as_deref(), Some("nothingDetected" | "done" | "optInSucceeded" | "optInFailed"))
+            || (self.detected.is_none() && self.cmp.is_none() && waited >= NO_CMP_GRACE);
+        if !top_done {
+            return false;
         }
-        matches!(self.lifecycle.as_deref(), Some("nothingDetected" | "done" | "optInSucceeded" | "optInFailed"))
+        // The top frame saw a banner it could not accept (Sourcepoint's companion rule only
+        // checks): its message lives in a frame, which may still answer.
+        if self.cmp.is_some() {
+            return waited >= FRAME_ANSWER_WAIT;
+        }
+        true
     }
 }
 
@@ -129,7 +180,10 @@ mod tests {
     fn settles_on_no_banner_or_an_accept() {
         assert!(state(r#"{"lifecycle":"nothingDetected","cmp":null,"optIn":null}"#).settled(SOON));
         assert!(state(r#"{"lifecycle":"optInSucceeded","cmp":"x","optIn":true}"#).settled(SOON));
-        assert!(state(r#"{"lifecycle":"optInFailed","cmp":"x","optIn":false}"#).settled(SOON));
+        // A banner the top frame could not accept: frames get time to answer it first.
+        let failed = state(r#"{"lifecycle":"optInFailed","cmp":"x","optIn":false}"#);
+        assert!(!failed.settled(SOON));
+        assert!(failed.settled(FRAME_ANSWER_WAIT));
     }
 
     #[test]
@@ -155,9 +209,39 @@ mod tests {
     }
 
     #[test]
+    fn waits_for_a_frame_to_answer() {
+        let top_failed =
+            r#""lifecycle":"optInFailed","detected":"sourcepoint-top","cmp":"sourcepoint-top","optIn":false"#;
+        let answering = state(&format!(r#"{{{top_failed},"framePopups":1,"frameAnswers":[]}}"#));
+        assert!(!answering.settled(FRAME_ANSWER_WAIT * 2));
+        let answered = state(&format!(r#"{{{top_failed},"framePopups":1,"frameAnswers":[true]}}"#));
+        assert!(answered.settled(SOON));
+        let nothing_yet = state(&format!(r#"{{{top_failed},"framePopups":0,"frameAnswers":[]}}"#));
+        assert!(!nothing_yet.settled(SOON));
+        assert!(nothing_yet.settled(FRAME_ANSWER_WAIT));
+    }
+
+    #[test]
+    fn extra_rule_only_accepts_and_is_frame_only() {
+        let rules: serde_json::Value = serde_json::from_str(EXTRA_RULES).unwrap();
+        let rule = &rules["autoconsent"][0];
+        assert_eq!(rule["runContext"]["main"], false);
+        assert_eq!(rule["runContext"]["frame"], true);
+        assert!(rule["runContext"]["urlPattern"].as_str().unwrap().contains("message_id="));
+        let click = rule["optIn"][0]["waitForThenClick"].as_str().unwrap();
+        assert!(click.starts_with("xpath//"));
+        for refused in ["consent-pay", "€", "tilaa", "subscri", "kirjaudu", "sign in", "mainok"] {
+            assert!(click.contains(&format!("'{refused}'")) || click.contains(&format!(" {refused} ")), "{refused}");
+        }
+        // Its opt-out can never succeed: the selector matches nothing a page would have.
+        assert_eq!(rule["optOut"], serde_json::json!([{ "exists": "#juttusihti-this-rule-never-opts-out" }]));
+    }
+
+    #[test]
     fn user_script_carries_the_bundled_rules() {
         let script = user_script();
-        assert!(!script.contains("__RULES__"));
+        assert!(!script.contains("__RULES__") && !script.contains("__EXTRA_RULES__"));
+        assert!(script.contains("juttusihti-sourcepoint-accept-free"));
         assert!(script.contains("autoconsentReceiveMessage"));
         assert!(script.len() > AUTOCONSENT_JS.len() + AUTOCONSENT_RULES.len() / 2);
     }

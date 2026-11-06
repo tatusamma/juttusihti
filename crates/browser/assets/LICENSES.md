@@ -12,6 +12,7 @@ All files are unmodified copies of the upstream files.
 | `autoconsent.js` | DuckDuckGo autoconsent, `dist/autoconsent.playwright.js` (in-page bundle, no rules) | `@duckduckgo/autoconsent` 18.0.0 | https://registry.npmjs.org/@duckduckgo/autoconsent/-/autoconsent-18.0.0.tgz | MPL-2.0 |
 | `autoconsent-rules.json` | DuckDuckGo autoconsent bundled rule set, `rules/rules.json` (full rules; the compact set carries no opt-in steps, and Juttusihti accepts banners) | `@duckduckgo/autoconsent` 18.0.0 | same package as above | MPL-2.0 |
 | `extract.js` | Juttusihti's own extraction script | — | this repository | MIT OR Apache-2.0 |
+| `consent-extra-rules.json` | Juttusihti's own consent rule, in autoconsent's rule format: accepts the free choice of Sourcepoint consent-or-pay walls (never a paid, subscribe or login choice) | — | this repository | MIT OR Apache-2.0 |
 
 SHA-256 of the vendored copies:
 

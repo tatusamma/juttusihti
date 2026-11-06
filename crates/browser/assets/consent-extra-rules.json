@@ -1,0 +1,24 @@
+{
+  "autoconsent": [
+    {
+      "name": "juttusihti-sourcepoint-accept-free",
+      "comment": "Juttusihti's own rule (MIT OR Apache-2.0), loaded after autoconsent's bundled rules. Sourcepoint shows its consent message in an iframe (/index.html?message_id=...). On 'consent or pay' walls (e.g. Sanoma's IS/HS: 'Hyväksy kaikki' next to 'Kiellä ja poista mainokset 7 €') autoconsent's Sourcepoint-frame rule deliberately bails. This rule matches the same Sourcepoint message frames by URL (so autoconsent tries it first), waits for the message's accept-all button (choice type 11 or ACCEPT_ALL) and clicks only that button. The XPath refuses it if it is marked as a pay choice or its text mentions a price, a subscription, adverts or a login, so it can never start a payment or login flow. It never rejects and never submits anything else.",
+      "runContext": { "main": false, "frame": true, "urlPattern": "^https?://[^/]+/index\\.html\\?(.*&)?message_id=" },
+      "prehideSelectors": [],
+      "detectCmp": [{ "exists": "body" }],
+      "detectPopup": [
+        {
+          "waitForVisible": ".message-button.sp_choice_type_11, .message-button.sp_choice_type_ACCEPT_ALL",
+          "timeout": 6000,
+          "check": "any"
+        }
+      ],
+      "optIn": [
+        {
+          "waitForThenClick": "xpath///*[contains(concat(' ', normalize-space(@class), ' '), ' message-button ') and (contains(concat(' ', normalize-space(@class), ' '), ' sp_choice_type_11 ') or contains(concat(' ', normalize-space(@class), ' '), ' sp_choice_type_ACCEPT_ALL ')) and not(contains(concat(' ', normalize-space(@class), ' '), ' consent-pay ')) and not(contains(., '€')) and not(contains(., '$')) and not(contains(., '£')) and not(contains(., 'kr')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'tilaa')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'subscri')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'prenumer')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'mainok')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'kirjaudu')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'log in')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'sign in')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'logga in')) and not(contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÅ', 'abcdefghijklmnopqrstuvwxyzäöå'), 'pay'))]"
+        }
+      ],
+      "optOut": [{ "exists": "#juttusihti-this-rule-never-opts-out" }]
+    }
+  ]
+}
