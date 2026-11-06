@@ -227,7 +227,7 @@ impl State {
                     async move {
                         let paths = db.call(|s| s.clear_fulltext()).await.map_err(|e| e.to_string())?;
                         let n = paths.len();
-                        tokio::task::spawn_blocking(move || delete_cache_files(&dir, &paths))
+                        tokio::task::spawn_blocking(move || crate::full_article::delete_cache_files(&dir, &paths))
                             .await
                             .map_err(|e| e.to_string())??;
                         Ok(n)
@@ -293,7 +293,7 @@ impl State {
                         let paths =
                             db.call(move |s| s.enforce_fulltext_limit(limit)).await.map_err(|e| e.to_string())?;
                         let n = paths.len();
-                        tokio::task::spawn_blocking(move || delete_cache_files(&dir, &paths))
+                        tokio::task::spawn_blocking(move || crate::full_article::delete_cache_files(&dir, &paths))
                             .await
                             .map_err(|e| e.to_string())??;
                         Ok(n)
@@ -462,18 +462,6 @@ impl State {
         }
         scrollable(col).into()
     }
-}
-
-/// Deletes cache files (paths relative to the data dir); a missing file is fine.
-fn delete_cache_files(dir: &std::path::Path, paths: &[String]) -> Result<(), String> {
-    for p in paths {
-        match std::fs::remove_file(dir.join(p)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Could not delete {p}: {e}")),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

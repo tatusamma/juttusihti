@@ -37,14 +37,16 @@ assets = [
 [dependencies]
 juttusihti-core = { path = "../core" }
 juttusihti-fetch = { path = "../fetch" }
+juttusihti-article = { path = "../article" }
 juttusihti-ai = { path = "../ai" }
 juttusihti-analytics = { path = "../analytics" }
 iced = { version = "0.14", features = ["tokio", "canvas", "image-without-codecs"] }
 # PNG only: map tiles are the only images decoded.
 image = { version = "0.25", default-features = false, features = ["png"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util"] }
 chrono.workspace = true
 directories = "6"
+url = "2"
 open = "5"
 rfd = "0.17"
 keyring = { version = "3.6", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
@@ -54,3 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "fake_helper"
+path = "tests/fake_helper.rs"
