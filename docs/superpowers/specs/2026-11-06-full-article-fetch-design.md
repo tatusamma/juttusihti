@@ -125,9 +125,9 @@ fetched articles lose their fetched content first. Cleanup runs at startup and a
 
 ## Calls made by me (not discussed in detail; the user approved the summary)
 
-- Cookie consent: **reject** when the banner offers a reject or "only necessary" choice; accept only
-  when it does not. The user asked for "accept", but since everything is deleted afterwards either
-  works, and rejecting means less tracking during the visit. Always without user clicks.
+- Cookie consent (decided by the user, 2026-11-06, replacing my earlier reject-first call):
+  **accept** the banner automatically, then delete every cookie with the profile once the article
+  is extracted and cached. Always without user clicks.
 - Default cache limit **500 MB**.
 - Articles starred with **Save** are never cleaned automatically ("Clear cache now" still clears them).
 - Cache cleanup removes the *fetched* text and picture, never the article itself; the article falls

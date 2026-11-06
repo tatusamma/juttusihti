@@ -16,7 +16,7 @@
 - Servo's default user agent is used exactly as shipped. No code anywhere sets or changes a user agent for the browser helper, including on retry. There are no retries after a refusal.
 - No network request happens unless the user pressed "Read full article". Block lists and consent rules are bundled at build time. Nothing is downloaded at runtime.
 - Every fetch uses a new empty profile directory, which is deleted when the helper exits. The app deletes leftovers at startup.
-- Consent: dismiss with opt-out ("reject" / "only necessary") first. Opt in only when no opt-out is possible. The user never clicks anything.
+- Consent (user decision, replaces reject-first): accept automatically (autoconsent `optIn`); all cookies are deleted with the profile after extraction. The user never clicks anything.
 - The helper never bypasses a paywall. A paywalled article keeps the public text and is flagged `paywalled`.
 - Settings keys and defaults: `fulltext_pictures` = `"1"` (on), `fulltext_cache_mb` = `500`.
 - Automatic cache cleanup never touches articles with `is_saved = 1`. "Clear cache now" does clear them.
