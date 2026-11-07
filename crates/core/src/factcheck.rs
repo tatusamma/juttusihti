@@ -44,21 +44,29 @@ pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate 
     let extract_in = approx_tokens(article_text) + EXTRACT_PROMPT_TOKENS;
     let searches_expected = claims;
     let searches_conservative = claims * SEARCHES_PER_CLAIM;
-    let exp_in = extract_in + claim_in_tokens(1, SEARCH_TOKENS_EXPECTED) * claims as u64;
-    let exp_out = (EXTRACT_MAX_OUTPUT / 2) as u64 + (CLAIM_MAX_OUTPUT / 3) as u64 * claims as u64;
-    let con_in = extract_in + claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE) * claims as u64;
-    let con_out = EXTRACT_MAX_OUTPUT as u64 + CLAIM_MAX_OUTPUT as u64 * claims as u64;
-    let cost = |input: u64, output: u64, searches: u32| {
+    let claim_in_expected = claim_in_tokens(1, SEARCH_TOKENS_EXPECTED);
+    let claim_in_conservative = claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE);
+    let extract_out_expected = (EXTRACT_MAX_OUTPUT / 2) as u64;
+    let claim_out_expected = (CLAIM_MAX_OUTPUT / 3) as u64;
+    // Each call is its own request, so long-context rates apply per call.
+    let cost = |extract_out: u64, claim_in: u64, claim_out: u64, searches: u32| {
         let p = price?;
-        let usage = Usage { input, output, ..Default::default() };
-        Some(p.cost(&usage, false)? + p.search_cost(searches)?)
+        let call = |input: u64, output: u64| p.cost(&Usage { input, output, ..Default::default() }, false);
+        Some(call(extract_in, extract_out)? + call(claim_in, claim_out)? * claims as u64 + p.search_cost(searches)?)
     };
     FactCheckEstimate {
-        expected: cost(exp_in, exp_out, searches_expected),
-        conservative: cost(con_in, con_out, searches_conservative),
+        expected: cost(extract_out_expected, claim_in_expected, claim_out_expected, searches_expected),
+        conservative: cost(
+            EXTRACT_MAX_OUTPUT as u64,
+            claim_in_conservative,
+            CLAIM_MAX_OUTPUT as u64,
+            searches_conservative,
+        ),
         searches_expected,
         searches_conservative,
-        tokens_conservative: con_in + con_out,
+        tokens_conservative: extract_in
+            + EXTRACT_MAX_OUTPUT as u64
+            + (claim_in_conservative + CLAIM_MAX_OUTPUT as u64) * claims as u64,
     }
 }
 
@@ -393,6 +401,30 @@ mod tests {
         assert_eq!(e.searches_expected, 8);
         assert_eq!(e.searches_conservative, 24);
         assert!(e.tokens_conservative > 0);
+    }
+
+    #[test]
+    fn estimate_exact_figures() {
+        let json = r#"{"entries":[{"provider":"anthropic","model":"m","input":1,"output":2,"web_search_per_1k":10,"source":"s"}]}"#;
+        let p = Catalog::from_json(json).unwrap().entries.remove(0);
+        let e = estimate("", Some(&p));
+        assert_eq!(e.tokens_conservative, 325_000);
+        assert_eq!((e.searches_expected, e.searches_conservative), (8, 24));
+        assert_eq!(e.conservative, Some(581_000));
+        assert_eq!(e.expected, Some(145_000));
+    }
+
+    #[test]
+    fn estimate_prices_each_call_separately() {
+        let json = r#"{"entries":[{"provider":"anthropic","model":"m","input":1,"output":2,"web_search_per_1k":10,
+            "long_context":{"above_input_tokens":100000,"input":5,"output":10},"source":"s"}]}"#;
+        let p = Catalog::from_json(json).unwrap().entries.remove(0);
+        let e = estimate("", Some(&p));
+        let call = |input, output| p.cost(&Usage { input, output, ..Default::default() }, false).unwrap();
+        // Every call is far below the long-context threshold, so base rates apply.
+        let expected = call(1_000, 4_000) + 8 * call(38_500, 1_500) + p.search_cost(24).unwrap();
+        assert_eq!(e.conservative, Some(expected));
+        assert_eq!(e.conservative, Some(581_000));
     }
 
     #[test]
