@@ -101,6 +101,7 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
     let (status, content_type, body) = match route {
         "/article" => html(include_str!("fixtures/article.html")),
         "/paywall" => html(include_str!("fixtures/paywall.html")),
+        "/free-parts" => html(include_str!("fixtures/free-parts.html")),
         "/lead" => html(include_str!("fixtures/lead.html")),
         "/state" => html(include_str!("fixtures/state.html")),
         "/sw" => html(include_str!("fixtures/sw.html")),
@@ -225,6 +226,19 @@ fn hidden_and_paid_parts_are_never_read() {
     assert!(!text.contains("Subscriber paragraph"), "subscriber text in the result: {text}");
     assert!(!text.contains("twelve million"), "subscriber text in the result: {text}");
     assert!(paywalled, "a page with a paid part must be flagged paywalled");
+    assert!(!req.profile_dir.exists(), "profile dir left behind");
+}
+
+#[test]
+fn free_article_with_an_empty_paid_part_is_not_paywalled() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(server.url("/free-parts"), dir.path(), "free-parts", false);
+    let (text, paywalled, _) = fetched(run_helper(&req));
+
+    assert!(text.contains("The free opening paragraph"), "text: {text}");
+    assert!(text.contains("The free closing paragraph"), "text: {text}");
+    assert!(!paywalled, "a free article whose declared paid part is empty was flagged paywalled");
     assert!(!req.profile_dir.exists(), "profile dir left behind");
 }
 

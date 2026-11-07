@@ -202,7 +202,10 @@
   // Elements that are display:none by default or carry no text of their own.
   var NO_STYLE_CHECK = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SOURCE|TRACK|LINK|META|BASE|TITLE|PARAM|DATALIST|BR|WBR)$/;
 
+  // Marks the elements the paid parts name and returns how many of them hold text. Sites often
+  // declare a paid part on every article, free ones too, with a selector that matches nothing.
   function markPaidParts(parts) {
+    var withText = 0;
     parts.forEach(function (part) {
       var selectors = Array.isArray(part.cssSelector) ? part.cssSelector : [part.cssSelector];
       selectors.forEach(function (selector) {
@@ -210,12 +213,14 @@
         try {
           document.querySelectorAll(selector).forEach(function (el) {
             el.setAttribute(DROP, "");
+            if ((el.textContent || "").trim()) withText++;
           });
         } catch (e) {
           // An invalid selector marks nothing.
         }
       });
     });
+    return withText;
   }
 
   function hidden(el) {
@@ -248,15 +253,15 @@
 
   var objects = jsonLdObjects();
   var paid = paidParts(objects);
-  var paywalled =
-    paid.length > 0 ||
-    objects.some(function (o) {
-      return notFree(o.isAccessibleForFree);
-    });
+  // Paywalled when the page says the article itself is not free, or when a part it marks as paid
+  // is really on the page. A declared paid part that matches nothing does not count.
+  var paywalled = objects.some(function (o) {
+    return notFree(o.isAccessibleForFree);
+  });
 
   var article = null;
   try {
-    markPaidParts(paid);
+    if (markPaidParts(paid) > 0) paywalled = true;
     markHidden();
     var copy = document.cloneNode(true);
     copy.querySelectorAll("[" + DROP + "]").forEach(function (el) {
