@@ -100,6 +100,7 @@ fn answer(mut stream: TcpStream, log: &Mutex<Vec<String>>, files: &Files) {
     let route = path.split('?').next().unwrap_or("");
     let (status, content_type, body) = match route {
         "/article" => html(include_str!("fixtures/article.html")),
+        "/paywall" => html(include_str!("fixtures/paywall.html")),
         "/lead" => html(include_str!("fixtures/lead.html")),
         "/state" => html(include_str!("fixtures/state.html")),
         "/sw" => html(include_str!("fixtures/sw.html")),
@@ -212,6 +213,22 @@ fn extracts_text_from_local_article() {
 }
 
 #[test]
+fn hidden_and_paid_parts_are_never_read() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(server.url("/paywall"), dir.path(), "paywall", false);
+    let (text, paywalled, _) = fetched(run_helper(&req));
+
+    assert!(text.contains("The free opening paragraph"), "text: {text}");
+    assert!(text.contains("The free second paragraph"), "text: {text}");
+    // Hidden by CSS, named by the JSON-LD paywall markup, or both.
+    assert!(!text.contains("Subscriber paragraph"), "subscriber text in the result: {text}");
+    assert!(!text.contains("twelve million"), "subscriber text in the result: {text}");
+    assert!(paywalled, "a page with a paid part must be flagged paywalled");
+    assert!(!req.profile_dir.exists(), "profile dir left behind");
+}
+
+#[test]
 fn second_fetch_sees_no_state_from_first() {
     let server = Server::start();
     let dir = tempfile::tempdir().unwrap();
@@ -245,7 +262,9 @@ fn picture_written_when_wanted() {
     let (_, _, picture) = fetched(run_helper(&without));
     assert!(picture.is_none());
     assert!(!without.picture_path.exists());
-    assert!(!server.requested("/hero.jpg"), "picture was requested: {:?}", server.log.lock().unwrap());
+    // No picture of any kind: not the og:image, not the logo in the page.
+    let log = server.log.lock().unwrap().clone();
+    assert!(!log.iter().any(|p| p.ends_with(".jpg") || p.ends_with(".png")), "picture was requested: {log:?}");
 
     assert!(!with.profile_dir.exists() && !without.profile_dir.exists(), "profile dir left behind");
 }

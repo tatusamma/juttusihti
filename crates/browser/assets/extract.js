@@ -180,15 +180,89 @@
     return out.join("\n\n");
   }
 
+  function notFree(value) {
+    return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
+  }
+
+  // The parts a JSON-LD object marks as not free (schema.org paywalled content markup).
+  function paidParts(objects) {
+    var parts = [];
+    objects.forEach(function (o) {
+      var list = Array.isArray(o.hasPart) ? o.hasPart : [o.hasPart];
+      list.forEach(function (part) {
+        if (part && typeof part === "object" && notFree(part.isAccessibleForFree)) parts.push(part);
+      });
+    });
+    return parts;
+  }
+
+  // Never read what the reader of the page cannot see. Elements are marked in the live page and
+  // removed from the copy Readability parses: the copy has no computed style of its own.
+  var DROP = "data-juttusihti-drop";
+  // Elements that are display:none by default or carry no text of their own.
+  var NO_STYLE_CHECK = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SOURCE|TRACK|LINK|META|BASE|TITLE|PARAM|DATALIST|BR|WBR)$/;
+
+  function markPaidParts(parts) {
+    parts.forEach(function (part) {
+      var selectors = Array.isArray(part.cssSelector) ? part.cssSelector : [part.cssSelector];
+      selectors.forEach(function (selector) {
+        if (typeof selector !== "string" || !selector.trim()) return;
+        try {
+          document.querySelectorAll(selector).forEach(function (el) {
+            el.setAttribute(DROP, "");
+          });
+        } catch (e) {
+          // An invalid selector marks nothing.
+        }
+      });
+    });
+  }
+
+  function hidden(el) {
+    try {
+      var style = getComputedStyle(el);
+      return style.display === "none" || style.visibility === "hidden";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function markHidden() {
+    // A page that hides itself until its scripts finish (anti-flicker) would lose everything.
+    if (!document.body || hidden(document.documentElement) || hidden(document.body)) return;
+    function walk(el) {
+      for (var child = el.firstElementChild; child; child = child.nextElementSibling) {
+        if (child.hasAttribute(DROP)) continue;
+        var tag = child.tagName.toUpperCase();
+        if (NO_STYLE_CHECK.test(tag)) continue;
+        if (hidden(child)) {
+          child.setAttribute(DROP, "");
+          continue;
+        }
+        // SVG and MathML hold no article text.
+        if (child.namespaceURI === "http://www.w3.org/1999/xhtml") walk(child);
+      }
+    }
+    walk(document.body);
+  }
+
   var objects = jsonLdObjects();
-  var paywalled = objects.some(function (o) {
-    var free = o.isAccessibleForFree;
-    return free === false || (typeof free === "string" && free.toLowerCase() === "false");
-  });
+  var paid = paidParts(objects);
+  var paywalled =
+    paid.length > 0 ||
+    objects.some(function (o) {
+      return notFree(o.isAccessibleForFree);
+    });
 
   var article = null;
   try {
-    article = new Readability(document.cloneNode(true)).parse();
+    markPaidParts(paid);
+    markHidden();
+    var copy = document.cloneNode(true);
+    copy.querySelectorAll("[" + DROP + "]").forEach(function (el) {
+      el.remove();
+    });
+    article = new Readability(copy).parse();
   } catch (e) {
     article = null;
   }

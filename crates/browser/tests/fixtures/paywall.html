@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<title>Maksumuurikoe</title>
+<style>
+  .paywall { display: none; }
+  .premium-note { visibility: hidden; }
+</style>
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@graph": [
+  {"@type": "WebPage", "name": "Maksumuurikoe"},
+  {"@type": "NewsArticle", "headline": "Maksumuurikoe", "isAccessibleForFree": "True",
+   "hasPart": [
+     {"@type": "WebPageElement", "isAccessibleForFree": "False", "cssSelector": ".paywall"},
+     {"@type": "WebPageElement", "isAccessibleForFree": false, "cssSelector": [".subscriber-extra", "not a [valid selector"]}
+   ]}
+]}
+</script>
+</head>
+<body>
+<main>
+<article>
+<h1>Maksumuurikoe</h1>
+<p>The free opening paragraph is what everyone may read. The harbour board met on Monday to decide whether the old ferry pier should be repaired or replaced, a question that has divided the town for years.</p>
+<p>The free second paragraph continues the story. Fishermen and ferry operators spoke at length, and most of them asked the board to keep the pier open through the summer while the engineers finish their survey.</p>
+<section class="paywall">
+<p>Subscriber paragraph hidden by the stylesheet. The board's confidential cost estimate came to twelve million euros, and two members said they would resign if the replacement went ahead.</p>
+</section>
+<div class="subscriber-extra">
+<p>Subscriber paragraph named only by the structured data. The mayor promised a referendum, but only after the autumn budget talks are over and the state grant has been confirmed.</p>
+</div>
+<p class="premium-note">Subscriber paragraph made invisible. The town's lawyers warned that the ferry company could sue for lost income if the pier closes before the contract ends next spring.</p>
+</article>
+</main>
+</body>
+</html>

@@ -242,7 +242,14 @@ fn run(page: &PageLoad, blocker: Rc<Blocker>, stats: Rc<Cell<LoadStats>>) -> Res
     })??);
     rendering_context.make_current().map_err(|e| EngineError::Engine(format!("rendering context: {e:?}")))?;
 
-    let opts = Opts { config_dir: Some(page.profile_dir.to_path_buf()), temporary_storage: true, ..Opts::default() };
+    // hard_fail defaults to true, which aborts the whole process on a script panic. Off, a page
+    // crash reaches the delegate and becomes an outcome, and the profile is still removed.
+    let opts = Opts {
+        config_dir: Some(page.profile_dir.to_path_buf()),
+        temporary_storage: true,
+        hard_fail: false,
+        ..Opts::default()
+    };
     // IS and HS (Next.js) crash without IntersectionObserver, which Servo 0.7 ships behind this
     // experimental-feature pref. It only enables a standard web API; nothing about the browser's
     // identity changes. Service workers stay off (Servo's default).
