@@ -115,6 +115,23 @@ pub struct Listing {
     interpreted: Option<String>,
     /// AI-rewritten headlines for this page (not rejected ones).
     headlines: std::collections::HashMap<ArticleId, String>,
+    /// Articles on this page whose saved fact check found contradicted or misleading claims.
+    flagged: std::collections::HashSet<ArticleId>,
+}
+
+/// Reads one page of the list with its AI headlines and fact-check flags.
+fn read_listing(s: &Store, query: &SearchQuery, page: Page) -> juttusihti_core::Result<Listing> {
+    let r = s.search(query, page)?;
+    let ids: Vec<ArticleId> = r.items.iter().map(|a| a.id).collect();
+    Ok(Listing {
+        headlines: s.shown_headlines(&ids)?,
+        flagged: s.fact_check_flags(&ids)?,
+        items: r.items,
+        total: r.total,
+        total_is_exact: r.total_is_exact,
+        ranked_window: r.ranked_window,
+        interpreted: r.interpreted,
+    })
 }
 
 /// Feed being edited in the feeds dropdown.
@@ -451,6 +468,7 @@ impl App {
                 ranked_window: false,
                 interpreted: None,
                 headlines: Default::default(),
+                flagged: Default::default(),
             },
             preview: None,
             add_feed: String::new(),
@@ -605,24 +623,9 @@ impl App {
         } else {
             Task::none()
         };
-        let load = Task::perform(
-            async move {
-                db.call(move |s| -> juttusihti_core::Result<Listing> {
-                    let r = s.search(&query, page)?;
-                    let ids: Vec<ArticleId> = r.items.iter().map(|a| a.id).collect();
-                    Ok(Listing {
-                        headlines: s.shown_headlines(&ids)?,
-                        items: r.items,
-                        total: r.total,
-                        total_is_exact: r.total_is_exact,
-                        ranked_window: r.ranked_window,
-                        interpreted: r.interpreted,
-                    })
-                })
-                .await
-            },
-            move |r| Message::ListLoaded(generation, r),
-        );
+        let load = Task::perform(async move { db.call(move |s| read_listing(s, &query, page)).await }, move |r| {
+            Message::ListLoaded(generation, r)
+        });
         Task::batch([load, retarget])
     }
 
@@ -1205,10 +1208,16 @@ impl App {
                 };
                 let task = self.fact_check.update(msg).map(Message::FactCheck);
                 match reload {
-                    Some(id) if self.preview.as_ref().is_some_and(|p| p.article.id == id) => {
-                        Task::batch([task, self.load_preview(id, false)])
+                    Some(id) => {
+                        // The list marks articles whose check found problems.
+                        let list = self.load_list();
+                        if self.preview.as_ref().is_some_and(|p| p.article.id == id) {
+                            Task::batch([task, list, self.load_preview(id, false)])
+                        } else {
+                            Task::batch([task, list])
+                        }
                     }
-                    _ => task,
+                    None => task,
                 }
             }
             Message::Settings(crate::settings::Msg::SetDark(dark)) => {
@@ -1626,13 +1635,19 @@ impl App {
         }
         title = title.push(text(rewritten.unwrap_or(&a.title)).size(SIZE_BODY).font(font));
 
-        let mut meta = row![
+        let mut meta = row![].spacing(SPACE[0] + 2.0).align_y(Center);
+        if self.listing.flagged.contains(&a.id) {
+            meta = meta.push(tooltip(
+                text("!").size(SIZE_SMALL).font(SEMIBOLD).style(style::danger),
+                style::tip("Fact check found contradicted or misleading claims"),
+                tooltip::Position::Top,
+            ));
+        }
+        meta = meta.push(
             text(format!("{} · {}", a.feed_title, format::list_date(a.effective_at)))
                 .size(SIZE_SMALL)
-                .style(style::faint)
-        ]
-        .spacing(SPACE[0] + 2.0)
-        .align_y(Center);
+                .style(style::faint),
+        );
         if a.is_saved {
             meta = meta.push(icon(Icon::Star).size(SIZE_SMALL).style(style::accent));
         }
@@ -2396,12 +2411,44 @@ mod tests {
         let _ = app.update(Message::FactCheck(crate::fact_check::Msg::ToggleCard));
         assert!(!app.fact_check.card_collapsed(a));
         let _ = app.view();
-        // A finished check reloads the preview only while its article is shown.
+        // A finished check reloads the list, and the preview while its article is shown.
         let done = |fc: &FactCheck| Message::FactCheck(crate::fact_check::Msg::Finished(a, Ok(Box::new(fc.clone()))));
-        assert_eq!(app.update(done(&fc)).units(), 1);
+        assert_eq!(app.update(done(&fc)).units(), 2);
         app.show_preview(b);
         assert_eq!(app.preview.as_ref().unwrap().fact_check, None);
-        assert_eq!(app.update(done(&fc)).units(), 0);
+        assert_eq!(app.update(done(&fc)).units(), 1);
+    }
+
+    #[test]
+    fn listing_marks_flagged_articles() {
+        use juttusihti_core::factcheck::{ClaimResult, FactCheck, Verdict};
+        use juttusihti_core::pricing::{Billing, Provider};
+        let (mut app, a, _b) = app_with_articles();
+        let check = |verdict| FactCheck {
+            article_id: a,
+            checked_at: 1_790_900_000,
+            provider: Provider::Openai,
+            model: "gpt-6.1-sol".into(),
+            billing: Billing::ApiKey,
+            prompt_version: 1,
+            language: "fi".into(),
+            web_search: false,
+            claims: vec![ClaimResult { quote: "Q".into(), verdict, reason: "R".into(), sources: vec![] }],
+            guidelines: vec![],
+            cost: None,
+        };
+        let list = |app: &App| {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            read_listing(&s, &app.list_query(), app.page).unwrap()
+        };
+        app.db.shared().lock().unwrap().save_fact_check(&check(Verdict::Contradicted)).unwrap();
+        let listing = list(&app);
+        assert_eq!(listing.flagged, [a].into_iter().collect());
+        app.listing = listing;
+        let _ = app.view();
+        app.db.shared().lock().unwrap().save_fact_check(&check(Verdict::Supported)).unwrap();
+        assert!(list(&app).flagged.is_empty());
     }
 
     #[test]
