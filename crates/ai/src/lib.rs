@@ -9,6 +9,7 @@
 
 pub mod chatgpt;
 pub mod decisions;
+pub mod factcheck;
 pub mod prompts;
 mod providers;
 pub mod runner;
