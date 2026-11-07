@@ -162,9 +162,9 @@ article text**.
 
 #### Privacy
 
-Nothing is fetched until you press the button. Then a helper program loads the page in a
-hidden browser with a brand-new, empty profile, so the site sees a stranger with no earlier
-cookies or logins:
+Nothing is fetched until you press the button. Then Juttusihti's built-in browser engine loads
+the page in the background, with no window and a brand-new, empty profile, so the site sees a
+stranger with no earlier cookies or logins:
 
 - Known trackers and ads are blocked with the EasyList and EasyPrivacy lists, which ship with
   the app; no rules are downloaded at run time.
@@ -172,7 +172,7 @@ cookies or logins:
   walls, so you never click one. This is deliberate: the alternative is often a page with no
   text. Because the profile is new, the cookies only live for that one visit.
 - When the text and the main picture are saved, the whole profile, cookies, storage and cache
-  included, is deleted, so the next visit cannot be linked to this one. If the helper crashes
+  included, is deleted, so the next visit cannot be linked to this one. If the engine crashes
   or hangs, the profile is still deleted, and any leftovers are cleared when the app starts.
 - The site still sees your IP address, as with any visit.
 - The text and picture are stored on this computer, apart from the feed. They are never sent
@@ -568,7 +568,8 @@ tokenizer, or AI-assisted query expansion.
   DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
   articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
   public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
-  article text". Not verified yet: the Linux packages with the helper, and a signed release.
+  article text". Released in 0.4.0 (signed on Windows); the Linux packages are built and tested
+  in CI but not yet tried on a desktop machine.
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).

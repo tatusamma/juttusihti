@@ -29,16 +29,17 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - **Settings → Full articles**: turn picture downloads off for text only, set the cache size
   limit (500 MB by default; the oldest fetched articles fall back to their teaser first, and Saved
   articles are never removed to make room), or clear the cache.
-- **New helper program**: `juttusihti-browser` ships next to `juttusihti` in the Windows
-  installer and zip and in the Linux deb, rpm, AppImage and tarball, and is signed on Windows.
-  Building it from source needs Rust 1.88 and its own build command; see the
-  [README](https://github.com/tero-k/juttusihti#build-from-source).
+- **Built-in browser engine**: Juttusihti now includes the Servo engine to load article pages.
+  It runs in the background only while an article is being fetched, has no window of its own,
+  and is installed and updated together with the app (`juttusihti-browser` in the install
+  folder; signed on Windows). Building from source needs Rust 1.88 and one extra build command;
+  see the [README](https://github.com/tero-k/juttusihti#build-from-source).
 - The README and the Help screen (F1) explain full articles step by step, and the README
   screenshots now use made-up demo news.
 
 ### Security
 
-- `arrow` updated to 60.1.0 (RUSTSEC-2026-0442). The full-article helper's own dependency audit
+- `arrow` updated to 60.1.0 (RUSTSEC-2026-0442). The browser engine's own dependency audit
   is in [SECURITY.md](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md).
 
 ### Known issues
@@ -47,11 +48,10 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   the visit shows "Couldn't find the article text on the page."
 - Tested against Ilta-Sanomat and Helsingin Sanomat; other sites may lay out their articles in
   ways the extractor misses.
-- The Linux packages with the helper have been checked in CI on Ubuntu 22.04 but not yet on a
-  desktop machine. With no GPU, the helper needs Mesa's software OpenGL (`libegl-mesa0`,
+- Full articles on Linux have been checked in CI on Ubuntu 22.04 but not yet on a desktop
+  machine. With no GPU, the browser engine needs Mesa's software OpenGL (`libegl-mesa0`,
   `libgl1-mesa-dri`), which the packages depend on.
-- The helper adds about 125 MB to the installed app, because it contains a whole browser
-  engine.
+- The installed app is about 125 MB larger, because it now includes a whole browser engine.
 
 ## [0.3.0] - 2026-11-02
 
