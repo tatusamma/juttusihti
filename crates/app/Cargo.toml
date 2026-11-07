@@ -41,8 +41,8 @@ juttusihti-article = { path = "../article" }
 juttusihti-ai = { path = "../ai" }
 juttusihti-analytics = { path = "../analytics" }
 iced = { version = "0.14", features = ["tokio", "canvas", "image-without-codecs"] }
-# PNG only: map tiles are the only images decoded.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG for map tiles, JPEG for full article pictures.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util"] }
 chrono.workspace = true
 directories = "6"

@@ -7,10 +7,11 @@ use crate::app::Message;
 use crate::style::{self, SIZE_BODY, SPACE};
 
 /// Keyboard shortcuts in the reader, as (keys, action).
-const SHORTCUTS: [(&str, &str); 10] = [
+const SHORTCUTS: [(&str, &str); 11] = [
     ("j / ↓", "Next article"),
     ("k / ↑", "Previous article"),
     ("o / Enter", "Open the article in the browser"),
+    ("a", "Read the full article in the reader"),
     ("s", "Save or unsave the article"),
     ("m", "Mark the article read or unread"),
     ("n / p", "Next or previous page of the list"),

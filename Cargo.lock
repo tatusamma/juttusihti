@@ -2583,6 +2583,7 @@ dependencies = [
  "image",
  "juttusihti-ai",
  "juttusihti-analytics",
+ "juttusihti-article",
  "juttusihti-core",
  "juttusihti-fetch",
  "keyring",
@@ -2593,6 +2594,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -5190,6 +5192,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

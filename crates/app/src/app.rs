@@ -9,10 +9,12 @@ use iced::widget::{
     Space, button, column, container, operation, pick_list, responsive, rich_text, row, rule, scrollable, span, stack,
     text, text_input, tooltip,
 };
-use iced::{Center, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
+use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
+use juttusihti_article::FetchOutcome;
+use juttusihti_core::fulltext::Fulltext;
 use juttusihti_core::search::SearchQuery;
-use juttusihti_core::store::ListFilter;
+use juttusihti_core::store::{ListFilter, Store};
 use juttusihti_core::{
     Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, Label, LabelId, NewFeed, Page,
     View,
@@ -23,7 +25,7 @@ use tokio::sync::Semaphore;
 use crate::db::Db;
 use crate::icons::{Icon, icon};
 use crate::style::{self, READ_WIDTH, SEMIBOLD, SIZE_ARTICLE_TITLE, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
-use crate::{feeds_menu, format, rail};
+use crate::{feeds_menu, format, full_article, rail};
 
 const PAGE_SIZE: u32 = 50;
 const MAX_PARALLEL_FETCHES: usize = 4;
@@ -47,6 +49,13 @@ const HEADLINE_LINE: f32 = SIZE_BODY * 1.3;
 /// Drops the small ✨ before a rewritten headline onto the headline's text line
 /// (the icon is `SIZE_SMALL`, the headline `SIZE_BODY`).
 const SPARKLE_DROP: f32 = 3.0;
+/// Height of the article picture across the top of the reading pane.
+const HERO_HEIGHT: f32 = 260.0;
+/// How far down the picture the meta line, headline and actions start: they
+/// overlap its lower, faded half.
+const HERO_TEXT_TOP: f32 = HERO_HEIGHT - 130.0;
+/// Shown at the end of a fetched article the site keeps for subscribers.
+pub const PAYWALL_NOTE: &str = "The rest of this article is for subscribers.";
 
 /// Which list the reader shows: the news stream or the saved articles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +136,17 @@ impl std::fmt::Display for FolderChoice {
     }
 }
 
+/// The "Read full article" action of the article being read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FullState {
+    #[default]
+    Idle,
+    Busy,
+    Fetched,
+    /// The last fetch failed; the one-line note says why.
+    Failed(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Preview {
     article: Article,
@@ -134,6 +154,114 @@ pub struct Preview {
     body: String,
     labels: Vec<ArticleLabel>,
     headline: Option<juttusihti_core::headlines::Headline>,
+    /// Text fetched from the article's page, if any.
+    fulltext: Option<Fulltext>,
+    /// The fetched picture, decoded, for the hero fade.
+    picture: Option<iced::widget::image::Handle>,
+    full: FullState,
+}
+
+/// Reads an article for the reading pane. The fetched picture is decoded
+/// separately ([`decode_picture`]) so the database is not held meanwhile.
+fn read_preview(s: &Store, id: ArticleId) -> juttusihti_core::Result<Preview> {
+    let article = s.article(id)?;
+    let feed_title = s.feed(article.feed_id)?.title;
+    let fulltext = s.fulltext(id)?;
+    let mut body = s.article_text(id)?;
+    if fulltext.as_ref().is_some_and(|f| f.paywalled) {
+        if !body.is_empty() {
+            body.push_str(
+                "
+
+",
+            );
+        }
+        body.push_str(PAYWALL_NOTE);
+    }
+    Ok(Preview {
+        body,
+        labels: s.article_labels(id)?,
+        headline: s.headline(id)?,
+        full: if fulltext.is_some() { FullState::Fetched } else { FullState::Idle },
+        fulltext,
+        picture: None,
+        feed_title,
+        article,
+    })
+}
+
+/// Loads the reading pane for `id`, marking it read when it is being opened.
+async fn load_preview(db: Db, data_dir: PathBuf, id: ArticleId, mark_read: bool) -> Result<Box<Preview>, String> {
+    let mut preview = db
+        .call(move |s| -> juttusihti_core::Result<Preview> {
+            if mark_read {
+                s.set_read(id, true)?;
+            }
+            read_preview(s, id)
+        })
+        .await?;
+    let rel = preview.fulltext.as_ref().and_then(|f| f.picture_path.clone());
+    if let Some(path) = rel.and_then(|r| full_article::cache_file(&data_dir, &r)) {
+        preview.picture = tokio::task::spawn_blocking(move || decode_picture(&path)).await.ok().flatten();
+    }
+    Ok(Box::new(preview))
+}
+
+/// Decodes a cached JPEG to RGBA. A missing or broken file shows no picture.
+fn decode_picture(path: &std::path::Path) -> Option<iced::widget::image::Handle> {
+    let bytes = std::fs::read(path).ok()?;
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    Some(iced::widget::image::Handle::from_rgba(w, h, img.into_raw()))
+}
+
+/// The one-line note for a fetch that brought no text; `None` for a fetch that did.
+pub fn outcome_note(o: &FetchOutcome) -> Option<String> {
+    match o {
+        FetchOutcome::Fetched { .. } => None,
+        FetchOutcome::Refused { status } => {
+            Some(format!("The site refused the request (HTTP {status}). Open it in the browser to read it."))
+        }
+        FetchOutcome::Timeout => Some("The site took too long to answer.".into()),
+        FetchOutcome::NoArticle => Some("Couldn't find the article text on the page.".into()),
+        FetchOutcome::Failed { message } => Some(format!("Fetching failed: {message}")),
+    }
+}
+
+/// Saves a fetch for `id`, then trims the cache to `limit_bytes` and deletes
+/// the evicted pictures. If the article was removed meanwhile, its picture
+/// file is deleted instead.
+async fn save_fetched(
+    db: Db,
+    data_dir: PathBuf,
+    id: ArticleId,
+    text: String,
+    paywalled: bool,
+    picture_bytes: Option<u64>,
+    limit_bytes: u64,
+) -> Result<(), String> {
+    let picture = picture_bytes.map(|b| (full_article::picture_rel_path(id), b));
+    let row = picture.clone();
+    let evicted = db
+        .call(move |s| -> juttusihti_core::Result<Option<Vec<String>>> {
+            match s.save_fulltext(id, &text, paywalled, row.as_ref().map(|(p, b)| (p.as_str(), *b))) {
+                Ok(()) => s.enforce_fulltext_limit(limit_bytes).map(Some),
+                Err(juttusihti_core::Error::NotFound) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+        .await?;
+    let delete = match &evicted {
+        Some(paths) => paths.clone(),
+        None => picture.into_iter().map(|(p, _)| p).collect(),
+    };
+    tokio::task::spawn_blocking(move || full_article::delete_cache_files(&data_dir, &delete))
+        .await
+        .map_err(|e| e.to_string())??;
+    match evicted {
+        Some(_) => Ok(()),
+        None => Err("The article was removed before its full text was saved.".into()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +277,10 @@ pub enum Message {
     ToggleSaved,
     ToggleRead,
     OpenInBrowser,
+    /// Runs the hidden browser helper for the article being read.
+    FetchFullArticle,
+    FullArticleDone(ArticleId, FetchOutcome),
+    FulltextSaved(ArticleId, Result<(), String>),
     StateChanged(Result<(), String>),
     SearchInput(String),
     SearchSubmit,
@@ -219,6 +351,10 @@ pub enum Message {
 
 pub struct App {
     db: Db,
+    /// Where the database, tiles and full article pictures live.
+    data_dir: PathBuf,
+    /// The article whose full text is being fetched; one at a time.
+    fetching: Option<ArticleId>,
     fetcher: Option<Fetcher>,
     fetch_slots: Arc<Semaphore>,
     sidebar: Sidebar,
@@ -287,6 +423,8 @@ impl App {
             providers: crate::providers::State::new(db.clone()),
             quick: crate::quick::State::new(db.clone()),
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
+            data_dir: db_path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+            fetching: None,
             db,
             fetcher,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
@@ -611,33 +749,75 @@ impl App {
                 Task::none()
             }
             Message::Open(id) => {
-                let db = self.db.clone();
                 let was_unread = self.listing.items.iter().any(|a| a.id == id && !a.is_read);
                 if let Some(item) = self.listing.items.iter_mut().find(|a| a.id == id) {
                     item.is_read = true;
                 }
-                let load = Task::perform(
-                    async move {
-                        db.call(move |s| -> juttusihti_core::Result<Box<Preview>> {
-                            s.set_read(id, true)?;
-                            let article = s.article(id)?;
-                            let feed_title = s.feed(article.feed_id)?.title;
-                            Ok(Box::new(Preview {
-                                body: s.article_text(id)?,
-                                labels: s.article_labels(id)?,
-                                headline: s.headline(id)?,
-                                feed_title,
-                                article,
-                            }))
-                        })
-                        .await
-                    },
-                    Message::PreviewLoaded,
-                );
+                let load = self.load_preview(id, true);
                 if was_unread { Task::batch([load, self.load_sidebar()]) } else { load }
             }
-            Message::PreviewLoaded(Ok(preview)) => {
+            Message::PreviewLoaded(Ok(mut preview)) => {
+                // Reopened while its fetch still runs.
+                if self.fetching == Some(preview.article.id) && preview.full != FullState::Fetched {
+                    preview.full = FullState::Busy;
+                }
                 self.preview = Some(*preview);
+                Task::none()
+            }
+            Message::FetchFullArticle => {
+                let Some(p) = self.preview.as_ref() else { return Task::none() };
+                if !self.can_fetch(p) {
+                    return Task::none();
+                }
+                let Ok(url) = full_article::check_url(p.article.url.as_deref()) else { return Task::none() };
+                let id = p.article.id;
+                self.fetching = Some(id);
+                if let Some(p) = self.preview.as_mut() {
+                    p.full = FullState::Busy;
+                }
+                let want_picture = self.settings.values.fulltext_pictures;
+                Task::perform(
+                    full_article::fetch(full_article::helper_path(), self.data_dir.clone(), id, url, want_picture),
+                    move |outcome| Message::FullArticleDone(id, outcome),
+                )
+            }
+            Message::FullArticleDone(id, outcome) => {
+                if self.fetching == Some(id) {
+                    self.fetching = None;
+                }
+                match outcome {
+                    FetchOutcome::Fetched { text, paywalled, picture } => {
+                        // The pane keeps showing "Fetching…" until the text is saved.
+                        let limit = u64::from(self.settings.values.fulltext_cache_mb) * 1_048_576;
+                        Task::perform(
+                            save_fetched(
+                                self.db.clone(),
+                                self.data_dir.clone(),
+                                id,
+                                text,
+                                paywalled,
+                                picture.map(|p| p.bytes),
+                                limit,
+                            ),
+                            move |r| Message::FulltextSaved(id, r),
+                        )
+                    }
+                    other => {
+                        let note = outcome_note(&other).unwrap_or_default();
+                        self.fetch_failed(id, note);
+                        Task::none()
+                    }
+                }
+            }
+            Message::FulltextSaved(id, Ok(())) => {
+                if self.preview.as_ref().is_some_and(|p| p.article.id == id) {
+                    return self.load_preview(id, false);
+                }
+                Task::none()
+            }
+            Message::FulltextSaved(id, Err(e)) => {
+                tracing::warn!(article = id, error = %e, "could not save the full article");
+                self.fetch_failed(id, e);
                 Task::none()
             }
             Message::ToggleSaved => {
@@ -1145,6 +1325,27 @@ impl App {
         }
     }
 
+    fn load_preview(&self, id: ArticleId, mark_read: bool) -> Task<Message> {
+        Task::perform(load_preview(self.db.clone(), self.data_dir.clone(), id, mark_read), Message::PreviewLoaded)
+    }
+
+    /// Whether "Read full article" can start for `p`: no other fetch runs, it
+    /// has not been fetched, and its link is http(s).
+    fn can_fetch(&self, p: &Preview) -> bool {
+        self.fetching.is_none()
+            && matches!(p.full, FullState::Idle | FullState::Failed(_))
+            && full_article::check_url(p.article.url.as_deref()).is_ok()
+    }
+
+    /// Shows why a fetch failed: under the button when that article is open,
+    /// otherwise in the status bar.
+    fn fetch_failed(&mut self, id: ArticleId, note: String) {
+        match self.preview.as_mut() {
+            Some(p) if p.article.id == id => p.full = FullState::Failed(note),
+            _ => self.show_error(note),
+        }
+    }
+
     fn on_key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Message> {
         if modifiers.command() {
             return match key.as_ref() {
@@ -1158,6 +1359,7 @@ impl App {
             Key::Character("k") | Key::Named(keyboard::key::Named::ArrowUp) => self.open_relative(-1),
             Key::Character("s") => self.update(Message::ToggleSaved),
             Key::Character("m") => self.update(Message::ToggleRead),
+            Key::Character("a") => self.update(Message::FetchFullArticle),
             Key::Character("o") | Key::Named(keyboard::key::Named::Enter) => self.update(Message::OpenInBrowser),
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
@@ -1602,9 +1804,18 @@ impl App {
         };
         let open = a.url.as_ref().map(|_| Message::OpenInBrowser);
         let read = if a.is_read { "Mark unread" } else { "Mark read" };
+        let fetch = self.can_fetch(p).then_some(Message::FetchFullArticle);
+        let full = match &p.full {
+            FullState::Busy => style::quiet_button(None, "Fetching…", style::quiet, None),
+            FullState::Fetched => style::quiet_button(Some(Icon::Check), "Fetched", style::quiet_active, None),
+            FullState::Idle | FullState::Failed(_) => {
+                style::quiet_button(None, "Read full article", style::quiet, fetch)
+            }
+        };
         let actions = row![
             save,
             style::quiet_button(Some(Icon::External), "Open in browser", style::quiet, open),
+            full,
             style::quiet_button(None, read, style::quiet, Some(Message::ToggleRead)),
             tooltip(
                 style::quiet_button(Some(Icon::Connections), "Connections", style::quiet, Some(Message::MapArticle)),
@@ -1658,20 +1869,54 @@ impl App {
         } else {
             &p.body
         };
-        scrollable(
-            column![
-                column![text(meta).size(SIZE_SMALL).style(style::muted), self.view_headline(p)].spacing(SPACE[1]),
-                actions,
-                text(body).size(SIZE_BODY).line_height(1.6).style(style::body),
-                rule::horizontal(1),
-                column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]),
-            ]
-            .spacing(SPACE[4])
-            .padding(SPACE[4])
-            .max_width(READ_WIDTH + 2.0 * SPACE[4]),
-        )
-        .height(Fill)
-        .into()
+        let mut head = column![
+            column![text(meta).size(SIZE_SMALL).style(style::muted), self.view_headline(p)].spacing(SPACE[1]),
+            actions,
+        ]
+        .spacing(SPACE[4]);
+        if let FullState::Failed(note) = &p.full {
+            head = head.push(text(note).size(SIZE_SMALL).style(style::danger));
+        }
+        let rest = column![
+            text(body).size(SIZE_BODY).line_height(1.6).style(style::body),
+            rule::horizontal(1),
+            column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]),
+        ]
+        .spacing(SPACE[4]);
+        let width = READ_WIDTH + 2.0 * SPACE[4];
+        let picture = p.picture.as_ref().filter(|_| self.settings.values.fulltext_pictures);
+        let content: Element<'_, Message> = match picture {
+            None => column![head, rest].spacing(SPACE[4]).padding(SPACE[4]).max_width(width).into(),
+            Some(handle) => {
+                // The text sets the hero's height (at least the picture's), and the
+                // picture and its fade sit under it.
+                let text_over = row![
+                    Space::new().width(0).height(HERO_HEIGHT),
+                    container(head)
+                        .padding(Padding { top: HERO_TEXT_TOP, right: SPACE[4], bottom: 0.0, left: SPACE[4] })
+                        .max_width(width),
+                ];
+                let hero = stack![]
+                    .push(text_over)
+                    .push_under(container(Space::new()).width(Fill).height(HERO_HEIGHT).style(style::hero_fade))
+                    // The CPU renderer (tiny-skia) ignores an image's own clip
+                    // bounds, so the covered picture would spill below the hero.
+                    // A clipping stack draws it in a layer cut to the hero instead.
+                    .push_under(
+                        stack![
+                            Space::new().width(Fill).height(HERO_HEIGHT),
+                            iced::widget::image(handle.clone())
+                                .content_fit(ContentFit::Cover)
+                                .width(Fill)
+                                .height(HERO_HEIGHT),
+                        ]
+                        .clip(true),
+                    )
+                    .width(Fill);
+                column![hero, container(rest).padding(SPACE[4]).max_width(width)].spacing(0).into()
+            }
+        };
+        scrollable(content).height(Fill).into()
     }
 }
 
@@ -1901,6 +2146,171 @@ mod tests {
         let _ = app.update(Message::ToggleFeedsMenu);
         let _ = app.update(Message::Key(Key::Named(keyboard::key::Named::Escape), Default::default()));
         assert!(!app.feeds_open);
+    }
+
+    /// The app with two articles in one feed, ids returned oldest first.
+    fn app_with_articles() -> (App, ArticleId, ArticleId) {
+        let (app, feed) = app_with_feed();
+        let ids = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let entries: Vec<juttusihti_core::NewArticle> = (1..=2)
+                .map(|i| juttusihti_core::NewArticle {
+                    guid: i.to_string(),
+                    url: Some(format!("https://www.is.fi/a/{i}")),
+                    title: format!("Title {i}"),
+                    summary: Some(format!("Teaser {i}")),
+                    content: None,
+                    author: None,
+                    published_at: Some(1_790_812_800 + i),
+                })
+                .collect();
+            s.ingest(feed, &entries).unwrap();
+            let mut st = s.conn().prepare("SELECT id FROM articles ORDER BY id").unwrap();
+            st.query_map([], |r| r.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        (app, ids[0], ids[1])
+    }
+
+    impl App {
+        fn show_preview(&mut self, id: ArticleId) {
+            let p = read_preview(&self.db.shared().lock().unwrap(), id).unwrap();
+            let _ = self.update(Message::PreviewLoaded(Ok(Box::new(p))));
+        }
+    }
+
+    fn fetched(text: &str, paywalled: bool) -> FetchOutcome {
+        FetchOutcome::Fetched { text: text.into(), paywalled, picture: None }
+    }
+
+    #[test]
+    fn outcome_note_copy() {
+        assert_eq!(
+            outcome_note(&FetchOutcome::Refused { status: 403 }).as_deref(),
+            Some("The site refused the request (HTTP 403). Open it in the browser to read it.")
+        );
+        assert_eq!(outcome_note(&FetchOutcome::Timeout).as_deref(), Some("The site took too long to answer."));
+        assert_eq!(
+            outcome_note(&FetchOutcome::NoArticle).as_deref(),
+            Some("Couldn't find the article text on the page.")
+        );
+        assert_eq!(
+            outcome_note(&FetchOutcome::Failed { message: "The browser helper is missing.".into() }).as_deref(),
+            Some("Fetching failed: The browser helper is missing.")
+        );
+        assert_eq!(outcome_note(&fetched("x", false)), None);
+    }
+
+    #[test]
+    fn result_for_other_article_does_not_replace_preview() {
+        let (mut app, a, b) = app_with_articles();
+        app.show_preview(a);
+        let _ = app.update(Message::FetchFullArticle);
+        assert_eq!(app.fetching, Some(a));
+        assert_eq!(app.preview.as_ref().unwrap().full, FullState::Busy);
+        app.show_preview(b);
+        let before = app.preview.as_ref().unwrap().body.clone();
+        let task = app.update(Message::FullArticleDone(a, fetched("Full text of A", false)));
+        assert!(task.units() >= 1, "a save task for A is issued");
+        assert_eq!(app.fetching, None);
+        let p = app.preview.as_ref().unwrap();
+        assert_eq!((p.article.id, p.body.as_str(), &p.full), (b, before.as_str(), &FullState::Idle));
+    }
+
+    #[test]
+    fn saving_fetched_text_stores_it_for_that_article() {
+        let (app, a, _) = app_with_articles();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = rt.block_on(save_fetched(
+            app.db.clone(),
+            dir.path().into(),
+            a,
+            "Full text of A".into(),
+            false,
+            None,
+            1 << 30,
+        ));
+        assert_eq!(r, Ok(()));
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        assert_eq!(s.fulltext(a).unwrap().unwrap().text, "Full text of A");
+        let p = read_preview(&s, a).unwrap();
+        assert_eq!((p.body.as_str(), &p.full), ("Full text of A", &FullState::Fetched));
+    }
+
+    #[test]
+    fn saving_for_a_removed_article_deletes_its_picture() {
+        let (app, a, _) = app_with_articles();
+        let dir = tempfile::tempdir().unwrap();
+        let pic = dir.path().join(crate::full_article::picture_rel_path(a));
+        std::fs::create_dir_all(pic.parent().unwrap()).unwrap();
+        std::fs::write(&pic, "jpeg").unwrap();
+        app.db.shared().lock().unwrap().conn().execute("DELETE FROM articles WHERE id = ?1", [a]).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = rt.block_on(save_fetched(app.db.clone(), dir.path().into(), a, "t".into(), false, Some(4), 1 << 30));
+        assert!(r.is_err());
+        assert!(!pic.exists());
+    }
+
+    #[test]
+    fn fetch_disabled_while_another_runs() {
+        let (mut app, a, b) = app_with_articles();
+        app.show_preview(a);
+        let _ = app.update(Message::FetchFullArticle);
+        app.show_preview(b);
+        assert!(!app.can_fetch(app.preview.as_ref().unwrap()));
+        let task = app.update(Message::FetchFullArticle);
+        assert_eq!(task.units(), 0);
+        assert_eq!(app.fetching, Some(a));
+        assert_eq!(app.preview.as_ref().unwrap().full, FullState::Idle);
+        // Shortcut `a` does the same.
+        let _ = app.update(Message::Key(Key::Character("a".into()), Default::default()));
+        assert_eq!(app.fetching, Some(a));
+        let _ = app.update(Message::FullArticleDone(a, FetchOutcome::Timeout));
+        assert!(app.can_fetch(app.preview.as_ref().unwrap()));
+        let _ = app.update(Message::Key(Key::Character("a".into()), Default::default()));
+        assert_eq!(app.fetching, Some(b));
+        let _ = app.view();
+    }
+
+    #[test]
+    fn failure_returns_the_button_with_a_note() {
+        let (mut app, a, _) = app_with_articles();
+        app.show_preview(a);
+        let _ = app.update(Message::FetchFullArticle);
+        let _ = app.update(Message::FullArticleDone(a, FetchOutcome::NoArticle));
+        let p = app.preview.as_ref().unwrap();
+        assert_eq!(p.full, FullState::Failed("Couldn't find the article text on the page.".into()));
+        assert!(app.can_fetch(p));
+        let _ = app.view();
+    }
+
+    #[test]
+    fn cached_jpeg_decodes_and_garbage_shows_no_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("1.jpg");
+        image::RgbImage::from_pixel(8, 4, image::Rgb([200, 120, 40])).save(&good).unwrap();
+        match decode_picture(&good) {
+            Some(iced::widget::image::Handle::Rgba { width, height, .. }) => assert_eq!((width, height), (8, 4)),
+            other => panic!("unexpected {other:?}"),
+        }
+        let bad = dir.path().join("2.jpg");
+        std::fs::write(&bad, "not a jpeg").unwrap();
+        assert!(decode_picture(&bad).is_none());
+        assert!(decode_picture(&dir.path().join("missing.jpg")).is_none());
+    }
+
+    #[test]
+    fn paywalled_fetch_shows_note() {
+        let (app, a, _) = app_with_articles();
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        s.save_fulltext(a, "Public part.", true, None).unwrap();
+        let p = read_preview(&s, a).unwrap();
+        assert!(p.body.starts_with("Public part."), "{}", p.body);
+        assert!(p.body.ends_with(PAYWALL_NOTE), "{}", p.body);
+        assert_eq!(PAYWALL_NOTE, "The rest of this article is for subscribers.");
     }
 
     #[test]

@@ -4,8 +4,6 @@
 //! the app down. Each fetch gets a fresh profile directory (which the helper
 //! creates itself and deletes before exit) under `browser-profiles/`.
 
-#![allow(dead_code)]
-
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +41,17 @@ pub fn check_url(url: Option<&str>) -> Result<Url, &'static str> {
         "http" | "https" => Ok(parsed),
         _ => Err("Only http and https links can be opened."),
     }
+}
+
+/// Where an article's picture lives, relative to the data directory.
+pub fn picture_rel_path(article_id: ArticleId) -> String {
+    format!("{FULLTEXT_DIR}/{article_id}.jpg")
+}
+
+/// `rel` joined to `dir`, or `None` when it is absolute, empty or has `..`.
+pub fn cache_file(dir: &Path, rel: &str) -> Option<PathBuf> {
+    let path = Path::new(rel);
+    (!rel.is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))).then(|| dir.join(path))
 }
 
 fn failed(message: &str) -> FetchOutcome {
@@ -159,11 +168,8 @@ async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) ->
 /// Absolute paths and `..` components are refused.
 pub fn delete_cache_files(dir: &Path, paths: &[String]) -> Result<(), String> {
     for p in paths {
-        let rel = Path::new(p);
-        if p.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
-            return Err(format!("Refusing to delete unsafe path {p}"));
-        }
-        match std::fs::remove_file(dir.join(rel)) {
+        let Some(file) = cache_file(dir, p) else { return Err(format!("Refusing to delete unsafe path {p}")) };
+        match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("Could not delete {p}: {e}")),
