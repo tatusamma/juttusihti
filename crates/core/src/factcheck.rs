@@ -2,17 +2,24 @@
 //! that keeps a verdict honest. A verdict needs real evidence: a source the
 //! run actually gathered, not an invented one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::ArticleId;
 use crate::pricing::{Billing, Micros, Provider};
+use crate::store::Store;
+use crate::{ArticleId, Result};
 
 pub const MAX_CLAIMS: usize = 8;
 pub const MAX_SOURCES_PER_CLAIM: usize = 5;
 pub const FACT_CHECK_PROMPT_VERSION: u32 = 1;
+
+/// Per-check spending limit when the user has not set one: $1.00.
+pub const DEFAULT_FACT_CHECK_LIMIT: Micros = 1_000_000;
+
+const LIMIT_SETTING: &str = "fact_check_max_cost";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +264,65 @@ pub fn bound_text(s: &str, max_chars: usize) -> String {
     let mut out: String = collapsed.chars().take(max_chars).collect();
     out.push('…');
     out
+}
+
+impl Store {
+    /// Stores the check as the article's only one, replacing any earlier.
+    pub fn save_fact_check(&self, fc: &FactCheck) -> Result<()> {
+        let provider = serde_json::to_value(fc.provider)?;
+        self.conn().execute(
+            "INSERT INTO article_fact_checks(article_id, checked_at, provider, model, prompt_version, flagged_count, result_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(article_id) DO UPDATE SET
+               checked_at = excluded.checked_at, provider = excluded.provider, model = excluded.model,
+               prompt_version = excluded.prompt_version, flagged_count = excluded.flagged_count,
+               result_json = excluded.result_json",
+            params![
+                fc.article_id,
+                fc.checked_at,
+                provider.as_str().unwrap_or_default(),
+                fc.model,
+                fc.prompt_version,
+                fc.flagged_count(),
+                serde_json::to_string(fc)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The article's latest check. A row that no longer parses (written by a
+    /// different version) reads as no check.
+    pub fn fact_check(&self, article: ArticleId) -> Result<Option<FactCheck>> {
+        let json: Option<String> = self
+            .conn()
+            .query_row("SELECT result_json FROM article_fact_checks WHERE article_id = ?1", [article], |r| r.get(0))
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Which of `articles` have a check with contradicted or misleading claims.
+    pub fn fact_check_flags(&self, articles: &[ArticleId]) -> Result<HashSet<ArticleId>> {
+        let mut flagged = HashSet::new();
+        // Stay under SQLite's bound-variable limit.
+        for chunk in articles.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.conn().prepare(&format!(
+                "SELECT article_id FROM article_fact_checks WHERE flagged_count > 0 AND article_id IN ({marks})"
+            ))?;
+            for id in stmt.query_map(params_from_iter(chunk), |r| r.get::<_, ArticleId>(0))? {
+                flagged.insert(id?);
+            }
+        }
+        Ok(flagged)
+    }
+
+    pub fn fact_check_limit(&self) -> Result<Micros> {
+        Ok(self.setting(LIMIT_SETTING)?.and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_FACT_CHECK_LIMIT))
+    }
+
+    pub fn set_fact_check_limit(&self, m: Micros) -> Result<()> {
+        self.set_setting(LIMIT_SETTING, &m.to_string())
+    }
 }
 
 #[cfg(test)]
