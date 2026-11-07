@@ -1,10 +1,14 @@
-//! Fact check prompts and strict parsing of what the model returns.
+//! Fact check of one article: the prompts, strict parsing of what the model
+//! returns, and [`run_fact_check`], which runs the check within its own
+//! spending limit.
 //!
 //! Article text, search results, published fact checks and Wikipedia extracts
 //! are untrusted. They are serialized as JSON with `<` and `>` escaped and
 //! placed in a `<data>` block; the instructions say they are data only.
 //! Anthropic and Gemini search requests are sent without a structured-output
 //! format, so each system prompt also spells out the exact JSON shape.
+
+mod run;
 
 use juttusihti_core::ArticleId;
 use juttusihti_core::factcheck::{
@@ -16,6 +20,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::sources::{PublishedCheck, WikiPage, valid_lang};
 use crate::{Request, WebSearch};
+
+pub use run::{FactCheckError, FactCheckJob, FactCheckProgress, run_fact_check};
 
 const MIN_QUOTE_CHARS: usize = 12;
 const MAX_QUOTE_CHARS: usize = 400;

@@ -77,7 +77,7 @@ impl Control {
     fn state(&self) -> u8 {
         self.0.0.load(Ordering::SeqCst)
     }
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         loop {
             let notified = self.0.1.notified();
             if self.state() == CANCEL {
