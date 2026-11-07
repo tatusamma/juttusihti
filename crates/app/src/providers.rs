@@ -5,7 +5,7 @@
 use iced::widget::{column, container, pick_list, row, rule, scrollable, text, text_input};
 use iced::{Center, Element, Task as Cmd};
 use juttusihti_core::ai_defaults::{AiDefaults, PayWith, Tier, recommended};
-use juttusihti_core::pricing::{Provider, format_usd, usd_to_micros};
+use juttusihti_core::pricing::{Micros, Provider, format_usd, usd_to_micros};
 
 use crate::db::Db;
 use crate::icons::Icon;
@@ -17,6 +17,7 @@ const CLAUDE_KEYS: &str = "https://platform.claude.com/settings/keys";
 const GEMINI_KEYS: &str = "https://aistudio.google.com/apikey";
 const GEMINI_TERMS: &str = "https://ai.google.dev/gemini-api/terms";
 const OPENAI_KEYS: &str = "https://platform.openai.com/api-keys";
+const GOOGLE_FACTCHECK_API: &str = "https://console.cloud.google.com/apis/library/factchecktools.googleapis.com";
 const CHATGPT_HELP: &str =
     "https://help.openai.com/en/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites";
 
@@ -44,6 +45,14 @@ pub enum Msg {
     SetClickbait(bool),
     ClickbaitThreshold(String),
     DefaultsSaved(Result<(), String>),
+    FactLimitLoaded(Result<Micros, String>),
+    FactLimit(String),
+    FactLimitSaved(Result<(), String>),
+    GoogleLoaded(Result<bool, String>),
+    GoogleInput(String),
+    SaveGoogle,
+    RemoveGoogle,
+    GoogleDone(Result<String, String>),
 }
 
 enum ChatGpt {
@@ -69,6 +78,25 @@ pub struct State {
     inputs: [String; 3],
     message: Option<Result<String, String>>,
     chatgpt: ChatGpt,
+    /// Fact check limit in USD, as typed.
+    fact_limit: String,
+    google: Option<Result<bool, String>>,
+    google_input: String,
+}
+
+/// Dollars typed by the user (`$` and decimal comma allowed) as micro-USD;
+/// `None` unless above zero.
+fn parse_limit(input: &str) -> Option<Micros> {
+    let t = input.trim().trim_start_matches('$').replace(',', ".");
+    t.parse::<f64>().ok().and_then(|x| usd_to_micros(x).ok()).filter(|m| *m > 0)
+}
+
+async fn load_limit(db: &Db) -> Result<Micros, String> {
+    db.call(|s| s.fact_check_limit()).await
+}
+
+async fn save_limit(db: &Db, m: Micros) -> Result<(), String> {
+    db.call(move |s| s.set_fact_check_limit(m)).await
 }
 
 fn idx(p: Provider) -> usize {
@@ -91,12 +119,18 @@ impl State {
             inputs: Default::default(),
             message: None,
             chatgpt: ChatGpt::Unknown,
+            fact_limit: String::new(),
+            google: None,
+            google_input: String::new(),
         }
     }
 
     pub fn load(&self) -> Cmd<Msg> {
         let db = self.db.clone();
+        let limit_db = self.db.clone();
         Cmd::batch([
+            Cmd::perform(async move { load_limit(&limit_db).await }, Msg::FactLimitLoaded),
+            Cmd::perform(blocking(|| secrets::google_factcheck_key().map(|k| k.is_some())), Msg::GoogleLoaded),
             Cmd::perform(async move { ai_setup::defaults(&db).await }, Msg::DefaultsLoaded),
             Cmd::perform(blocking(secrets::status), Msg::Loaded),
             Cmd::perform(plan::status(), Msg::ChatGptStatus),
@@ -121,6 +155,42 @@ impl State {
             }
             Msg::DefaultsLoaded(Err(e)) | Msg::DefaultsSaved(Err(e)) => self.message = Some(Err(e)),
             Msg::DefaultsSaved(Ok(())) => {}
+            Msg::FactLimitLoaded(Ok(m)) => self.fact_limit = format!("{:.2}", m as f64 / 1_000_000.0),
+            Msg::FactLimitLoaded(Err(e)) | Msg::FactLimitSaved(Err(e)) => self.message = Some(Err(e)),
+            Msg::FactLimitSaved(Ok(())) => {}
+            Msg::FactLimit(v) => {
+                self.fact_limit = v;
+                if let Some(m) = parse_limit(&self.fact_limit) {
+                    let db = self.db.clone();
+                    return Cmd::perform(async move { save_limit(&db, m).await }, Msg::FactLimitSaved);
+                }
+            }
+            Msg::GoogleLoaded(r) => self.google = Some(r),
+            Msg::GoogleInput(s) => self.google_input = s,
+            Msg::SaveGoogle => {
+                let key = std::mem::take(&mut self.google_input);
+                return Cmd::perform(
+                    blocking(move || {
+                        secrets::set_google_factcheck_key(&key).map(|_| "Saved the Google Fact Check key.".to_string())
+                    }),
+                    Msg::GoogleDone,
+                );
+            }
+            Msg::RemoveGoogle => {
+                return Cmd::perform(
+                    blocking(|| {
+                        secrets::delete_google_factcheck_key().map(|_| "Removed the Google Fact Check key.".to_string())
+                    }),
+                    Msg::GoogleDone,
+                );
+            }
+            Msg::GoogleDone(r) => {
+                self.message = Some(r);
+                return Cmd::perform(
+                    blocking(|| secrets::google_factcheck_key().map(|k| k.is_some())),
+                    Msg::GoogleLoaded,
+                );
+            }
             Msg::SetProvider(p) => {
                 return self.change(|d| {
                     d.provider = p;
@@ -274,6 +344,58 @@ impl State {
         ]
         .spacing(SPACE[1])
         .into()
+    }
+
+    fn view_fact_check(&self) -> Element<'_, Msg> {
+        let has_key = matches!(self.google, Some(Ok(true)));
+        let state = match &self.google {
+            Some(Ok(true)) => "Key stored".to_string(),
+            Some(Ok(false)) => "No key".to_string(),
+            Some(Err(e)) => e.clone(),
+            None => "…".to_string(),
+        };
+        let mut col = column![
+            style::title("Fact check"),
+            style::note("Fact checks use your provider's quality model and its web search."),
+            row![
+                text("Limit per fact check (USD)").size(SIZE_BODY),
+                small_input("1.00", &self.fact_limit, Msg::FactLimit),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+        ]
+        .spacing(SPACE[2]);
+        if parse_limit(&self.fact_limit).is_none() && !self.fact_limit.is_empty() {
+            col = col.push(style::note("Enter an amount above 0."));
+        }
+        col.push(style::heading("Google Fact Check Tools API key (optional)"))
+            .push(style::note(
+                "Free from Google Cloud. Adds published fact checks (Faktabaari, AFP and others) and makes checks \
+                 more accurate.",
+            ))
+            .push(link("Open Google Cloud", GOOGLE_FACTCHECK_API))
+            .push(style::note(state))
+            .push(
+                row![
+                    text_input("Paste API key", &self.google_input)
+                        .style(style::text_input)
+                        .secure(true)
+                        .on_input(Msg::GoogleInput)
+                        .on_submit(Msg::SaveGoogle)
+                        .size(SIZE_BODY)
+                        .padding(SPACE[1]),
+                    style::quiet_button(
+                        None,
+                        "Save",
+                        style::quiet,
+                        (!self.google_input.trim().is_empty()).then_some(Msg::SaveGoogle)
+                    ),
+                    style::quiet_button(None, "Remove", style::quiet_danger, has_key.then_some(Msg::RemoveGoogle)),
+                ]
+                .spacing(SPACE[1])
+                .align_y(Center),
+            )
+            .into()
     }
 
     fn view_defaults(&self) -> Element<'_, Msg> {
@@ -496,6 +618,7 @@ impl State {
             ]
             .spacing(SPACE[2]),
         );
+        col = col.push(rule::horizontal(1)).push(self.view_fact_check());
         scrollable(col).into()
     }
 }
@@ -528,4 +651,28 @@ fn small_input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) 
         .padding(SPACE[1])
         .width(70)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use juttusihti_core::store::Store;
+
+    #[test]
+    fn limit_input_parses_dollars() {
+        assert_eq!(parse_limit("1.00"), Some(1_000_000));
+        assert_eq!(parse_limit(" $0,50 "), Some(500_000));
+        assert_eq!(parse_limit("0"), None);
+        assert_eq!(parse_limit("abc"), None);
+        assert_eq!(parse_limit(""), None);
+        assert_eq!(parse_limit("-1"), None);
+    }
+
+    #[tokio::test]
+    async fn saved_limit_updates_the_store() {
+        let db = Db::new(Store::open_in_memory().unwrap());
+        assert_eq!(load_limit(&db).await.unwrap(), 1_000_000);
+        save_limit(&db, parse_limit("2.50").unwrap()).await.unwrap();
+        assert_eq!(load_limit(&db).await.unwrap(), 2_500_000);
+    }
 }

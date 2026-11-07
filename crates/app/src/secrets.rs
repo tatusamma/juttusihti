@@ -13,6 +13,9 @@ const CHATGPT_TOKEN: &str = "openai-chatgpt-refresh-token";
 /// secret, but kept with the token it belongs to).
 const CHATGPT_REGISTRATION: &str = "openai-chatgpt-registration";
 
+/// Optional key for the Google Fact Check Tools API.
+const GOOGLE_FACTCHECK: &str = "google-factcheck-api-key";
+
 fn account(p: Provider) -> &'static str {
     match p {
         Provider::Anthropic => "anthropic-api-key",
@@ -44,12 +47,31 @@ pub fn get(p: Provider) -> Result<Option<String>, String> {
     read(account(p), "API key")
 }
 
-pub fn set(p: Provider, key: &str) -> Result<(), String> {
+/// The trimmed key, or an error when it cannot be a key.
+fn checked(key: &str) -> Result<&str, String> {
     let key = key.trim();
     if key.is_empty() || key.len() > 512 || key.chars().any(char::is_whitespace) {
         return Err("That does not look like an API key.".into());
     }
-    entry(account(p))?.set_password(key).map_err(|e| format!("could not store the API key: {e}"))
+    Ok(key)
+}
+
+pub fn set(p: Provider, key: &str) -> Result<(), String> {
+    entry(account(p))?.set_password(checked(key)?).map_err(|e| format!("could not store the API key: {e}"))
+}
+
+pub fn google_factcheck_key() -> Result<Option<String>, String> {
+    read(GOOGLE_FACTCHECK, "Google Fact Check key")
+}
+
+pub fn set_google_factcheck_key(key: &str) -> Result<(), String> {
+    entry(GOOGLE_FACTCHECK)?
+        .set_password(checked(key)?)
+        .map_err(|e| format!("could not store the Google Fact Check key: {e}"))
+}
+
+pub fn delete_google_factcheck_key() -> Result<(), String> {
+    remove(GOOGLE_FACTCHECK, "Google Fact Check key")
 }
 
 pub fn delete(p: Provider) -> Result<(), String> {
