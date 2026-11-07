@@ -212,7 +212,11 @@ Model output and web content are untrusted (as in `crates/ai/src/lib.rs`):
   plus Google Fact Check (if keyed), with more claims ending up *Unverified*.
 - How many claims are searched per request (one per claim, or batched).
 - Prompt wording, prompt version constant, and the claim limit.
-- UI language follows the rest of the app (English); claims are quoted in the article's own
-  language; reasons are written in English. *(My call.)*
+- **Article language is open** (user decided): news can be in any language, and nothing may
+  assume Finnish or English. The LLM detects the language itself. Claims are quoted in the
+  article's own language; searches are made in that language and, when it helps, in English;
+  the Google Fact Check query uses the detected language code, then no language filter. The UI
+  and the reasons stay in English, like the rest of the app. Tests should include a non-Finnish,
+  non-English article.
 - Tests in the style of the existing ones: fake provider for the runner, validation tests for
   invented sources, and a store test for the migration.
