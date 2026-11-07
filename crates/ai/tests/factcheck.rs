@@ -219,6 +219,25 @@ fn saved(db: &Arc<Mutex<Store>>, id: ArticleId) -> Option<FactCheck> {
 
 const PLENTY: Micros = 100_000_000;
 
+/// Saves a check as if from an earlier run.
+fn save_earlier(db: &Arc<Mutex<Store>>, id: ArticleId) -> FactCheck {
+    let earlier = FactCheck {
+        article_id: id,
+        checked_at: 1,
+        provider: Provider::Openai,
+        model: MODEL.into(),
+        billing: Billing::ApiKey,
+        prompt_version: FACT_CHECK_PROMPT_VERSION,
+        language: "fi".into(),
+        web_search: true,
+        claims: vec![],
+        guidelines: vec![],
+        cost: Some(1),
+    };
+    db.lock().unwrap().save_fact_check(&earlier).unwrap();
+    earlier
+}
+
 // ---- tests ------------------------------------------------------------------------
 
 #[tokio::test]
@@ -341,17 +360,24 @@ async fn unsupported_web_search_falls_back() {
 #[tokio::test]
 async fn malformed_claim_output_becomes_unverified() {
     let m = mock(Arc::new(|r: &Recorded, _| {
-        if is_extract(r) { extraction(&[CLAIM_1]) } else { claim_reply("Sorry, I cannot answer that.", &[WEB_SOURCE]) }
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2])
+        } else if claim_of(r) == CLAIM_1 {
+            claim_reply("Sorry, I cannot answer that.", &[WEB_SOURCE])
+        } else {
+            claim_reply(&verdict("contradicted", &[WEB_SOURCE]), &[WEB_SOURCE])
+        }
     }))
     .await;
     let l = empty_lookups().await;
     let (db, id) = seed();
     let fc = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap();
-    assert_eq!(m.count(), 3, "extraction, the claim, one retry");
+    assert_eq!(m.count(), 4, "extraction, the first claim and its retry, the second claim");
     assert_eq!(fc.claims[0].verdict, Verdict::Unverified);
     assert_eq!(fc.claims[0].reason, FAILED);
     assert!(fc.claims[0].sources.is_empty());
-    assert_eq!(ledger(&db).len(), 3, "both claim attempts are charged");
+    assert_eq!(fc.claims[1].verdict, Verdict::Contradicted);
+    assert_eq!(ledger(&db).len(), 4, "both attempts of the first claim are charged");
 }
 
 #[tokio::test]
@@ -522,20 +548,7 @@ async fn account_error_on_a_claim_fails_the_run_and_keeps_the_earlier_check() {
     .await;
     let l = empty_lookups().await;
     let (db, id) = seed();
-    let earlier = FactCheck {
-        article_id: id,
-        checked_at: 1,
-        provider: Provider::Openai,
-        model: MODEL.into(),
-        billing: Billing::ApiKey,
-        prompt_version: FACT_CHECK_PROMPT_VERSION,
-        language: "fi".into(),
-        web_search: true,
-        claims: vec![],
-        guidelines: vec![],
-        cost: Some(1),
-    };
-    db.lock().unwrap().save_fact_check(&earlier).unwrap();
+    let earlier = save_earlier(&db, id);
     let err = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap_err();
     assert!(matches!(err, FactCheckError::Ai(_)));
     assert!(err.to_string().contains("no credit left"), "{err}");
@@ -545,20 +558,19 @@ async fn account_error_on_a_claim_fails_the_run_and_keeps_the_earlier_check() {
 
 #[tokio::test]
 async fn refused_retry_after_malformed_output_is_unverified() {
-    let m = mock(Arc::new(
-        |r: &Recorded, _| {
-            if is_extract(r) { extraction(&[CLAIM_1]) } else { claim_reply("not json", &[WEB_SOURCE]) }
-        },
-    ))
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) { extraction(&[CLAIM_1, CLAIM_2]) } else { claim_reply("not json", &[WEB_SOURCE]) }
+    }))
     .await;
     let l = empty_lookups().await;
     let (db, id) = seed();
     // $0.40 fits the first claim attempt (about $0.34) but not a second one
-    // after the first was charged.
+    // after the first was charged, nor the second claim.
     let fc = run(&m, &l, false, &db, job(id, 400_000), &Control::default()).await.result.unwrap();
     assert_eq!(m.count(), 2, "extraction and one claim attempt");
     assert_eq!(fc.claims[0].verdict, Verdict::Unverified);
     assert_eq!(fc.claims[0].reason, FAILED);
+    assert_eq!(fc.claims[1].verdict, Verdict::NotChecked, "a claim stopped by the limit counts as judged");
 }
 
 #[tokio::test]
@@ -590,6 +602,55 @@ async fn reasoning_model_gets_room_to_think() {
     run(&m2, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap();
     let caps: Vec<Value> = m2.requests().iter().map(|r| r.body["max_output_tokens"].clone()).collect();
     assert_eq!(caps, [json!(4000), json!(1500)]);
+}
+
+#[tokio::test]
+async fn a_run_where_every_claim_failed_keeps_the_earlier_check() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2])
+        } else if claim_of(r) == CLAIM_1 {
+            MockReply { status: 500, body: json!({"error": {"message": "server exploded"}}), delay: Duration::ZERO }
+        } else {
+            claim_reply("not json", &[WEB_SOURCE])
+        }
+    }))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let earlier = save_earlier(&db, id);
+    let err = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap_err();
+    assert!(matches!(err, FactCheckError::Ai(_)), "{err:?}");
+    assert_eq!(err.to_string(), "The fact check could not be completed. Your earlier result, if any, was kept.");
+    assert_eq!(saved(&db, id), Some(earlier), "a run with no judged claim does not replace the earlier check");
+}
+
+#[tokio::test]
+async fn cancel_during_lookups_saves_nothing_and_charges_no_claim() {
+    let control = Control::default();
+    let c = control.clone();
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2])
+        } else {
+            claim_reply(&verdict("contradicted", &[WEB_SOURCE]), &[WEB_SOURCE])
+        }
+    }))
+    .await;
+    let l = mock(Arc::new(move |_: &Recorded, _| {
+        c.cancel();
+        MockReply { status: 200, body: json!({"pages": []}), delay: Duration::from_secs(5) }
+    }))
+    .await;
+    let (db, id) = seed();
+    let started = std::time::Instant::now();
+    let ran = run(&m, &l, true, &db, job(id, PLENTY), &control).await;
+    assert!(matches!(ran.result, Err(FactCheckError::Cancelled)), "{:?}", ran.result.map(|_| ()));
+    assert!(started.elapsed() < Duration::from_secs(3), "cancel does not wait for the lookups");
+    assert_eq!(m.count(), 1, "no claim call was sent");
+    // The claims' reservations were released, not charged.
+    assert_eq!(ledger(&db).iter().map(|(op, _)| op.as_str()).collect::<Vec<_>>(), ["fact_check_extract"]);
+    assert_eq!(saved(&db, id), None);
 }
 
 /// The app runs a check on a spawned task.

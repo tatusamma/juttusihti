@@ -32,6 +32,7 @@ const LOOKUP_TOKENS: u64 = 2_000;
 const TOO_LOW: &str = "The fact check limit is too low for this article.";
 const UNREADABLE: &str = "Could not read the article's claims.";
 const CLAIM_FAILED: &str = "The check could not be completed for this claim.";
+const NOTHING_JUDGED: &str = "The fact check could not be completed. Your earlier result, if any, was kept.";
 const UNCONFIRMED: &str = "No independent source could be confirmed for this verdict.";
 const UNKNOWN_PRICE: &str = "The price of this model is unknown, so the fact check cannot keep to its limit.";
 /// Bound for each published fact check field passed to the model, so the
@@ -65,8 +66,9 @@ pub enum FactCheckError {
 /// Checks one article: extracts its claims, checks each against evidence
 /// (at most three at a time, most important first) and saves the result as
 /// the article's only check. Every call is reserved against `job.limit`
-/// first; claims that no longer fit are marked not checked. A cancelled run
-/// saves nothing, but its usage stays in the ledger.
+/// first; claims that no longer fit are marked not checked. A cancelled run,
+/// or one where no claim could be judged, saves nothing, but its usage stays
+/// in the ledger.
 pub async fn run_fact_check(
     job: FactCheckJob,
     client: &Client,
@@ -103,6 +105,10 @@ pub async fn run_fact_check(
     let _ = progress.send(FactCheckProgress::Extracting);
     let extraction = run.extract().await?;
     let claims = run.check_claims(&extraction, &progress).await?;
+    // Saving would replace an earlier check with one that judged nothing.
+    if !claims.is_empty() && claims.iter().all(is_failed) {
+        return Err(FactCheckError::Ai(NOTHING_JUDGED.into()));
+    }
     let fc = FactCheck {
         article_id: job.article.article_id,
         checked_at: juttusihti_core::now(),
@@ -493,6 +499,12 @@ fn failed(claim: &ExtractedClaim) -> ClaimResult {
         reason: CLAIM_FAILED.into(),
         sources: Vec::new(),
     }
+}
+
+/// Whether a claim got no judgement at all (a claim stopped by the limit
+/// counts as judged).
+fn is_failed(c: &ClaimResult) -> bool {
+    c.verdict == Verdict::Unverified && c.reason == CLAIM_FAILED && c.sources.is_empty()
 }
 
 fn non_empty(s: &str) -> Option<String> {
