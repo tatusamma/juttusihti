@@ -25,6 +25,8 @@ Untrusted inputs:
 - OPML files.
 - AI provider responses.
 - Map tiles.
+- Article web pages and their pictures, loaded by the full-article helper (Servo) only when the
+  user presses "Read full article".
 - CSV consumers (spreadsheets that open our exports).
 
 Valuables:
@@ -57,6 +59,9 @@ Valuables:
 | CSV formula injection | Cells starting with `= + - @ tab CR` are prefixed with `'`. | `quotes_escapes_and_guards_formulas` |
 | Data loss | AI never modifies source article columns. Retention never deletes saved, annotated or researched articles and has a 7-day minimum. Filtering is a view, never a deletion. | `retention_keeps_saved_and_researched_articles`, `hiding_dismissed_articles_is_reversible_and_needs_confirmation` |
 | Path traversal | Cache paths are built from integers only; files are chosen through OS dialogs. | — |
+| Hostile article pages (full-article helper) | Servo runs in a separate helper process, one per click, killed after 60 s, so a crash or hang cannot take the app down. The helper writes exactly one JSON line to a private copy of stdout; anything a page prints goes to stderr. The app accepts the picture only at the path it asked for, and deletes files only inside its own cache folders. Only http(s) article and picture URLs are loaded, the picture input is capped at 8 MB and re-encoded to JPEG. Extracted text is plain text; no page HTML is ever rendered by the app. | `page_output_cannot_reach_stdout`, `hanging_page_times_out_and_profile_is_removed`, `hung_helper_is_killed_and_profile_removed`, `foreign_or_missing_picture_is_dropped`, `local_file_picture_is_never_read`, `non_web_scheme_picture_is_never_read`, `non_http_url_is_rejected_before_spawn`, `delete_guard_rejects_unsafe_paths` |
+| Tracking across full-article fetches | Every fetch gets a brand-new profile that is deleted afterwards (also after a crash or timeout; leftovers are cleared at startup). Service workers are refused. EasyList and EasyPrivacy block known trackers; the lists and consent rules ship with the app and are never downloaded at run time. Servo's own user agent is used unchanged. | `second_fetch_sees_no_state_from_first`, `service_worker_registration_is_refused`, `startup_sweep_removes_leftovers_and_orphans` |
+| Paywall bypass or paid clicks | Content a page hides, and parts its structured data marks as paid, are never read. Consent-or-pay walls get only the free "accept" choice; a priced choice is never clicked. | `hidden_and_paid_parts_are_never_read`, `priced_accept_choice_is_never_clicked`, `consent_or_pay_wall_is_accepted_for_free` |
 
 ### Accepted risks and follow-ups
 
@@ -69,17 +74,35 @@ Valuables:
    allocation limits; only PNG is enabled.
 3. **The local database is not encrypted.** It lives in the user's profile directory and relies
    on OS account protection.
-4. **Dependency advisories:** see the next section.
+4. **Accepting cookie banners.** The helper accepts consent banners so pages show their text.
+   The site and the trackers that are not blocked see that one visit as consenting; the cookies
+   are deleted with the profile, so visits cannot be linked. The site always sees the user's IP
+   address.
+5. **Dependency advisories:** see the next section.
 
-### Dependency audit (`cargo audit`, RustSec database of 2026-11-01)
+### Dependency audit (`cargo audit`, RustSec database of 2026-11-07)
 
-No vulnerabilities in 645 crates. Warnings, all from transitive dependencies:
+**App workspace** (`Cargo.lock`, 653 crates): no vulnerabilities. `arrow` was updated to 60.1.0
+for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays). Warnings, all from
+transitive dependencies:
 
 | Advisory | Crate | Kind | Path | Assessment |
 |---|---|---|---|---|
 | RUSTSEC-2026-0253 | lru 0.16.4 | unsound (use-after-free if a panic happens inside `LruCache::pop`) | iced_wgpu → cryoglyph | Fixed only in lru ≥ 0.18.2, which Iced 0.14 cannot use without a fork. It is reachable only through the GPU text cache and is not attacker-triggerable. Track Iced releases; the CPU renderer setting avoids this path entirely. |
+| — | async-executor 1.14.0 | yanked | iced_winit → mundy → zbus | Linux D-Bus stack only. Picked up when Iced or zbus updates. |
 | RUSTSEC-2026-0192 | ttf-parser 0.25.1 | unmaintained | cosmic-text → fontdb | Parses only bundled and system fonts. No replacement available. |
 | RUSTSEC-2026-0370/0371/0372 | zvariant, zbus_names, zvariant_derive | unmaintained | Linux D-Bus stack (winit/keyring/rfd) | No replacement available. Re-check when the zbus ecosystem moves. |
+| RUSTSEC-2026-0441 | pin-utils 0.1.1 | unmaintained | iced_futures → wasmtimer | Compile-time macros only. Goes away when Iced drops it. |
+| RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | build-time proc macro | No runtime exposure. |
+
+**Full-article helper** (`crates/browser/Cargo.lock`, 840 crates, mostly Servo 0.7). Not part of
+the CI audit job, because of the finding below; re-run it by hand in `crates/browser`.
+
+| Advisory | Crate | Kind | Path | Assessment |
+|---|---|---|---|---|
+| RUSTSEC-2023-0071 | rsa 0.10.0-rc.18 | **vulnerability** (Marvin attack: timing side channel in RSA decryption, medium) | servo-script (WebCrypto) | No fixed version exists. Only web pages use it, through WebCrypto, with keys they make themselves in a throwaway profile that is deleted after one fetch. Juttusihti holds no RSA keys and the helper never decrypts anything of the user's. WebCrypto stays on because the news sites tested do not render without it. Re-check when Servo updates. |
+| RUSTSEC-2025-0141 | bincode 1.3.3 | unmaintained | Servo internals | No runtime exposure to page input beyond Servo's own IPC. |
+| RUSTSEC-2025-0075/0080/0081/0098/0100 | unic-* 0.9.0 | unmaintained | Servo (Unicode tables) | Static Unicode data. |
 | RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | build-time proc macro | No runtime exposure. |
 
 Re-run `cargo audit` before each release.

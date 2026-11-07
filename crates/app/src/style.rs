@@ -8,7 +8,10 @@ use iced::widget::{
     tooltip,
 };
 use iced::widget::{pick_list as pl, text_input as ti};
-use iced::{Background, Border, Center, Color, Element, Fill, Font, Point, Shadow, Theme, Vector, border, font};
+use iced::{
+    Background, Border, Center, Color, Degrees, Element, Fill, Font, Point, Shadow, Theme, Vector, border, font,
+    gradient,
+};
 
 use crate::icons::{self, Icon};
 
@@ -169,9 +172,24 @@ pub fn quiet(theme: &Theme, status: button::Status) -> button::Style {
     outlined(theme, status, tokens(theme).body)
 }
 
-/// Outlined button in its on/saved state: accent text.
+/// Outlined button in its on/saved state: accent text, also when disabled
+/// (a "Fetched" button that cannot be pressed again).
 pub fn quiet_active(theme: &Theme, status: button::Status) -> button::Style {
-    outlined(theme, status, tokens(theme).accent)
+    let accent = tokens(theme).accent;
+    let status = if status == button::Status::Disabled { button::Status::Active } else { status };
+    outlined(theme, status, accent)
+}
+
+/// The fade over the article picture: the page background at 15 % at the
+/// top, 55 % at 55 % down, solid at the bottom, so the picture melts into
+/// the page and text over it stays readable on any photo.
+pub fn hero_fade(theme: &Theme) -> container::Style {
+    let bg = tokens(theme).background;
+    let fade = gradient::Linear::new(Degrees(180.0))
+        .add_stop(0.0, Color { a: 0.15, ..bg })
+        .add_stop(0.55, Color { a: 0.55, ..bg })
+        .add_stop(1.0, bg);
+    container::Style { background: Some(Background::Gradient(fade.into())), ..container::Style::default() }
 }
 
 /// Outlined button for destructive actions.

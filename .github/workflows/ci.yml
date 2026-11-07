@@ -37,6 +37,8 @@ jobs:
         # Ubuntu 22.04 (glibc 2.35) is also what the Linux release is built on.
         os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    # A cold Servo build (the browser helper) alone takes well over half an hour on a runner.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,11 +51,41 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # The app workspace and the browser helper's own workspace, each with its target dir.
+          workspaces: |
+            . -> target
+            crates/browser -> target
           # Pull requests reuse master's cache but do not write their own.
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Paid live API tests and the network probe stay ignored.
       - run: cargo test --workspace --locked
+      # The browser helper (Servo) is a separate workspace with its own lock file and Rust 1.88.
+      - name: Browser helper clippy
+        working-directory: crates/browser
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export LIBCLANG_PATH='C:/Program Files/LLVM/bin'; fi
+          cargo clippy --all-targets --locked -- -D warnings
+      # tests/local_page.rs runs the real helper, and Servo renders through an OpenGL 3 context.
+      # Hosted Windows runners have no GPU and only Windows' OpenGL 1.1 fallback, so there the
+      # helper's unit tests run alone; the local_page tests run on Linux (below) and locally.
+      - name: Browser helper unit tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: crates/browser
+        shell: bash
+        run: |
+          export LIBCLANG_PATH='C:/Program Files/LLVM/bin'
+          cargo test --locked --bins
+      # With no display, Servo's surfman falls back to Mesa's surfaceless EGL platform, and
+      # llvmpipe (libegl-mesa0 and libgl1-mesa-dri, from linux-deps) gives it a software OpenGL
+      # context. Every helper run in local_page is killed after 120 s; the job limit covers the rest.
+      - name: Browser helper tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: crates/browser
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: cargo test --locked
 
   audit:
     runs-on: ubuntu-22.04

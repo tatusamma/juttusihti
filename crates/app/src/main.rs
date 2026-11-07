@@ -10,6 +10,7 @@ mod crash_log;
 mod db;
 mod feeds_menu;
 mod format;
+mod full_article;
 mod graph_view;
 mod help;
 mod icons;
@@ -67,6 +68,12 @@ fn main() -> iced::Result {
         // SAFETY: still single-threaded here; nothing else reads or writes
         // the environment concurrently.
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
+    }
+    {
+        let limit = settings::read(&store)
+            .map(|v| v.fulltext_cache_mb)
+            .unwrap_or(settings::Values::default().fulltext_cache_mb);
+        full_article::startup_sweep(&dir, &store, u64::from(limit) * 1_048_576);
     }
     let db = db::Db::new(store);
 

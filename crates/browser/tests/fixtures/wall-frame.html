@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<title>Notice</title>
+</head>
+<body>
+<div class="message-container" id="message"></div>
+<template id="buttons">
+  <p class="message-component">Hyväksy evästeet tai tilaa mainokseton palvelu.</p>
+  <button class="message-component message-button no-children focusable consent-accept sp_choice_type_11" data-answer="accepted">ACCEPT_LABEL</button>
+  <button class="message-component message-button no-children focusable consent-pay sp_choice_type_9" data-answer="paid">Kiellä ja poista mainokset 7 €</button>
+  <button class="message-component message-button no-children focusable consent-pay sp_choice_type_12" data-answer="settings">Evästeasetukset</button>
+</template>
+<script>
+  // Like Sourcepoint, the message renders after the frame has loaded.
+  setTimeout(function () {
+    document.getElementById("message").appendChild(document.getElementById("buttons").content.cloneNode(true));
+    wire();
+  }, 1500);
+  function wire() {
+  document.querySelectorAll("button").forEach(function (button) {
+    button.addEventListener("click", function () {
+      parent.postMessage({ wall: button.getAttribute("data-answer") }, "*");
+    });
+  });
+  }
+</script>
+</body>
+</html>

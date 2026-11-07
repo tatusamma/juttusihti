@@ -1,5 +1,5 @@
 name: Linux build dependencies
-description: Installs the system libraries the app needs to build on Debian/Ubuntu.
+description: Installs the system libraries the app needs to build on Debian/Ubuntu, plus Mesa's EGL and software OpenGL (llvmpipe) so the browser helper can run without a display.
 runs:
   using: composite
   steps:
@@ -8,4 +8,7 @@ runs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           libdbus-1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev \
-          libxrandr-dev libfontconfig1-dev libfreetype-dev file
+          libxrandr-dev libfontconfig1-dev libfreetype-dev file \
+          clang libclang-dev cmake pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev \
+          libglib2.0-dev libharfbuzz-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+          libegl1 libegl-mesa0 libgl1-mesa-dri

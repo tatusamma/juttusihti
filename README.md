@@ -19,6 +19,9 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Reader**: subscribe by site or feed address (feeds are discovered for you), folders, OPML
   import and export, unread and saved views, scheduled refresh, offline reading and keyboard
   shortcuts.
+- **Full articles**: when a feed only gives a teaser, one click (or **a**) loads the article in a
+  throwaway private browser, blocks known trackers and ads, accepts cookie banners, keeps the
+  text and the main picture, and deletes the browser profile. Nothing is fetched until you ask.
 - **Search**: local FTS5 full-text search with phrases, `OR`, `NOT`, prefixes, field filters
   and `NEAR`, plus a label filter next to the search box.
 - **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
@@ -36,7 +39,7 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Calm interface**: an icon rail, warm paper colours with amber accents in light and dark
   themes, a CPU renderer for low memory use, and a built-in Help screen (**F1**).
 - **Private by default**: all data is in one SQLite database on your computer. Nothing is sent
-  anywhere you did not ask for.
+  anywhere you did not ask for. Screenshots in this README use made-up demo news.
 
 ## Download
 
@@ -69,7 +72,8 @@ gh attestation verify juttusihti_X.Y.Z_amd64.deb --repo tero-k/juttusihti
 ## Build from source
 
 Requirements: Rust 1.85+ (2024 edition) and a C/C++ toolchain, because SQLite and DuckDB are
-bundled and compiled from source. On Windows this means MSVC (VS 2022 Build Tools); CMake and
+bundled and compiled from source. The full-article helper `juttusihti-browser` (see below) needs
+Rust 1.88+. On Windows this means MSVC (VS 2022 Build Tools); CMake and
 NASM are not needed. A first build of bundled DuckDB takes several minutes.
 
 On Linux, install the development libraries first:
@@ -83,6 +87,26 @@ git clone https://github.com/tero-k/juttusihti.git
 cd juttusihti
 cargo run --release -p juttusihti
 ```
+
+**Full articles need a second binary.** `juttusihti-browser` is a headless [Servo](https://servo.org)
+browser in its own cargo workspace (`crates/browser`, with its own `Cargo.lock`, Rust 1.88+),
+so it is not built by `cargo build --workspace`. Build it into the same `target` folder, so
+the app finds it next to itself (or point `JUTTUSIHTI_BROWSER` at it):
+
+```sh
+cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target
+```
+
+Do not run a plain `cargo update` there: the lock file pins a pre-release crate. Servo also
+needs LLVM/clang (set `LIBCLANG_PATH` if it is not found) and, for the first build, network
+access to download a prebuilt SpiderMonkey; the first build takes a few minutes. On Windows it
+needs a working OpenGL driver at run time. On Debian/Ubuntu add `clang libclang-dev cmake
+pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev
+libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`; at run time it needs `libegl1`, and
+with no GPU or display Mesa's `libegl-mesa0` and `libgl1-mesa-dri` (software OpenGL). The Linux
+dependency list is checked in CI on Ubuntu 22.04 but not yet on a clean desktop machine. Without
+the helper the rest of the app works as before: the **Read full article** button is still shown,
+and pressing it reports that the browser helper is missing.
 
 ## Using Juttusihti
 
@@ -114,6 +138,55 @@ offline.
   moves it to a folder or unsubscribes.
 - Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
   them.
+- **Read full article** (shortcut **a**) fetches the whole article when the feed only has a
+  teaser; see [Full articles](#full-articles).
+
+### Full articles
+
+Many feeds give only a headline and a teaser. To read the whole story inside Juttusihti:
+
+1. Open the article in the reader.
+2. Press **Read full article** next to **Open in browser**, or press **a**. The button shows
+   **Fetching…** for about 5 to 10 seconds.
+3. The whole text replaces the teaser and the button says **Fetched**. The main picture is
+   shown faded behind the headline. The article now opens instantly, also offline.
+
+Subscriber-only articles keep only the part the site shows everyone, with the note "The rest
+of this article is for subscribers." Juttusihti never gets around a paywall. If a fetch does
+not work, the reader says why: "Couldn't find the article text on the page." (this is also
+what a site that refuses the visit looks like) or "The site took too long to answer." The
+teaser and **Open in browser** stay as they were.
+
+Fetched text is included in search, and in **Custom analysis** when you choose **Archived
+article text**.
+
+#### Privacy
+
+Nothing is fetched until you press the button. Then a helper program loads the page in a
+hidden browser with a brand-new, empty profile, so the site sees a stranger with no earlier
+cookies or logins:
+
+- Known trackers and ads are blocked with the EasyList and EasyPrivacy lists, which ship with
+  the app; no rules are downloaded at run time.
+- Cookie banners are accepted automatically, including the free choice of "consent or pay"
+  walls, so you never click one. This is deliberate: the alternative is often a page with no
+  text. Because the profile is new, the cookies only live for that one visit.
+- When the text and the main picture are saved, the whole profile, cookies, storage and cache
+  included, is deleted, so the next visit cannot be linked to this one. If the helper crashes
+  or hangs, the profile is still deleted, and any leftovers are cleared when the app starts.
+- The site still sees your IP address, as with any visit.
+- The text and picture are stored on this computer, apart from the feed. They are never sent
+  to an AI provider unless you include the article in an AI run.
+
+#### Cache
+
+Settings → **Full articles**:
+
+- **Download pictures**: on by default. Off means text only; the picture is never requested.
+- **Cache size limit**: 500 MB by default. When the cache is full, the oldest fetched articles
+  fall back to their feed teaser first; they can be fetched again. Saved articles are never
+  removed to make room.
+- **Clear cache now** removes all fetched text and pictures.
 
 ### Searching
 
@@ -137,6 +210,7 @@ not pending AI suggestions); it works with or without search text, and **Clear**
 | --- | --- |
 | `j` / `↓`, `k` / `↑` | next / previous article |
 | `o` / `Enter` | open the article in the browser |
+| `a` | read the full article in the reader |
 | `s` | save or unsave |
 | `m` | mark read or unread |
 | `n` / `p` | next / previous page |
@@ -231,8 +305,9 @@ week or month buckets, and export any report as CSV.
 ### Settings and your data
 
 Settings sets how long articles are kept (saved and researched articles are always kept), the
-refresh interval, dark or light theme, the CPU renderer (far less memory), and the map tile
-server and its cache.
+refresh interval, dark or light theme, the CPU renderer (far less memory), full-article
+pictures and cache size (see [Full articles](#full-articles)), and the map tile server and its
+cache.
 
 ![Settings](docs/screenshots/settings.png)
 
@@ -250,6 +325,8 @@ Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 | `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
+| `crates/article` (`juttusihti-article`) | Messages between the app and the browser helper, picture re-encoding | no | no |
+| `crates/browser` (`juttusihti-browser`) | Full-article helper: headless Servo, tracker blocking, cookie consent, article extraction. Its own cargo workspace | yes, only when you press Read full article | no |
 | `crates/bench` | Benchmarks at 10k/100k/1M articles (BENCHMARKS.md) | no | no |
 
 ### Build, test and run
@@ -273,7 +350,8 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 ### CI and releases
 
 - **CI** (`.github/workflows/ci.yml`, on pushes to `master` and pull requests): `cargo fmt`,
-  clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows, and `cargo audit`.
+  clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows (the app workspace and the
+  separate `crates/browser` workspace), and `cargo audit`.
 - **Release** (`.github/workflows/release.yml`, on `v*` tags): runs CI, builds the Linux
   `.deb`, `.rpm`, AppImage and tarball with checksums and provenance attestations, and puts them on a
   **draft** GitHub Release. The Windows installer is built and signed locally with
@@ -284,14 +362,16 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
 ### Packages
 
-Unsigned local packages, for testing:
+Unsigned local packages, for testing. `beforePackagingCommand` in `Packager.toml` builds both
+the app and `juttusihti-browser`, and every format ships both binaries; for the `.rpm`, build the
+helper first with the command under [Build from source](#build-from-source):
 
 ```sh
 cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
 cargo install cargo-generate-rpm --version 0.21.1 --locked
-cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm
+cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm (helper built first)
 ```
 
 - **Build Linux packages on Ubuntu 22.04** (glibc 2.35), for example in a container. Built on
@@ -483,6 +563,12 @@ tokenizer, or AI-assisted query expansion.
     - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
     - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
       tiles are clipped to the map area with the CPU renderer too.
+- **Full articles**: done on Windows. A separate helper (`juttusihti-browser`, headless Servo
+  0.7) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
+  DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
+  articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
+  public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
+  article text". Not verified yet: the Linux packages with the helper, and a signed release.
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).
@@ -543,3 +629,8 @@ any additional terms or conditions.
 
 The bundled [Lucide](https://lucide.dev) icon font is under the ISC license, with some icons
 under MIT (`crates/app/assets/LUCIDE-LICENSE.txt`). Map data © OpenStreetMap contributors.
+
+The full-article helper embeds Servo (MPL-2.0) and bundles Readability.js (Apache-2.0), the
+EasyList and EasyPrivacy filter lists (CC BY-SA 3.0) and autoconsent (MPL-2.0); see
+[crates/browser/assets/LICENSES.md](crates/browser/assets/LICENSES.md), which every package
+ships as `LICENSES-browser.md` next to `LICENSE-MIT` and `LICENSE-APACHE`.

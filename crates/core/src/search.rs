@@ -34,12 +34,21 @@ pub enum Column {
 }
 
 impl Column {
+    /// The FTS5 column filter. Content covers both the feed's content and
+    /// the text fetched from the article's page.
     fn fts_name(&self) -> &'static str {
         match self {
             Column::Title => "title",
             Column::Summary => "summary_text",
-            Column::Content => "content_text",
+            Column::Content => "{content_text fetched_text}",
             Column::Author => "author",
+        }
+    }
+    /// The name shown when describing a query back to the user.
+    fn label(&self) -> &'static str {
+        match self {
+            Column::Content => "content_text",
+            other => other.fts_name(),
         }
     }
     fn parse(s: &str) -> Option<Self> {
@@ -127,17 +136,13 @@ pub fn describe(node: &Node) -> String {
         Node::Term { text, prefix, column } => {
             format!(
                 "{}{}{}",
-                column.as_ref().map(|c| format!("{}:", c.fts_name())).unwrap_or_default(),
+                column.as_ref().map(|c| format!("{}:", c.label())).unwrap_or_default(),
                 text,
                 if *prefix { "*" } else { "" }
             )
         }
         Node::Phrase { words, column } => {
-            format!(
-                "{}\"{}\"",
-                column.as_ref().map(|c| format!("{}:", c.fts_name())).unwrap_or_default(),
-                words.join(" ")
-            )
+            format!("{}\"{}\"", column.as_ref().map(|c| format!("{}:", c.label())).unwrap_or_default(), words.join(" "))
         }
         Node::Near { words, distance } => format!("NEAR({}, {distance})", words.join(" ")),
         Node::And(items) => format!("({})", items.iter().map(describe).collect::<Vec<_>>().join(" AND ")),
@@ -522,7 +527,7 @@ fn count_capped(conn: &rusqlite::Connection, from_where: &str, params: &[Value],
     Ok(if n > cap { (cap, false) } else { (n, true) })
 }
 
-const BM25: &str = "bm25(articles_fts, 10.0, 3.0, 1.0, 2.0)";
+const BM25: &str = "bm25(articles_fts, 10.0, 3.0, 1.0, 2.0, 1.0)";
 
 /// Runs a search with pagination. Text queries are ranked by bm25 with
 /// title matches weighted highest; filter-only queries are newest first.

@@ -265,11 +265,13 @@ impl Store {
             .ok_or(Error::NotFound)
     }
 
-    /// Plain-text body for display: content if present, else the summary.
+    /// Plain-text body for display: text fetched from the article's page if
+    /// present, else the feed's content, else the summary.
     pub fn article_text(&self, id: ArticleId) -> Result<String> {
         self.conn
             .query_row(
-                "SELECT COALESCE(NULLIF(content_text, ''), summary_text, '') FROM articles WHERE id = ?1",
+                "SELECT COALESCE(NULLIF(ft.text, ''), NULLIF(a.content_text, ''), a.summary_text, '')
+                 FROM articles a LEFT JOIN article_fulltext ft ON ft.article_id = a.id WHERE a.id = ?1",
                 [id],
                 |r| r.get(0),
             )

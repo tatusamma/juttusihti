@@ -389,3 +389,32 @@ fn ledger_totals_feed_daily_budgets() {
     assert_eq!((t.tokens, t.cost, t.calls), (165, 700, 2));
     assert!(t.cost_unknown);
 }
+
+#[test]
+fn fulltext_depth_uses_fetched_text_and_new_cache_key() {
+    let s = seeded();
+    let mut cfg = config(&[Task::Labels]);
+    cfg.depth = Depth::FullText;
+    let before = s.analysis_scope(&cfg).unwrap();
+    let first = before.records[0].clone();
+    assert!(!first.body.contains("Arkistoitu"));
+    let key = cache_key(&first.content_hash, cfg.provider, &cfg.model, Task::Labels, cfg.depth);
+    s.cache_result(&key, first.id, Task::Labels, &serde_json::json!({"ok": true})).unwrap();
+    assert_eq!(s.analysis_scope(&cfg).unwrap().stats.cached, 1);
+
+    s.save_fulltext(first.id, "Arkistoitu koko teksti.", false, None).unwrap();
+    let after = s.analysis_scope(&cfg).unwrap();
+    let rec = after.records.iter().find(|r| r.id == first.id).unwrap();
+    assert_eq!(rec.body, "Arkistoitu koko teksti.");
+    assert_ne!(rec.content_hash, first.content_hash, "results from before the fetch are not reused");
+    assert_eq!(after.stats.cached, 0);
+    assert!(after.needs_processing.contains(&first.id));
+
+    // Other depths keep the feed hash and description.
+    let mut hd = cfg.clone();
+    hd.depth = Depth::HeadlinesAndDescriptions;
+    let hd_scope = s.analysis_scope(&hd).unwrap();
+    let hd_rec = hd_scope.records.iter().find(|r| r.id == first.id).unwrap();
+    assert_eq!(hd_rec.content_hash, first.content_hash);
+    assert!(!hd_rec.body.contains("Arkistoitu"));
+}

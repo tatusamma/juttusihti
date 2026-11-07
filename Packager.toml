@@ -7,7 +7,7 @@
 # `name` must be set: cargo-packager 0.11.8 otherwise tries to chdir into this file.
 name = "juttusihti"
 productName = "Juttusihti"
-version = "0.3.0"
+version = "0.4.0"
 # Same identifier as the OS secret-store service name used for API keys.
 identifier = "fi.juttusihti.Juttusihti"
 description = "Local-first RSS reader and news research desktop app"
@@ -16,14 +16,27 @@ homepage = "https://github.com/tero-k/juttusihti"
 authors = ["tero-k"]
 publisher = "Juttusihti"
 category = "News"
-beforePackagingCommand = "cargo build --release -p juttusihti"
+# The browser helper is a separate cargo workspace (Servo needs its own lock file), built into the
+# same target/release so both binaries sit side by side.
+beforePackagingCommand = "cargo build --release -p juttusihti --locked && cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target"
 binariesDir = "target/release"
 outDir = "target/packages"
 icons = ["packaging/icons/juttusihti-*.png"]
+# Licences, including the browser helper's vendored assets (Readability.js, EasyList and
+# EasyPrivacy, autoconsent). NSIS puts them next to the exe; deb and AppImage in usr/lib/juttusihti.
+resources = [
+  { src = "LICENSE-MIT", target = "LICENSE-MIT" },
+  { src = "LICENSE-APACHE", target = "LICENSE-APACHE" },
+  { src = "crates/browser/assets/LICENSES.md", target = "LICENSES-browser.md" },
+]
 
 [[binaries]]
 path = "juttusihti"
 main = true
+
+# Full articles: the app starts this next to itself, so it must ship in every format.
+[[binaries]]
+path = "juttusihti-browser"
 
 [linux]
 generateDesktopEntry = true
@@ -35,6 +48,9 @@ installMode = "currentUser"
 [deb]
 section = "web"
 # Runtime libraries: D-Bus (secret store), keyboard, Wayland/X11, fonts, GPU drivers.
+# The browser helper links fontconfig and FreeType and opens libEGL.so.1 at run time (Servo's
+# surfman), so the automatic scan cannot see EGL; with no GPU or display it renders through
+# Mesa's EGL and llvmpipe. The app itself uses Vulkan when present, else EGL/GL.
 depends = [
   "libdbus-1-3",
   "libxkbcommon0",
@@ -42,5 +58,8 @@ depends = [
   "libwayland-client0",
   "libx11-6",
   "libfontconfig1",
-  "libvulkan1 | libegl1",
+  "libfreetype6",
+  "libegl1",
+  "libegl-mesa0",
+  "libgl1-mesa-dri",
 ]
