@@ -39,6 +39,7 @@ fn claim(quote: &str, verdict: Verdict) -> ClaimResult {
             kind: SourceKind::Web,
             publisher: None,
             rating: None,
+            site: None,
         }],
     }
 }

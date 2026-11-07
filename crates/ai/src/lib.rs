@@ -121,6 +121,8 @@ pub struct WebEvidence {
 pub struct WebSource {
     pub url: String,
     pub title: String,
+    /// The source's domain when the URL is a redirect (Gemini).
+    pub site: Option<String>,
 }
 
 /// Whether a failed request means the model or credential cannot use the

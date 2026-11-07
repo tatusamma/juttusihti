@@ -486,15 +486,19 @@ fn worst_style(fc: &FactCheck) -> fn(&iced::Theme) -> text::Style {
 }
 
 /// A source's link text: "{publisher}: {rating}" for a published fact
-/// check, otherwise its title, or its domain when the title is empty.
+/// check, otherwise its title, or its site or domain when the title is empty.
 fn source_label(s: &Source) -> String {
     match (s.kind, s.publisher.as_deref(), s.rating.as_deref()) {
         (SourceKind::FactCheck, Some(publisher), Some(rating)) => format!("{publisher}: {rating}"),
         (SourceKind::FactCheck, Some(publisher), None) => publisher.to_string(),
         _ if !s.title.trim().is_empty() => s.title.trim().to_string(),
-        _ => {
-            url::Url::parse(&s.url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| s.url.clone())
-        }
+        _ => match s.site.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(site) => site.to_string(),
+            None => url::Url::parse(&s.url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_else(|| s.url.clone()),
+        },
     }
 }
 
@@ -605,9 +609,12 @@ mod tests {
             kind,
             publisher: publisher.map(Into::into),
             rating: rating.map(Into::into),
+            site: None,
         };
         assert_eq!(source_label(&src(SourceKind::Web, "Report", None, None)), "Report");
         assert_eq!(source_label(&src(SourceKind::Web, " ", None, None)), "www.example.org");
+        let redirect = Source { site: Some("yle.fi".into()), ..src(SourceKind::Web, "", None, None) };
+        assert_eq!(source_label(&redirect), "yle.fi", "a redirect's site, not the redirect host");
         assert_eq!(
             source_label(&src(SourceKind::FactCheck, "t", Some("Faktabaari"), Some("Väärin"))),
             "Faktabaari: Väärin"

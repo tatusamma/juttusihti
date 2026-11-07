@@ -2,7 +2,7 @@
 //! that keeps a verdict honest. A verdict needs real evidence: a source the
 //! run actually gathered, not an invented one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,10 @@ pub struct Source {
     pub kind: SourceKind,
     pub publisher: Option<String>,
     pub rating: Option<String>,
+    /// The source's site when its URL does not show it (Gemini's
+    /// grounding redirects).
+    #[serde(default)]
+    pub site: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,10 +243,11 @@ pub struct CitedSource {
 }
 
 /// Everything this run found: search results, Wikipedia pages and Google
-/// Fact Check entries, keyed by normalized URL. Only these may be cited.
+/// Fact Check entries, keyed by normalized URL in the order found. Only
+/// these may be cited.
 #[derive(Debug, Clone, Default)]
 pub struct Gathered {
-    by_url: HashMap<String, Source>,
+    sources: Vec<(String, Source)>,
 }
 
 impl Gathered {
@@ -253,17 +258,31 @@ impl Gathered {
     /// Adds a source. A URL that is not http or https is ignored; the first
     /// entry for a URL wins.
     pub fn add(&mut self, s: Source) {
-        if let Some(key) = normalize_url(&s.url) {
-            self.by_url.entry(key).or_insert(s);
+        if let Some(key) = normalize_url(&s.url)
+            && self.get(&key).is_none()
+        {
+            self.sources.push((key, s));
         }
     }
 
     pub fn len(&self) -> usize {
-        self.by_url.len()
+        self.sources.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_url.is_empty()
+        self.sources.is_empty()
+    }
+
+    fn get(&self, key: &str) -> Option<(&str, &Source)> {
+        self.sources.iter().find(|(k, _)| k == key).map(|(k, s)| (k.as_str(), s))
+    }
+
+    /// The first source whose site is `host` (without "www.").
+    fn on_site(&self, host: &str) -> Option<(&str, &Source)> {
+        self.sources
+            .iter()
+            .find(|(_, s)| s.site.as_deref().map(bare_host).as_deref() == Some(host))
+            .map(|(k, s)| (k.as_str(), s))
     }
 }
 
@@ -283,21 +302,31 @@ fn normalize_url(raw: &str) -> Option<String> {
 }
 
 fn host_of(raw: &str) -> Option<String> {
-    Url::parse(raw.trim()).ok()?.host_str().map(|h| h.to_ascii_lowercase())
+    Url::parse(raw.trim()).ok()?.host_str().map(bare_host)
+}
+
+/// Lowercase, without a leading "www.".
+fn bare_host(h: &str) -> String {
+    let h = h.trim().to_ascii_lowercase();
+    h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
 }
 
 /// Applies the evidence rules to one claim: keeps only cited sources that
 /// were gathered, are not on the article's own domain and are not copies of
 /// the same story, at most [`MAX_SOURCES_PER_CLAIM`]. A decided verdict
 /// without a non-Wikipedia source becomes `Unverified`.
+///
+/// A source's site, when known, stands in for its URL's host: Gemini's
+/// sources are redirect URLs, so a cited page that was not gathered as such
+/// resolves to the first gathered source on its site.
 pub fn judge_sources(
     verdict: Verdict,
     cited: &[CitedSource],
     gathered: &Gathered,
     article_url: Option<&str>,
 ) -> (Verdict, Vec<Source>) {
-    let own = article_url.and_then(host_of).map(|h| h.strip_prefix("www.").map(str::to_string).unwrap_or(h));
-    let mut seen: Vec<String> = Vec::new();
+    let own = article_url.and_then(host_of);
+    let mut seen: Vec<&str> = Vec::new();
     let mut kept: Vec<Source> = Vec::new();
     for c in cited {
         if c.same_story || kept.len() >= MAX_SOURCES_PER_CLAIM {
@@ -306,14 +335,16 @@ pub fn judge_sources(
         let Some(key) = normalize_url(&c.url) else {
             continue;
         };
-        let Some(source) = gathered.by_url.get(&key) else {
+        let found = gathered.get(&key).or_else(|| gathered.on_site(&host_of(&c.url)?));
+        let Some((key, source)) = found else {
             continue;
         };
         if seen.contains(&key) {
             continue;
         }
-        if let (Some(own), Some(host)) = (&own, host_of(&source.url))
-            && (host == *own || host.ends_with(&format!(".{own}")))
+        let site = source.site.as_deref().map(bare_host).or_else(|| host_of(&source.url));
+        if let (Some(own), Some(site)) = (&own, site)
+            && (site == *own || site.ends_with(&format!(".{own}")))
         {
             continue;
         }
@@ -484,7 +515,7 @@ mod tests {
     }
 
     fn src(url: &str, kind: SourceKind) -> Source {
-        Source { url: url.into(), title: "t".into(), kind, publisher: None, rating: None }
+        Source { url: url.into(), title: "t".into(), kind, publisher: None, rating: None, site: None }
     }
 
     fn cite(url: &str) -> CitedSource {
@@ -549,6 +580,51 @@ mod tests {
         let (v, s) = judge_sources(Verdict::Supported, &cited, &g, Some("https://www.news.example/a/1"));
         assert_eq!(v, Verdict::Supported);
         assert_eq!(s, vec![src("https://third.example/e", SourceKind::Web)]);
+    }
+
+    const REDIRECT: &str = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/";
+
+    fn on_site(path: &str, site: &str) -> Source {
+        Source { site: Some(site.into()), ..src(&format!("{REDIRECT}{path}"), SourceKind::Web) }
+    }
+
+    #[test]
+    fn own_domain_check_uses_the_site_of_a_redirect() {
+        let mut g = Gathered::new();
+        for (path, site) in [("own", "news.example"), ("sub", "www.sub.news.example"), ("other", "other.example")] {
+            g.add(on_site(path, site));
+        }
+        let cited: Vec<CitedSource> = ["own", "sub", "other"].iter().map(|p| cite(&format!("{REDIRECT}{p}"))).collect();
+        let (v, s) = judge_sources(Verdict::Supported, &cited, &g, Some("https://www.news.example/a/1"));
+        assert_eq!(v, Verdict::Supported);
+        assert_eq!(s, vec![on_site("other", "other.example")]);
+    }
+
+    #[test]
+    fn cited_page_resolves_to_the_redirect_of_its_site() {
+        let mut g = Gathered::new();
+        g.add(on_site("1", "other.example"));
+        g.add(on_site("2", "Other.example"));
+        g.add(src("https://plain.example/x", SourceKind::Web));
+        let cited = [
+            cite("https://www.other.example/report"),
+            cite("https://other.example/second"),
+            cite("https://unknown.example/y"),
+            cite("https://plain.example/elsewhere"),
+        ];
+        let (v, s) = judge_sources(Verdict::Contradicted, &cited, &g, None);
+        assert_eq!(v, Verdict::Contradicted);
+        // The first redirect of the site, once; a source without a site is matched by its URL only.
+        assert_eq!(s, vec![on_site("1", "other.example")]);
+        let (_, s) = judge_sources(Verdict::Contradicted, &cited[..1], &g, Some("https://other.example/a"));
+        assert!(s.is_empty(), "the resolved source is still on the article's own site");
+    }
+
+    #[test]
+    fn stored_sources_without_a_site_still_read() {
+        let json = r#"{"url":"https://a.example/x","title":"t","kind":"web","publisher":null,"rating":null}"#;
+        let s: Source = serde_json::from_str(json).unwrap();
+        assert_eq!(s.site, None);
     }
 
     #[test]

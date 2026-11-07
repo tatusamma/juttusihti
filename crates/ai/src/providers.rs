@@ -291,6 +291,10 @@ struct Sources(Vec<WebSource>);
 
 impl Sources {
     fn add(&mut self, url: &Value, title: &Value) {
+        self.add_on_site(url, title, None);
+    }
+
+    fn add_on_site(&mut self, url: &Value, title: &Value, site: Option<String>) {
         let Some(url) = url.as_str() else { return };
         let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
         if !(lower.starts_with("http://") || lower.starts_with("https://"))
@@ -299,8 +303,11 @@ impl Sources {
         {
             return;
         }
-        self.0
-            .push(WebSource { url: url.into(), title: title.as_str().unwrap_or_default().chars().take(300).collect() });
+        self.0.push(WebSource {
+            url: url.into(),
+            title: title.as_str().unwrap_or_default().chars().take(300).collect(),
+            site,
+        });
     }
 }
 
@@ -354,7 +361,10 @@ fn gemini_web(cand: &Value) -> WebEvidence {
     let meta = &cand["groundingMetadata"];
     let mut sources = Sources::default();
     for c in items(&meta["groundingChunks"]) {
-        sources.add(&c["web"]["uri"], &c["web"]["title"]);
+        // The URI is a Google redirect; the chunk's title is the source's domain.
+        let title = &c["web"]["title"];
+        let site = title.as_str().map(str::trim).filter(|t| !t.is_empty()).map(|t| t.chars().take(300).collect());
+        sources.add_on_site(&c["web"]["uri"], title, site);
     }
     WebEvidence { searches: items(&meta["webSearchQueries"]).len() as u32, sources: sources.0 }
 }
@@ -687,6 +697,7 @@ mod tests {
         let urls: Vec<_> = r.web.sources.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(urls, ["https://a.example/1", "https://b.example/2"]);
         assert_eq!(r.web.sources[0].title, "A");
+        assert_eq!(r.web.sources[0].site, None);
     }
 
     #[test]
@@ -717,6 +728,7 @@ mod tests {
         assert_eq!(r.web.searches, 3);
         assert_eq!(r.web.sources.len(), 1);
         assert_eq!(r.web.sources[0].title, "a.example");
+        assert_eq!(r.web.sources[0].site.as_deref(), Some("a.example"), "the chunk title is the source's domain");
         let plain = json!({"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}], "usageMetadata": {}});
         assert_eq!(parse_completion(Provider::Gemini, &plain).unwrap().web, crate::WebEvidence::default());
     }

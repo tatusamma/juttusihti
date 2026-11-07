@@ -522,6 +522,7 @@ fn gathered(published: &[PublishedCheck], wiki: &[WikiPage], web: &[WebSource]) 
             kind: SourceKind::FactCheck,
             publisher: non_empty(&p.publisher),
             rating: non_empty(&p.rating),
+            site: None,
         });
     }
     for w in wiki {
@@ -531,11 +532,19 @@ fn gathered(published: &[PublishedCheck], wiki: &[WikiPage], web: &[WebSource]) 
             kind: SourceKind::Wikipedia,
             publisher: None,
             rating: None,
+            site: None,
         });
     }
     for s in web {
         let kind = if is_wikipedia(&s.url) { SourceKind::Wikipedia } else { SourceKind::Web };
-        g.add(Source { url: s.url.clone(), title: s.title.clone(), kind, publisher: None, rating: None });
+        g.add(Source {
+            url: s.url.clone(),
+            title: s.title.clone(),
+            kind,
+            publisher: None,
+            rating: None,
+            site: s.site.clone(),
+        });
     }
     g
 }
@@ -557,5 +566,23 @@ fn provider_message(e: &AiError, billing: Billing) -> String {
         }
         AiError::Status { status: 401 | 403, .. } => "The provider rejected the API key.".into(),
         other => format!("The provider request failed: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use juttusihti_core::factcheck::{CitedSource, Verdict, judge_sources};
+
+    use super::*;
+
+    #[test]
+    fn gathered_web_sources_keep_their_site() {
+        let redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc";
+        let web = [WebSource { url: redirect.into(), title: "yle.fi".into(), site: Some("yle.fi".into()) }];
+        let g = gathered(&[], &[], &web);
+        let cited = [CitedSource { url: "https://yle.fi/a/1".into(), same_story: false }];
+        let (v, s) = judge_sources(Verdict::Supported, &cited, &g, None);
+        assert_eq!(v, Verdict::Supported);
+        assert_eq!((s[0].url.as_str(), s[0].site.as_deref()), (redirect, Some("yle.fi")));
     }
 }
