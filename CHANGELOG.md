@@ -9,20 +9,49 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-07
+
 ### Added
 
-- **Full articles**: "Read full article" (shortcut `a`) loads the whole article when a feed only
-  has a teaser. The page opens in a hidden Servo browser with a brand-new empty profile; known
-  trackers and ads are blocked (EasyList and EasyPrivacy) and cookie banners are accepted,
-  including the free choice of consent-or-pay walls. When the text and main picture are saved,
-  the whole profile, cookies included, is deleted. Nothing is fetched until you ask. The text
-  is searchable, the picture is shown faded above it, and paywalled articles keep only their
-  public part with a note. Settings → Full articles has picture downloads, a cache size limit
-  (500 MB by default; Saved articles are never removed) and "Clear cache now". A fetch takes
-  about 5 to 9 seconds.
-- **New helper program**: `juttusihti-browser` now ships next to `juttusihti` in the Windows
-  installer and zip and in the Linux deb, rpm, AppImage and tarball. Building it from source needs
-  Rust 1.88 and its own build command; see the README.
+- **Full articles**: when a feed only gives a teaser, press "Read full article" (or `a`) to read
+  the whole story inside Juttusihti. The main picture fades in behind the headline, and the
+  article then opens instantly, also offline. Nothing is fetched until you press the button.
+- **Private by design**: each fetch uses a hidden Servo browser with a brand-new, empty profile.
+  Known trackers and ads are blocked (EasyList and EasyPrivacy), and cookie banners are accepted
+  for you, including the free choice of "consent or pay" walls, so you never click one. When the
+  text and picture are saved, the whole profile, cookies included, is deleted, so the next visit
+  cannot be linked to this one. Block lists and consent rules ship with the app and are never
+  downloaded at run time.
+- **Paywalls respected**: subscriber-only articles keep only the part the site shows everyone,
+  with a note. Hidden and paid parts of a page are never read.
+- **Searchable and ready for AI**: fetched text is included in search, and in Custom analysis
+  when you choose "Archived article text".
+- **Settings → Full articles**: turn picture downloads off for text only, set the cache size
+  limit (500 MB by default; the oldest fetched articles fall back to their teaser first, and Saved
+  articles are never removed to make room), or clear the cache.
+- **New helper program**: `juttusihti-browser` ships next to `juttusihti` in the Windows
+  installer and zip and in the Linux deb, rpm, AppImage and tarball, and is signed on Windows.
+  Building it from source needs Rust 1.88 and its own build command; see the
+  [README](https://github.com/tero-k/juttusihti#build-from-source).
+- The README and the Help screen (F1) explain full articles step by step, and the README
+  screenshots now use made-up demo news.
+
+### Security
+
+- `arrow` updated to 60.1.0 (RUSTSEC-2026-0442). The full-article helper's own dependency audit
+  is in [SECURITY.md](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md).
+
+### Known issues
+
+- A fetch takes about 5 to 10 seconds. Servo cannot report HTTP errors, so a site that refuses
+  the visit shows "Couldn't find the article text on the page."
+- Tested against Ilta-Sanomat and Helsingin Sanomat; other sites may lay out their articles in
+  ways the extractor misses.
+- The Linux packages with the helper have been checked in CI on Ubuntu 22.04 but not yet on a
+  desktop machine. With no GPU, the helper needs Mesa's software OpenGL (`libegl-mesa0`,
+  `libgl1-mesa-dri`), which the packages depend on.
+- The helper adds about 125 MB to the installed app, because it contains a whole browser
+  engine.
 
 ## [0.3.0] - 2026-11-02
 
@@ -138,7 +167,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/tero-k/juttusihti/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tero-k/juttusihti/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tero-k/juttusihti/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/tero-k/juttusihti/compare/v0.1.1...v0.2.0
