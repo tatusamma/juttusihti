@@ -159,6 +159,8 @@ pub struct Preview {
     /// The fetched picture, decoded, for the hero fade.
     picture: Option<iced::widget::image::Handle>,
     full: FullState,
+    /// The article's latest fact check.
+    fact_check: Option<juttusihti_core::factcheck::FactCheck>,
 }
 
 /// Reads an article for the reading pane. The fetched picture is decoded
@@ -183,6 +185,7 @@ fn read_preview(s: &Store, id: ArticleId) -> juttusihti_core::Result<Preview> {
         labels: s.article_labels(id)?,
         headline: s.headline(id)?,
         full: if fulltext.is_some() { FullState::Fetched } else { FullState::Idle },
+        fact_check: s.fact_check(id)?,
         fulltext,
         picture: None,
         feed_title,
@@ -328,6 +331,7 @@ pub enum Message {
     HeadlineDecided(Result<(), String>),
     Providers(crate::providers::Msg),
     Quick(crate::quick::Msg),
+    FactCheck(crate::fact_check::Msg),
     /// Opens the quick AI panel for the list being viewed.
     OpenQuick,
     Settings(crate::settings::Msg),
@@ -397,6 +401,7 @@ pub struct App {
     ai_headlines: bool,
     providers: crate::providers::State,
     quick: crate::quick::State,
+    fact_check: crate::fact_check::State,
     settings: crate::settings::State,
 }
 
@@ -422,6 +427,7 @@ impl App {
             ai_headlines: true,
             providers: crate::providers::State::new(db.clone()),
             quick: crate::quick::State::new(db.clone()),
+            fact_check: crate::fact_check::State::new(db.clone()),
             settings: crate::settings::State::new(db.clone(), db_path.clone()),
             data_dir: db_path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
             fetching: None,
@@ -1185,6 +1191,26 @@ impl App {
                 }
                 if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
             }
+            Message::FactCheck(crate::fact_check::Msg::ToggleCard) => {
+                if let Some(id) = self.preview.as_ref().map(|p| p.article.id) {
+                    self.fact_check.toggle_card(id);
+                }
+                Task::none()
+            }
+            Message::FactCheck(msg) => {
+                // A finished check shows on the card of the article it was for.
+                let reload = match &msg {
+                    crate::fact_check::Msg::Finished(id, Ok(_)) => Some(*id),
+                    _ => None,
+                };
+                let task = self.fact_check.update(msg).map(Message::FactCheck);
+                match reload {
+                    Some(id) if self.preview.as_ref().is_some_and(|p| p.article.id == id) => {
+                        Task::batch([task, self.load_preview(id, false)])
+                    }
+                    _ => task,
+                }
+            }
             Message::Settings(crate::settings::Msg::SetDark(dark)) => {
                 if dark == self.settings.values.dark {
                     return Task::none();
@@ -1813,10 +1839,13 @@ impl App {
                 style::quiet_button(None, "Read full article", style::quiet, fetch)
             }
         };
+        let can_check = crate::fact_check::can_check(p.fulltext.is_some(), a.content.as_deref(), &p.body);
+        let check = self.fact_check.action_button(a.id, can_check, p.fact_check.is_some()).map(Message::FactCheck);
         let actions = row![
             save,
             style::quiet_button(Some(Icon::External), "Open in browser", style::quiet, open),
             full,
+            check,
             style::quiet_button(None, read, style::quiet, Some(Message::ToggleRead)),
             tooltip(
                 style::quiet_button(Some(Icon::Connections), "Connections", style::quiet, Some(Message::MapArticle)),
@@ -1878,12 +1907,18 @@ impl App {
         if let FullState::Failed(note) = &p.full {
             head = head.push(text(note).size(SIZE_SMALL).style(style::danger));
         }
-        let rest = column![
-            text(body).size(SIZE_BODY).line_height(1.6).style(style::body),
-            rule::horizontal(1),
-            column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]),
-        ]
-        .spacing(SPACE[4]);
+        let mut rest = column![].spacing(SPACE[4]);
+        if let Some(panel) = self.fact_check.view_panel(a.id) {
+            rest = rest.push(panel.map(Message::FactCheck));
+        }
+        if let Some(fc) = &p.fact_check {
+            let collapsed = self.fact_check.card_collapsed(a.id);
+            rest = rest.push(crate::fact_check::view_card(fc, collapsed).map(Message::FactCheck));
+        }
+        let rest = rest
+            .push(text(body).size(SIZE_BODY).line_height(1.6).style(style::body))
+            .push(rule::horizontal(1))
+            .push(column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
         let width = READ_WIDTH + 2.0 * SPACE[4];
         let picture = p.picture.as_ref().filter(|_| self.settings.values.fulltext_pictures);
         let content: Element<'_, Message> = match picture {
@@ -2329,6 +2364,44 @@ mod tests {
         assert!(p.body.starts_with("Public part."), "{}", p.body);
         assert!(p.body.ends_with(PAYWALL_NOTE), "{}", p.body);
         assert_eq!(PAYWALL_NOTE, "The rest of this article is for subscribers.");
+    }
+
+    #[test]
+    fn preview_loads_saved_fact_check() {
+        use juttusihti_core::factcheck::{ClaimResult, FactCheck, Verdict};
+        use juttusihti_core::pricing::{Billing, Provider};
+        let (mut app, a, b) = app_with_articles();
+        let fc = FactCheck {
+            article_id: a,
+            checked_at: 1_790_900_000,
+            provider: Provider::Openai,
+            model: "gpt-6.1-sol".into(),
+            billing: Billing::ApiKey,
+            prompt_version: 1,
+            language: "fi".into(),
+            web_search: false,
+            claims: vec![ClaimResult {
+                quote: "Q".into(),
+                verdict: Verdict::Contradicted,
+                reason: "R".into(),
+                sources: vec![],
+            }],
+            guidelines: vec![],
+            cost: Some(1234),
+        };
+        app.db.shared().lock().unwrap().save_fact_check(&fc).unwrap();
+        app.show_preview(a);
+        assert_eq!(app.preview.as_ref().unwrap().fact_check.as_ref(), Some(&fc));
+        let _ = app.view();
+        let _ = app.update(Message::FactCheck(crate::fact_check::Msg::ToggleCard));
+        assert!(!app.fact_check.card_collapsed(a));
+        let _ = app.view();
+        // A finished check reloads the preview only while its article is shown.
+        let done = |fc: &FactCheck| Message::FactCheck(crate::fact_check::Msg::Finished(a, Ok(Box::new(fc.clone()))));
+        assert_eq!(app.update(done(&fc)).units(), 1);
+        app.show_preview(b);
+        assert_eq!(app.preview.as_ref().unwrap().fact_check, None);
+        assert_eq!(app.update(done(&fc)).units(), 0);
     }
 
     #[test]
