@@ -102,9 +102,11 @@ needs LLVM/clang (set `LIBCLANG_PATH` if it is not found) and, for the first bui
 access to download a prebuilt SpiderMonkey; the first build takes a few minutes. On Windows it
 needs a working OpenGL driver at run time. On Debian/Ubuntu add `clang libclang-dev cmake
 pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev
-libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`. The Linux dependency list is not yet
-verified on a clean machine. Without the helper the app still works; only "Read full article" is
-unavailable.
+libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`; at run time it needs `libegl1`, and
+with no GPU or display Mesa's `libegl-mesa0` and `libgl1-mesa-dri` (software OpenGL). The Linux
+dependency list is checked in CI on Ubuntu 22.04 but not yet on a clean desktop machine. Without
+the helper the rest of the app works as before: the **Read full article** button is still shown,
+and pressing it reports that the browser helper is missing.
 
 ## Using Juttusihti
 
@@ -594,4 +596,5 @@ under MIT (`crates/app/assets/LUCIDE-LICENSE.txt`). Map data © OpenStreetMap co
 
 The full-article helper embeds Servo (MPL-2.0) and bundles Readability.js (Apache-2.0), the
 EasyList and EasyPrivacy filter lists (CC BY-SA 3.0) and autoconsent (MPL-2.0); see
-[crates/browser/assets/LICENSES.md](crates/browser/assets/LICENSES.md).
+[crates/browser/assets/LICENSES.md](crates/browser/assets/LICENSES.md), which every package
+ships as `LICENSES-browser.md` next to `LICENSE-MIT` and `LICENSE-APACHE`.

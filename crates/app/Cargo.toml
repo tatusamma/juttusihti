@@ -24,6 +24,7 @@ assets = [
   { source = "../../packaging/icons/juttusihti-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/juttusihti.png", mode = "644" },
   { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/juttusihti/LICENSE-MIT", mode = "644", doc = true },
   { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/juttusihti/LICENSE-APACHE", mode = "644", doc = true },
+  { source = "../browser/assets/LICENSES.md", dest = "/usr/share/licenses/juttusihti/LICENSES-browser.md", mode = "644", doc = true },
 ]
 
 [package.metadata.generate-rpm.requires]
@@ -33,7 +34,11 @@ assets = [
 "libwayland-client.so.0()(64bit)" = "*"
 "libX11.so.6()(64bit)" = "*"
 "libfontconfig.so.1()(64bit)" = "*"
-"(libvulkan.so.1()(64bit) or libEGL.so.1()(64bit))" = ""
+# The browser helper links FreeType and opens libEGL.so.1 at run time (libglvnd's libEGL on
+# Fedora and openSUSE); Mesa's EGL and llvmpipe let it render with no GPU or display.
+"libfreetype.so.6()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libEGL_mesa.so.0()(64bit)" = "*"
 
 [dependencies]
 juttusihti-core = { path = "../core" }

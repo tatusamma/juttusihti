@@ -165,9 +165,18 @@ $portable = "juttusihti-$version-x86_64-windows"
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::Open((Join-Path $dist "$portable.zip"), 'Create')
 try {
-    foreach ($file in @($exe.FullName, $helper.FullName, 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
-        $item = Get-Item $file
-        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $item.FullName, "$portable/$($item.Name)", 'Optimal') | Out-Null
+    # Source file, then its name in the zip.
+    $entries = @(
+        @($exe.FullName, $exe.Name),
+        @($helper.FullName, $helper.Name),
+        @('README.md', 'README.md'),
+        @('LICENSE-MIT', 'LICENSE-MIT'),
+        @('LICENSE-APACHE', 'LICENSE-APACHE'),
+        @('crates/browser/assets/LICENSES.md', 'LICENSES-browser.md')
+    )
+    foreach ($entry in $entries) {
+        $item = Get-Item $entry[0]
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $item.FullName, "$portable/$($entry[1])", 'Optimal') | Out-Null
     }
 } finally {
     $zip.Dispose()

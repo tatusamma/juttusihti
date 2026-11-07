@@ -43,5 +43,7 @@ changes the licence of the app's own code.
   them (`src/consent.rs`) is its own code.
 - **Readability.js** is Apache-2.0; ship its licence notice with the app.
 
-The Rust crates the helper links (Servo, adblock-rust by Brave, both MPL-2.0, and others) are
-covered by the app's normal third-party notices, not by this file.
+This file covers only the vendored assets above. The Rust crates the helper is built from (Servo
+and adblock-rust by Brave, both MPL-2.0, and others) declare their licences in their Cargo
+metadata; `cargo metadata --manifest-path crates/browser/Cargo.toml` (or a tool such as
+`cargo about`) lists them. Their source is on crates.io.

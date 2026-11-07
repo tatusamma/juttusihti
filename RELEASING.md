@@ -16,14 +16,24 @@ maintainer's machine, because the code-signing certificate never leaves it. Both
 - The Windows SDK's `signtool.exe` and a code-signing certificate in the certificate store (a
   hardware token or a cloud HSM is fine), or another signing tool usable as `-SignCommand`.
 - [GitHub CLI](https://cli.github.com/), signed in: `gh auth status`.
+- [7-Zip](https://www.7-zip.org/) (`7z.exe` on `PATH` or in `C:\Program Files\7-Zip`): the
+  script unpacks the installer with it to check the signatures of the exes inside.
+- LLVM/clang for the browser helper's Servo build (`LIBCLANG_PATH` if it is not found).
 
 ## 1. Prepare the version
 
 On a `tero-k/release-X.Y.Z` branch:
 
 1. Set the same version in `Cargo.toml` (`[workspace.package] version`) and `Packager.toml`
-   (`version`). The release workflow fails if they differ from the tag.
-2. `cargo check` so `Cargo.lock` picks up the new version.
+   (`version`). The release workflow fails if they differ from the tag. Also set it in
+   `crates/browser/Cargo.toml` and `crates/article/Cargo.toml`, which name their versions
+   explicitly (the helper is its own workspace and cannot inherit the workspace version).
+2. `cargo check` so `Cargo.lock` picks up the new version, then refresh only these two entries
+   in the helper's own lock file (never a plain `cargo update` there: it pins a pre-release crate):
+
+   ```sh
+   cargo update -p juttusihti-browser -p juttusihti-article --manifest-path crates/browser/Cargo.toml
+   ```
 3. In `CHANGELOG.md`, move the `[Unreleased]` items under a new `## [X.Y.Z] - YYYY-MM-DD`
    heading (highlights first, then known issues) and add its link at the bottom. This section
    becomes the release notes; the release workflow fails without it. Use absolute links there,
