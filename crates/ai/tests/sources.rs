@@ -54,7 +54,7 @@ async fn retries_without_language_when_nothing_found() {
     assert_eq!(seen.len(), 2);
     assert!(seen[0].contains("languageCode=fi"));
     assert!(!seen[1].contains("languageCode"));
-    assert!(seen[0].contains("pageSize=5") && seen[0].contains("moon+landing") | seen[0].contains("moon%20landing"));
+    assert!(seen[0].contains("pageSize=5") && (seen[0].contains("moon+landing") || seen[0].contains("moon%20landing")));
 }
 
 #[tokio::test]

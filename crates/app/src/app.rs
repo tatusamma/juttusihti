@@ -180,6 +180,16 @@ pub struct Preview {
     fact_check: Option<juttusihti_core::factcheck::FactCheck>,
 }
 
+impl Preview {
+    /// Whether the article has enough text for a fact check. The paywall
+    /// note appended to the body is not article text.
+    fn can_check(&self) -> bool {
+        let paywalled = self.fulltext.as_ref().is_some_and(|f| f.paywalled);
+        let text = if paywalled { self.body.strip_suffix(PAYWALL_NOTE).unwrap_or(&self.body) } else { &self.body };
+        crate::fact_check::can_check(self.fulltext.is_some(), self.article.content.as_deref(), text.trim_end())
+    }
+}
+
 /// Reads an article for the reading pane. The fetched picture is decoded
 /// separately ([`decode_picture`]) so the database is not held meanwhile.
 fn read_preview(s: &Store, id: ArticleId) -> juttusihti_core::Result<Preview> {
@@ -1854,8 +1864,7 @@ impl App {
                 style::quiet_button(None, "Read full article", style::quiet, fetch)
             }
         };
-        let can_check = crate::fact_check::can_check(p.fulltext.is_some(), a.content.as_deref(), &p.body);
-        let check = self.fact_check.action_button(a.id, can_check, p.fact_check.is_some()).map(Message::FactCheck);
+        let check = self.fact_check.action_button(a.id, p.can_check(), p.fact_check.is_some()).map(Message::FactCheck);
         let actions = row![
             save,
             style::quiet_button(Some(Icon::External), "Open in browser", style::quiet, open),
@@ -2382,6 +2391,19 @@ mod tests {
     }
 
     #[test]
+    fn paywall_note_does_not_count_toward_a_fact_check() {
+        let (app, a, _) = app_with_articles();
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        s.save_fulltext(a, &"x".repeat(290), true, None).unwrap();
+        let p = read_preview(&s, a).unwrap();
+        assert!(p.body.chars().count() >= crate::fact_check::MIN_CHECK_CHARS, "the note makes it long enough");
+        assert!(!p.can_check(), "290 characters of article text are too few");
+        s.save_fulltext(a, &"x".repeat(300), true, None).unwrap();
+        assert!(read_preview(&s, a).unwrap().can_check());
+    }
+
+    #[test]
     fn preview_loads_saved_fact_check() {
         use juttusihti_core::factcheck::{ClaimResult, FactCheck, Verdict};
         use juttusihti_core::pricing::{Billing, Provider};
@@ -2408,8 +2430,9 @@ mod tests {
         app.show_preview(a);
         assert_eq!(app.preview.as_ref().unwrap().fact_check.as_ref(), Some(&fc));
         let _ = app.view();
+        assert!(!app.fact_check.card_collapsed(a), "a card starts expanded");
         let _ = app.update(Message::FactCheck(crate::fact_check::Msg::ToggleCard));
-        assert!(!app.fact_check.card_collapsed(a));
+        assert!(app.fact_check.card_collapsed(a));
         let _ = app.view();
         // A finished check reloads the list, and the preview while its article is shown.
         let done = |fc: &FactCheck| Message::FactCheck(crate::fact_check::Msg::Finished(a, Ok(Box::new(fc.clone()))));

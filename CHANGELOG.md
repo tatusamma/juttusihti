@@ -16,7 +16,7 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   with a Google Fact Check Tools key, published fact checks, then gives each claim a verdict:
   Supported, Contradicted, Misleading, Unverified or Not checked (limit reached). It also checks
   the article against four Finnish journalists' guidelines (JSN 15, 12, 21 and 16). Nothing is
-  sent until you press "Check with <provider>" in the panel that shows what goes where and the
+  sent until you press `Check with <provider>` in the panel that shows what goes where and the
   limit. A red "!" in the article list marks articles with contradicted or misleading claims.
 - **AI setup → Fact check**: the limit per check ($1.00 by default) and the optional Google Fact
   Check Tools API key, kept in the system's secret store.

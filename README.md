@@ -197,12 +197,12 @@ Settings → **Full articles**:
 
 Press **Fact check** in the reader, after **Read full article**, to have an AI check the factual
 claims of an article. It needs the full text: until the article is fetched (or the feed gave at
-least 300 characters of full content) the button is disabled and says "Load the full article
-first". Once there is a result it says **Check again**.
+least 300 characters of full content) the button is disabled, and its tooltip says "Load the full
+article first". Once there is a result it says **Check again**.
 
 The button only opens a panel with the provider and its Quality model, what will be sent where,
-an estimate and the limit for one check. Nothing is sent until you press **Check with
-&lt;provider&gt;**:
+an estimate and the limit for one check. Nothing is sent until you press
+`Check with <provider>`:
 
 - the article goes to your AI provider;
 - the claims go to [Google Fact Check Tools](https://developers.google.com/fact-check/tools/api),

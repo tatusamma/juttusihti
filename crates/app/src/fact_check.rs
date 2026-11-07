@@ -2,12 +2,13 @@
 //! panel with its estimate, the progress of a run and the result card.
 //! Nothing is sent before the panel's "Check with …" button is pressed.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use chrono::Local;
 use iced::widget::{button, column, container, row, text, tooltip};
 use iced::{Center, Element, Fill, Task as Cmd};
-use juttusihti_ai::factcheck::{ArticleForCheck, FactCheckJob, FactCheckProgress, run_fact_check};
+use juttusihti_ai::factcheck::{ArticleForCheck, FactCheckError, FactCheckJob, FactCheckProgress, run_fact_check};
 use juttusihti_ai::sources::Sources;
 use juttusihti_ai::{Client, Control, RetryPolicy};
 use juttusihti_core::ArticleId;
@@ -29,6 +30,9 @@ pub const MIN_CHECK_CHARS: usize = 300;
 
 /// The card's fixed note.
 const NOTE: &str = "AI-assisted check. Verify the sources before relying on it.";
+
+/// Shown, muted, after the user cancels a run.
+const CANCELLED: &str = "The fact check was cancelled.";
 
 /// Whether the article has enough real text to check: fetched full text or
 /// feed content (not just a teaser) of at least [`MIN_CHECK_CHARS`].
@@ -79,16 +83,30 @@ pub enum Msg {
     Close,
     Progress(FactCheckProgress),
     /// The app reloads the preview on success.
-    Finished(ArticleId, Result<Box<FactCheck>, String>),
+    Finished(ArticleId, Result<Box<FactCheck>, Stopped>),
     OpenLink(String),
     /// Handled by the app, which knows the article shown.
     ToggleCard,
+}
+
+/// Why a run ended without a result.
+#[derive(Debug, Clone)]
+pub enum Stopped {
+    Cancelled,
+    Failed(String),
+}
+
+impl From<String> for Stopped {
+    fn from(e: String) -> Self {
+        Stopped::Failed(e)
+    }
 }
 
 enum Panel {
     Planning,
     Ready(Box<Plan>),
     Failed(String),
+    Cancelled,
 }
 
 struct Running {
@@ -103,13 +121,13 @@ pub struct State {
     generation: u64,
     panel: Option<(ArticleId, Panel)>,
     run: Option<Running>,
-    /// The article whose card is expanded.
-    expanded: Option<ArticleId>,
+    /// Articles whose card the user collapsed this session.
+    collapsed: HashSet<ArticleId>,
 }
 
 impl State {
     pub fn new(db: Db) -> Self {
-        Self { db, catalog: Catalog::builtin(), generation: 0, panel: None, run: None, expanded: None }
+        Self { db, catalog: Catalog::builtin(), generation: 0, panel: None, run: None, collapsed: HashSet::new() }
     }
 
     pub fn is_running(&self) -> bool {
@@ -117,11 +135,13 @@ impl State {
     }
 
     pub fn card_collapsed(&self, article: ArticleId) -> bool {
-        self.expanded != Some(article)
+        self.collapsed.contains(&article)
     }
 
     pub fn toggle_card(&mut self, article: ArticleId) {
-        self.expanded = if self.card_collapsed(article) { Some(article) } else { None };
+        if !self.collapsed.remove(&article) {
+            self.collapsed.insert(article);
+        }
     }
 
     pub fn update(&mut self, msg: Msg) -> Cmd<Msg> {
@@ -169,9 +189,10 @@ impl State {
                 match r {
                     Ok(_) => {
                         self.panel = None;
-                        self.expanded = Some(id);
+                        self.collapsed.remove(&id);
                     }
-                    Err(e) => self.panel = Some((id, Panel::Failed(e))),
+                    Err(Stopped::Cancelled) => self.panel = Some((id, Panel::Cancelled)),
+                    Err(Stopped::Failed(e)) => self.panel = Some((id, Panel::Failed(e))),
                 }
             }
             Msg::OpenLink(url) => {
@@ -236,6 +257,13 @@ impl State {
                 Panel::Planning => style::note("Estimating…").into(),
                 Panel::Failed(e) => row![
                     text(e).size(SIZE_SMALL).style(style::danger).width(Fill),
+                    style::quiet_button(None, "Close", style::quiet, Some(Msg::Close)),
+                ]
+                .spacing(SPACE[1])
+                .align_y(Center)
+                .into(),
+                Panel::Cancelled => row![
+                    text(CANCELLED).size(SIZE_SMALL).style(style::muted).width(Fill),
                     style::quiet_button(None, "Close", style::quiet, Some(Msg::Close)),
                 ]
                 .spacing(SPACE[1])
@@ -341,10 +369,10 @@ async fn check(
     db: Arc<Mutex<Store>>,
     control: Control,
     out: &mut iced::futures::channel::mpsc::Sender<Msg>,
-) -> Result<FactCheck, String> {
+) -> Result<FactCheck, Stopped> {
     use iced::futures::SinkExt;
     let endpoint = research::endpoint(provider, billing).await?;
-    let client = Client::new(endpoint, RetryPolicy::default()).map_err(|e| e.to_string())?;
+    let client = Client::new(endpoint, RetryPolicy::default()).map_err(|e| Stopped::Failed(e.to_string()))?;
     let key = blocking(secrets::google_factcheck_key).await?.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "could not read the Google Fact Check key; checking without it");
         None
@@ -356,8 +384,11 @@ async fn check(
         let _ = out.send(Msg::Progress(p)).await;
     }
     match handle.await {
-        Ok(r) => r.map_err(|e| e.to_string()),
-        Err(e) => Err(format!("fact check task failed: {e}")),
+        Ok(r) => r.map_err(|e| match e {
+            FactCheckError::Cancelled => Stopped::Cancelled,
+            other => Stopped::Failed(other.to_string()),
+        }),
+        Err(e) => Err(Stopped::Failed(format!("fact check task failed: {e}"))),
     }
 }
 
@@ -473,15 +504,31 @@ fn verdict_style(v: Verdict) -> fn(&iced::Theme) -> text::Style {
     }
 }
 
-/// The colour of the worst verdict in the check.
-fn worst_style(fc: &FactCheck) -> fn(&iced::Theme) -> text::Style {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Danger,
+    Accent,
+    Success,
+}
+
+/// The tone of the worst verdict in the check. Green needs a supported
+/// claim: a check that confirmed nothing is not good news.
+fn worst_tone(fc: &FactCheck) -> Tone {
     let has = |v: Verdict| fc.claims.iter().any(|c| c.verdict == v);
     if has(Verdict::Contradicted) {
-        style::danger
-    } else if has(Verdict::Misleading) || has(Verdict::Unverified) {
-        style::accent
+        Tone::Danger
+    } else if has(Verdict::Misleading) || has(Verdict::Unverified) || !has(Verdict::Supported) {
+        Tone::Accent
     } else {
-        style::success
+        Tone::Success
+    }
+}
+
+fn worst_style(fc: &FactCheck) -> fn(&iced::Theme) -> text::Style {
+    match worst_tone(fc) {
+        Tone::Danger => style::danger,
+        Tone::Accent => style::accent,
+        Tone::Success => style::success,
     }
 }
 
@@ -598,6 +645,67 @@ mod tests {
         };
         assert_eq!(estimate_line(Billing::ApiKey, &e), "About $0.0200, at most about $0.1500");
         assert_eq!(estimate_line(Billing::ApiKey, &estimate("x", None)), "Cost unknown");
+    }
+
+    fn result(verdicts: &[Verdict]) -> FactCheck {
+        FactCheck {
+            article_id: 1,
+            checked_at: 0,
+            provider: Provider::Openai,
+            model: "m".into(),
+            billing: Billing::ApiKey,
+            prompt_version: 1,
+            language: "fi".into(),
+            web_search: true,
+            claims: verdicts
+                .iter()
+                .map(|v| juttusihti_core::factcheck::ClaimResult {
+                    quote: "q".into(),
+                    verdict: *v,
+                    reason: "r".into(),
+                    sources: vec![],
+                })
+                .collect(),
+            guidelines: vec![],
+            cost: None,
+        }
+    }
+
+    #[test]
+    fn summary_is_green_only_with_a_supported_claim() {
+        use Verdict::*;
+        assert_eq!(worst_tone(&result(&[Supported, NotChecked])), Tone::Success);
+        assert_eq!(worst_tone(&result(&[NotChecked, NotChecked])), Tone::Accent, "nothing was confirmed");
+        assert_eq!(worst_tone(&result(&[])), Tone::Accent);
+        assert_eq!(worst_tone(&result(&[Supported, Unverified])), Tone::Accent);
+        assert_eq!(worst_tone(&result(&[Supported, Misleading])), Tone::Accent);
+        assert_eq!(worst_tone(&result(&[Supported, Contradicted])), Tone::Danger);
+    }
+
+    #[test]
+    fn collapsed_cards_are_remembered_per_article() {
+        let mut st = State::new(Db::new(Store::open_in_memory().unwrap()));
+        assert!(!st.card_collapsed(1) && !st.card_collapsed(2));
+        st.toggle_card(1);
+        st.toggle_card(2);
+        assert!(st.card_collapsed(1) && st.card_collapsed(2));
+        st.toggle_card(2);
+        assert!(st.card_collapsed(1) && !st.card_collapsed(2), "each article keeps its own state");
+        st.toggle_card(2);
+        let _ = st.update(Msg::Finished(1, Ok(Box::new(result(&[Verdict::Supported])))));
+        assert!(!st.card_collapsed(1), "a card is expanded right after its run");
+        assert!(st.card_collapsed(2));
+    }
+
+    #[test]
+    fn a_cancelled_run_is_not_shown_as_an_error() {
+        let mut st = State::new(Db::new(Store::open_in_memory().unwrap()));
+        let _ = st.update(Msg::Finished(7, Err(Stopped::Cancelled)));
+        assert!(matches!(st.panel, Some((7, Panel::Cancelled))));
+        assert!(st.view_panel(7).is_some());
+        assert_eq!(CANCELLED, "The fact check was cancelled.");
+        let _ = st.update(Msg::Finished(7, Err(Stopped::Failed("boom".into()))));
+        assert!(matches!(&st.panel, Some((7, Panel::Failed(e))) if e == "boom"));
     }
 
     #[test]
