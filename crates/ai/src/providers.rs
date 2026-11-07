@@ -80,13 +80,24 @@ fn add_search(provider: Provider, body: &mut Value, max_uses: u32) {
     match provider {
         Provider::Anthropic => {
             body["tools"] = json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}]);
+            // Search citations cannot be combined with structured outputs.
+            if let Some(o) = body.as_object_mut() {
+                o.remove("output_config");
+            }
         }
         Provider::Openai => {
             body["tools"] = json!([{"type": "web_search"}]);
             body["max_tool_calls"] = json!(max_uses);
             body["include"] = json!(["web_search_call.action.sources"]);
         }
-        Provider::Gemini => body["tools"] = json!([{"google_search": {}}]),
+        Provider::Gemini => {
+            body["tools"] = json!([{"google_search": {}}]);
+            // Grounding cannot be combined with a JSON response schema.
+            if let Some(g) = body["generationConfig"].as_object_mut() {
+                g.remove("responseMimeType");
+                g.remove("responseJsonSchema");
+            }
+        }
     }
 }
 
@@ -372,7 +383,8 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
                         .as_str()
                         .map_or_else(|| "declined".to_string(), |c| format!("declined ({c})")),
                 ),
-                "max_tokens" => Outcome::Truncated,
+                // A server-side search turn was paused; the caller retries.
+                "max_tokens" | "pause_turn" => Outcome::Truncated,
                 _ => json_or_text(text),
             };
             // Anthropic bills thinking as output but does not split it out.
@@ -614,6 +626,7 @@ mod tests {
         assert_eq!(b["tools"][0]["type"], "web_search_20250305");
         assert_eq!(b["tools"][0]["name"], "web_search");
         assert_eq!(b["tools"][0]["max_uses"], 3);
+        assert!(b.get("output_config").is_none());
         let (_, b) = completion(&ep(Provider::Openai), &search_req());
         assert_eq!(b["tools"][0]["type"], "web_search");
         assert_eq!(b["max_tool_calls"], 3);
@@ -638,12 +651,21 @@ mod tests {
         assert_eq!(b["include"][0], "web_search_call.action.sources");
         let (_, b) = completion(&ep(Provider::Gemini), &search_req());
         assert_eq!(b["tools"][0], json!({"google_search": {}}));
+        assert!(b["generationConfig"].get("responseMimeType").is_none());
+        assert!(b["generationConfig"].get("responseJsonSchema").is_none());
+        assert_eq!(b["generationConfig"]["maxOutputTokens"], 100);
+        assert_eq!(completion(&ep(Provider::Openai), &search_req()).1["text"]["format"]["strict"], true);
     }
 
     #[test]
     fn requests_without_search_have_no_tools() {
         for p in [Provider::Anthropic, Provider::Openai, Provider::Gemini] {
             let (_, b) = completion(&ep(p), &req());
+            assert!(
+                b.get("output_config").is_some()
+                    || b.get("text").is_some()
+                    || b["generationConfig"]["responseMimeType"] == "application/json"
+            );
             assert!(b.get("tools").is_none() && b.get("max_tool_calls").is_none() && b.get("include").is_none());
         }
     }
@@ -700,6 +722,12 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_search_turn_is_truncated() {
+        let v = json!({"stop_reason": "pause_turn", "usage": {}, "content": [{"type": "text", "text": "{\"a\":1}"}]});
+        assert_eq!(parse_completion(Provider::Anthropic, &v).unwrap().outcome, Outcome::Truncated);
+    }
+
+    #[test]
     fn caps_sources_at_fifty() {
         let results: Vec<_> = (0..60).map(|i| json!({"url": format!("https://e.example/{i}"), "title": "t"})).collect();
         let v = json!({"stop_reason": "end_turn", "usage": {},
@@ -714,6 +742,8 @@ mod tests {
         assert!(crate::is_tool_unsupported(&st(404, "no google_search here")));
         assert!(crate::is_tool_unsupported(&AiError::Unsupported("x")));
         assert!(!crate::is_tool_unsupported(&st(400, "bad schema")));
+        assert!(!crate::is_tool_unsupported(&st(400, "Unsupported parameter: reasoning.effort")));
+        assert!(!crate::is_tool_unsupported(&st(400, "max_tokens must be at most 8192")));
         assert!(!crate::is_tool_unsupported(&st(500, "tool exploded")));
     }
 }
