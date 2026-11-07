@@ -12,6 +12,7 @@ pub mod decisions;
 pub mod prompts;
 mod providers;
 pub mod runner;
+pub mod sources;
 
 use std::sync::Arc;
 use std::time::Duration;
