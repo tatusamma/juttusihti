@@ -165,11 +165,7 @@ struct InFlight {
 
 /// A run stopped by an empty OpenAI API account; it resumes after a top-up.
 fn no_credit() -> Stop {
-    Stop::Paused(
-        "Your OpenAI API account has no credit left. Add credit at \
-            https://platform.openai.com/settings/organization/billing/, then resume."
-            .into(),
-    )
+    Stop::Paused(format!("{}, then resume.", crate::NO_CREDIT))
 }
 
 enum Stop {

@@ -10,7 +10,7 @@ use juttusihti_core::budget::{Guard, Limits, Refusal, Reservation, Totals};
 use juttusihti_core::estimate::approx_tokens;
 use juttusihti_core::factcheck::{
     ClaimResult, FACT_CHECK_PROMPT_VERSION, FactCheck, Gathered, SEARCH_TOKENS_CONSERVATIVE, SEARCHES_PER_CLAIM,
-    Source, SourceKind, Verdict, judge_sources,
+    Source, SourceKind, Verdict, bound_text, judge_sources,
 };
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Usage};
 use juttusihti_core::store::Store;
@@ -32,6 +32,11 @@ const LOOKUP_TOKENS: u64 = 2_000;
 const TOO_LOW: &str = "The fact check limit is too low for this article.";
 const UNREADABLE: &str = "Could not read the article's claims.";
 const CLAIM_FAILED: &str = "The check could not be completed for this claim.";
+const UNCONFIRMED: &str = "No independent source could be confirmed for this verdict.";
+const UNKNOWN_PRICE: &str = "The price of this model is unknown, so the fact check cannot keep to its limit.";
+/// Bound for each published fact check field passed to the model, so the
+/// lookup room in a claim's reservation holds.
+const MAX_PUBLISHED_FIELD: usize = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactCheckProgress {
@@ -71,7 +76,15 @@ pub async fn run_fact_check(
     control: &Control,
     progress: mpsc::UnboundedSender<FactCheckProgress>,
 ) -> Result<FactCheck, FactCheckError> {
-    let price = catalog.price_for(client.provider(), &job.model, client.billing(), Utc::now().date_naive());
+    let Some(price) = catalog.price_for(client.provider(), &job.model, client.billing(), Utc::now().date_naive())
+    else {
+        return Err(FactCheckError::Ai(UNKNOWN_PRICE.into()));
+    };
+    // Without a search price the limit cannot cover searches: check without them.
+    let search_priced = price.search_cost(SEARCHES_PER_CLAIM).is_some();
+    if !search_priced {
+        tracing::info!(model = %job.model, "web search price unknown; checking without search");
+    }
     let limits = Limits { max_cost: Some(job.limit), max_tokens: None, max_calls: None, allow_unknown_cost: false };
     let run = Run {
         job: &job,
@@ -82,8 +95,9 @@ pub async fn run_fact_check(
         price,
         guard: Mutex::new(Guard::new(limits, Totals::default())),
         cost: Mutex::new(Some(0)),
-        web_search: AtomicBool::new(true),
+        web_search: AtomicBool::new(search_priced),
         limit_reached: AtomicBool::new(false),
+        stopped: Mutex::new(None),
     };
     let _ = progress.send(FactCheckProgress::Extracting);
     let extraction = run.extract().await?;
@@ -112,7 +126,7 @@ struct Run<'a> {
     sources: &'a Sources,
     db: &'a Mutex<Store>,
     control: &'a Control,
-    price: Option<Price>,
+    price: Price,
     guard: Mutex<Guard>,
     /// Sum of settled costs; `None` once any cost is unknown.
     cost: Mutex<Option<Micros>>,
@@ -120,6 +134,9 @@ struct Run<'a> {
     web_search: AtomicBool,
     /// Set when a claim no longer fit the limit; later claims are not started.
     limit_reached: AtomicBool,
+    /// Why the run stops: an account-level provider error on a claim. Later
+    /// claims are not started and the run fails without saving.
+    stopped: Mutex<Option<String>>,
 }
 
 /// A reserved call's worst case.
@@ -132,8 +149,8 @@ struct Held {
 /// How a claim's first call was reserved, decided in importance order.
 enum Start {
     Go(Held),
-    Cancelled,
     LimitReached,
+    Stop(FactCheckError),
 }
 
 /// Locks without holding the lock across an await; a poisoned lock still
@@ -147,14 +164,33 @@ fn search_allowance(searching: bool) -> (u64, u32) {
     if searching { (u64::from(SEARCHES_PER_CLAIM) * SEARCH_TOKENS_CONSERVATIVE, SEARCHES_PER_CLAIM) } else { (0, 0) }
 }
 
+/// Whether a refusal means the limit is used up (rather than a price problem).
+fn is_limit(r: &Refusal) -> bool {
+    matches!(r, Refusal::Cost { .. } | Refusal::Tokens { .. } | Refusal::Calls)
+}
+
+fn refusal_error(r: &Refusal) -> FactCheckError {
+    FactCheckError::Ai(match r {
+        Refusal::UnknownCost => UNKNOWN_PRICE.into(),
+        other => format!("The fact check stopped: {other}"),
+    })
+}
+
+/// A provider error that fails every claim alike (credit, plan, sign-in, key).
+fn is_account_error(e: &AiError) -> bool {
+    matches!(
+        e,
+        AiError::NoCredit(_) | AiError::PlanLimit(_) | AiError::Auth(_) | AiError::Status { status: 401 | 403, .. }
+    )
+}
+
 impl Run<'_> {
     fn cancelled(&self) -> Result<(), FactCheckError> {
         if self.control.is_cancelled() { Err(FactCheckError::Cancelled) } else { Ok(()) }
     }
 
     fn call_cost(&self, usage: &Usage, searches: u32) -> Option<Micros> {
-        let p = self.price.as_ref()?;
-        Some(p.cost(usage, false)? + p.search_cost(searches)?)
+        Some(self.price.cost(usage, false)? + self.price.search_cost(searches)?)
     }
 
     /// Reserves a request's worst case: its prompt with a margin, the
@@ -230,12 +266,7 @@ impl Run<'_> {
             self.cancelled()?;
             let held = self.reserve(&req, 0, 0).map_err(|r| {
                 tracing::info!(refusal = %r, "fact check extraction refused by its limit");
-                FactCheckError::Ai(match r {
-                    Refusal::UnknownCost => {
-                        "The price of this model is unknown, so the fact check cannot keep to its limit.".into()
-                    }
-                    _ => TOO_LOW.into(),
-                })
+                if is_limit(&r) { FactCheckError::Ai(TOO_LOW.into()) } else { refusal_error(&r) }
             })?;
             let reply = self
                 .finish(held, "fact_check_extract", self.send(&req).await)?
@@ -288,7 +319,10 @@ impl Run<'_> {
     /// Reserves a claim's first call before it starts.
     fn start_claim(&self, lang: &str, claim: &ExtractedClaim) -> Start {
         if self.control.is_cancelled() {
-            return Start::Cancelled;
+            return Start::Stop(FactCheckError::Cancelled);
+        }
+        if let Some(why) = lock(&self.stopped).clone() {
+            return Start::Stop(FactCheckError::Ai(why));
         }
         if self.limit_reached.load(Ordering::SeqCst) {
             return Start::LimitReached;
@@ -298,6 +332,7 @@ impl Run<'_> {
         let req = self.claim_req(lang, claim, &[], &[], searching);
         match self.reserve(&req, LOOKUP_TOKENS + search_tokens, searches) {
             Ok(held) => Start::Go(held),
+            Err(r) if !is_limit(&r) => Start::Stop(refusal_error(&r)),
             Err(r) => {
                 tracing::info!(refusal = %r, "fact check limit reached; remaining claims are not checked");
                 self.limit_reached.store(true, Ordering::SeqCst);
@@ -326,7 +361,7 @@ impl Run<'_> {
     ) -> Result<ClaimResult, FactCheckError> {
         let mut held = match start {
             Start::Go(held) => Some(held),
-            Start::Cancelled => return Err(FactCheckError::Cancelled),
+            Start::Stop(e) => return Err(e),
             Start::LimitReached => return Ok(not_checked(claim)),
         };
         let (published, wiki) = tokio::select! {
@@ -349,6 +384,9 @@ impl Run<'_> {
                     let (search_tokens, searches) = search_allowance(searching);
                     match self.reserve(&req, search_tokens, searches) {
                         Ok(h) => h,
+                        Err(r) if !is_limit(&r) => return Err(refusal_error(&r)),
+                        // A paid attempt already failed: the check could not be completed.
+                        Err(_) if failures > 0 => return Ok(failed(claim)),
                         Err(_) => return Ok(not_checked(claim)),
                     }
                 }
@@ -357,6 +395,12 @@ impl Run<'_> {
                 Err(e) if searching && is_tool_unsupported(&e) => {
                     tracing::info!(error = %e, "the model cannot search the web; checking without search");
                     self.web_search.store(false, Ordering::SeqCst);
+                }
+                Err(e) if is_account_error(&e) => {
+                    let why = provider_message(&e, self.client.billing());
+                    tracing::warn!(error = %e, "fact check stopped by an account error");
+                    lock(&self.stopped).get_or_insert_with(|| why.clone());
+                    return Err(FactCheckError::Ai(why));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "fact check claim request failed");
@@ -388,6 +432,14 @@ impl Run<'_> {
             Vec::new()
         });
         published.truncate(MAX_PUBLISHED);
+        for p in &mut published {
+            for field in [&mut p.claim_text, &mut p.title, &mut p.publisher, &mut p.rating] {
+                *field = bound_text(field, MAX_PUBLISHED_FIELD);
+            }
+            if let Some(c) = &mut p.claimant {
+                *c = bound_text(c, MAX_PUBLISHED_FIELD);
+            }
+        }
         let wiki = wiki.unwrap_or_else(|e| {
             tracing::debug!(error = %e, "Wikipedia lookup failed");
             Vec::new()
@@ -416,7 +468,9 @@ impl Run<'_> {
         let gathered = gathered(published, wiki, &reply.web.sources);
         let (verdict, sources) =
             judge_sources(judgement.verdict, &judgement.cited, &gathered, self.job.article.url.as_deref());
-        Some(ClaimResult { quote: claim.quote.clone(), verdict, reason: judgement.reason, sources })
+        // A dropped verdict's reason argued for it; it no longer applies.
+        let reason = if verdict == judgement.verdict { judgement.reason } else { UNCONFIRMED.into() };
+        Some(ClaimResult { quote: claim.quote.clone(), verdict, reason, sources })
     }
 }
 
@@ -481,7 +535,7 @@ fn is_wikipedia(raw: &str) -> bool {
 /// A provider failure in words the user can act on.
 fn provider_message(e: &AiError, billing: Billing) -> String {
     match e {
-        AiError::NoCredit(_) => "Your OpenAI API account has no credit left.".into(),
+        AiError::NoCredit(_) => format!("{}, then check again.", crate::NO_CREDIT),
         AiError::PlanLimit(m) => format!("ChatGPT plan usage limit reached ({m})."),
         AiError::Status { status: 401 | 403, .. } if billing == Billing::ChatGptPlan => {
             "OpenAI rejected the ChatGPT sign-in; sign in again under AI setup.".into()

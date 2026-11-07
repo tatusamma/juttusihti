@@ -25,11 +25,20 @@ const CLAIM_2: &str = "Uusi silta maksoi 40 miljoonaa euroa.";
 const CLAIM_3: &str = "Kunnanvaltuusto hyväksyi budjetin yksimielisesti.";
 const FAILED: &str = "The check could not be completed for this claim.";
 const WEB_SOURCE: &str = "https://other.example/report";
+const UNCONFIRMED: &str = "No independent source could be confirmed for this verdict.";
 
 /// $1 per million input tokens, $2 per million output tokens, $100 per 1000 searches.
 fn catalog() -> Catalog {
     Catalog::from_json(&format!(
         r#"{{"entries":[{{"provider":"openai","model":"{MODEL}","input":1,"output":2,"web_search_per_1k":100,"source":"test"}}]}}"#
+    ))
+    .unwrap()
+}
+
+/// Token prices known, web search price unknown.
+fn catalog_without_search_price() -> Catalog {
+    Catalog::from_json(&format!(
+        r#"{{"entries":[{{"provider":"openai","model":"{MODEL}","input":1,"output":2,"source":"test"}}]}}"#
     ))
     .unwrap()
 }
@@ -177,9 +186,20 @@ async fn run(
     job: FactCheckJob,
     control: &Control,
 ) -> Ran {
+    run_priced(model, lookup, google, db, job, control, &catalog()).await
+}
+
+async fn run_priced(
+    model: &Mock,
+    lookup: &Mock,
+    google: bool,
+    db: &Arc<Mutex<Store>>,
+    job: FactCheckJob,
+    control: &Control,
+    catalog: &Catalog,
+) -> Ran {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let result =
-        run_fact_check(job, &client(model), &sources(lookup, google), &catalog(), db.clone(), control, tx).await;
+    let result = run_fact_check(job, &client(model), &sources(lookup, google), catalog, db.clone(), control, tx).await;
     let mut progress = Vec::new();
     while let Ok(p) = rx.try_recv() {
         progress.push(p);
@@ -228,6 +248,7 @@ async fn checks_claims_and_saves_the_result() {
     assert_eq!(fc.claims[0].sources[0].kind, SourceKind::Web);
     assert_eq!(fc.claims[1].quote, CLAIM_2);
     assert_eq!(fc.claims[1].verdict, Verdict::Unverified, "an invented URL is not evidence");
+    assert_eq!(fc.claims[1].reason, UNCONFIRMED, "the model's reason argued for the dropped verdict");
     assert!(fc.claims[1].sources.is_empty());
     assert_eq!(fc.guidelines.len(), 4);
     assert_eq!(
@@ -412,7 +433,9 @@ async fn google_published_rating_reaches_the_card() {
         if is_extract(r) {
             extraction(&[CLAIM_2])
         } else {
-            assert_eq!(data_of(r)["published_fact_checks"][0]["rating"], "Väärä");
+            let published = &data_of(r)["published_fact_checks"][0];
+            assert_eq!(published["rating"], "Väärä");
+            assert!(published["title"].as_str().unwrap().chars().count() <= 301, "lookup text is bounded");
             // The model's search found the same page; the published check's entry wins.
             claim_reply(&verdict("contradicted", &[CHECK_URL]), &[CHECK_URL])
         }
@@ -420,7 +443,7 @@ async fn google_published_rating_reaches_the_card() {
     .await;
     let google = json!({"claims": [{"text": "Silta maksoi 40 miljoonaa", "claimReview": [{
         "publisher": {"name": "Faktabaari", "site": "faktabaari.fi"}, "url": CHECK_URL,
-        "title": "Sillan hinta", "textualRating": "Väärä", "languageCode": "fi"}]}]});
+        "title": format!("Sillan hinta {}", "pitkä ".repeat(200)), "textualRating": "Väärä", "languageCode": "fi"}]}]});
     let wiki = json!({"pages": [{"key": "Silta", "title": "Silta", "excerpt": "Silta on rakennelma."}]});
     let l = lookups(google, wiki, 200).await;
     let (db, id) = seed();
@@ -445,7 +468,97 @@ async fn wikipedia_found_by_search_cannot_decide_alone() {
     let (db, id) = seed();
     let fc = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap();
     assert_eq!(fc.claims[0].verdict, Verdict::Unverified);
+    assert_eq!(fc.claims[0].reason, UNCONFIRMED);
     assert_eq!(fc.claims[0].sources[0].kind, SourceKind::Wikipedia);
+}
+
+#[tokio::test]
+async fn unknown_search_price_checks_without_search() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2])
+        } else {
+            assert!(!has_tools(r), "no search is sent when its price is unknown");
+            responses(&verdict("unverified", &[]), &[], 2_000, 200)
+        }
+    }))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let ran =
+        run_priced(&m, &l, false, &db, job(id, PLENTY), &Control::default(), &catalog_without_search_price()).await;
+    let fc = ran.result.unwrap();
+    assert!(!fc.web_search);
+    assert_eq!(m.count(), 3);
+    assert!(fc.claims.iter().all(|c| c.verdict == Verdict::Unverified && c.reason == "Checked."), "{:?}", fc.claims);
+    assert_eq!(fc.cost, Some(700 + 2 * 2_400));
+}
+
+#[tokio::test]
+async fn unknown_model_price_fails_up_front() {
+    let m = mock(Arc::new(|_: &Recorded, _| extraction(&[]))).await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let empty = Catalog::from_json(r#"{"entries":[]}"#).unwrap();
+    let err = run_priced(&m, &l, false, &db, job(id, PLENTY), &Control::default(), &empty).await.result.unwrap_err();
+    assert!(err.to_string().contains("price of this model is unknown"), "{err}");
+    assert_eq!(m.count(), 0);
+}
+
+#[tokio::test]
+async fn account_error_on_a_claim_fails_the_run_and_keeps_the_earlier_check() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2, CLAIM_3])
+        } else {
+            MockReply {
+                status: 429,
+                body: json!({"error": {"type": "insufficient_quota", "code": "insufficient_quota",
+                    "message": "You exceeded your current quota."}}),
+                delay: Duration::ZERO,
+            }
+        }
+    }))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let earlier = FactCheck {
+        article_id: id,
+        checked_at: 1,
+        provider: Provider::Openai,
+        model: MODEL.into(),
+        billing: Billing::ApiKey,
+        prompt_version: FACT_CHECK_PROMPT_VERSION,
+        language: "fi".into(),
+        web_search: true,
+        claims: vec![],
+        guidelines: vec![],
+        cost: Some(1),
+    };
+    db.lock().unwrap().save_fact_check(&earlier).unwrap();
+    let err = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap_err();
+    assert!(matches!(err, FactCheckError::Ai(_)));
+    assert!(err.to_string().contains("no credit left"), "{err}");
+    assert_eq!(saved(&db, id), Some(earlier), "a failed run does not replace the earlier check");
+    assert_eq!(ledger(&db)[0].0, "fact_check_extract");
+}
+
+#[tokio::test]
+async fn refused_retry_after_malformed_output_is_unverified() {
+    let m = mock(Arc::new(
+        |r: &Recorded, _| {
+            if is_extract(r) { extraction(&[CLAIM_1]) } else { claim_reply("not json", &[WEB_SOURCE]) }
+        },
+    ))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    // $0.40 fits the first claim attempt (about $0.34) but not a second one
+    // after the first was charged.
+    let fc = run(&m, &l, false, &db, job(id, 400_000), &Control::default()).await.result.unwrap();
+    assert_eq!(m.count(), 2, "extraction and one claim attempt");
+    assert_eq!(fc.claims[0].verdict, Verdict::Unverified);
+    assert_eq!(fc.claims[0].reason, FAILED);
 }
 
 /// The app runs a check on a spawned task.

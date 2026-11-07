@@ -24,6 +24,10 @@ use serde_json::Value;
 
 pub use runner::{Approval, Control, Progress, RunError, RunSummary, Runner};
 
+/// What to tell the user when the OpenAI API account is empty; callers add
+/// what to do next.
+pub(crate) const NO_CREDIT: &str = "Your OpenAI API account has no credit left. Add credit at https://platform.openai.com/settings/organization/billing/";
+
 /// Upper bound for a provider response body.
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
