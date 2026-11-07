@@ -98,6 +98,8 @@ pub struct Price {
     pub batch_permille: Option<u32>,
     /// Whether the model bills reasoning/thinking tokens as output.
     pub reasoning: bool,
+    /// Micro-USD per 1000 web searches; `None` when unknown.
+    pub web_search_per_1k: Option<Micros>,
     pub source: String,
     pub verified_on: Option<NaiveDate>,
     /// True for user-entered overrides.
@@ -119,10 +121,20 @@ impl Price {
             long_context: None,
             batch_permille: None,
             reasoning: true,
+            web_search_per_1k: zero,
             source: "charged to your ChatGPT plan, no API cost".into(),
             verified_on: None,
             manual: false,
         }
+    }
+
+    /// Cost of `searches` web searches, rounded up; `None` if the search price is unknown.
+    pub fn search_cost(&self, searches: u32) -> Option<Micros> {
+        if searches == 0 {
+            return Some(0);
+        }
+        let per_1k = self.web_search_per_1k?;
+        Some((searches as u128 * per_1k as u128).div_ceil(1000) as Micros)
     }
 
     fn valid_on(&self, day: NaiveDate) -> bool {
@@ -223,6 +235,7 @@ struct RawPrice {
     batch_multiplier: Option<f64>,
     #[serde(default)]
     reasoning: bool,
+    web_search_per_1k: Option<f64>,
     source: String,
     verified_on: Option<NaiveDate>,
 }
@@ -291,6 +304,7 @@ impl Catalog {
                     valid_from: p.valid_from,
                     valid_until: p.valid_until,
                     reasoning: p.reasoning,
+                    web_search_per_1k: p.web_search_per_1k.map(usd_to_micros).transpose()?,
                     source: p.source,
                     verified_on: p.verified_on,
                     manual: false,
@@ -423,5 +437,34 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn search_cost_rounds_up_and_zero_is_free() {
+        let mut p = Price::chatgpt_plan("m");
+        p.web_search_per_1k = Some(10_000_000);
+        assert_eq!(p.search_cost(3), Some(30_000));
+        assert_eq!(p.search_cost(0), Some(0));
+        p.web_search_per_1k = Some(1);
+        assert_eq!(p.search_cost(1), Some(1));
+        p.web_search_per_1k = None;
+        assert_eq!(p.search_cost(3), None);
+        assert_eq!(p.search_cost(0), Some(0));
+    }
+
+    #[test]
+    fn plan_price_has_free_searches() {
+        assert_eq!(Price::chatgpt_plan("m").search_cost(5), Some(0));
+    }
+
+    #[test]
+    fn catalog_web_search_prices_are_positive_or_absent() {
+        let c = Catalog::builtin();
+        for p in &c.entries {
+            if let Some(v) = p.web_search_per_1k {
+                assert!(v > 0, "{}", p.model);
+            }
+        }
+        assert!(c.entries.iter().any(|p| p.web_search_per_1k.is_some()));
     }
 }

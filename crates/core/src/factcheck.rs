@@ -8,7 +8,8 @@ use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::pricing::{Billing, Micros, Provider};
+use crate::estimate::approx_tokens;
+use crate::pricing::{Billing, Micros, Price, Provider, Usage};
 use crate::store::Store;
 use crate::{ArticleId, Result};
 
@@ -18,6 +19,52 @@ pub const FACT_CHECK_PROMPT_VERSION: u32 = 1;
 
 /// Per-check spending limit when the user has not set one: $1.00.
 pub const DEFAULT_FACT_CHECK_LIMIT: Micros = 1_000_000;
+
+pub const EXTRACT_MAX_OUTPUT: u32 = 4000;
+pub const CLAIM_MAX_OUTPUT: u32 = 1500;
+pub const SEARCHES_PER_CLAIM: u32 = 3;
+pub const SEARCH_TOKENS_EXPECTED: u64 = 4000;
+pub const SEARCH_TOKENS_CONSERVATIVE: u64 = 12000;
+pub const CLAIM_PROMPT_TOKENS: u64 = 2500;
+const EXTRACT_PROMPT_TOKENS: u64 = 1000;
+
+/// Cost range shown before a check is sent. Costs are `None` when the model
+/// price or its web search price is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactCheckEstimate {
+    pub expected: Option<Micros>,
+    pub conservative: Option<Micros>,
+    pub searches_expected: u32,
+    pub searches_conservative: u32,
+    pub tokens_conservative: u64,
+}
+
+pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate {
+    let claims = MAX_CLAIMS as u32;
+    let extract_in = approx_tokens(article_text) + EXTRACT_PROMPT_TOKENS;
+    let searches_expected = claims;
+    let searches_conservative = claims * SEARCHES_PER_CLAIM;
+    let exp_in = extract_in + claim_in_tokens(1, SEARCH_TOKENS_EXPECTED) * claims as u64;
+    let exp_out = (EXTRACT_MAX_OUTPUT / 2) as u64 + (CLAIM_MAX_OUTPUT / 3) as u64 * claims as u64;
+    let con_in = extract_in + claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE) * claims as u64;
+    let con_out = EXTRACT_MAX_OUTPUT as u64 + CLAIM_MAX_OUTPUT as u64 * claims as u64;
+    let cost = |input: u64, output: u64, searches: u32| {
+        let p = price?;
+        let usage = Usage { input, output, ..Default::default() };
+        Some(p.cost(&usage, false)? + p.search_cost(searches)?)
+    };
+    FactCheckEstimate {
+        expected: cost(exp_in, exp_out, searches_expected),
+        conservative: cost(con_in, con_out, searches_conservative),
+        searches_expected,
+        searches_conservative,
+        tokens_conservative: con_in + con_out,
+    }
+}
+
+fn claim_in_tokens(searches: u32, per_search: u64) -> u64 {
+    CLAIM_PROMPT_TOKENS + searches as u64 * per_search
+}
 
 const LIMIT_SETTING: &str = "fact_check_max_cost";
 
@@ -328,6 +375,33 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::Catalog;
+
+    fn priced(search: Option<f64>) -> Price {
+        let json = format!(
+            r#"{{"entries":[{{"provider":"anthropic","model":"m","input":2,"output":10,{} "source":"s"}}]}}"#,
+            search.map(|s| format!(r#""web_search_per_1k":{s},"#)).unwrap_or_default()
+        );
+        Catalog::from_json(&json).unwrap().entries.remove(0)
+    }
+
+    #[test]
+    fn estimate_conservative_exceeds_expected() {
+        let p = priced(Some(10.0));
+        let e = estimate("Some article text. ".repeat(200).as_str(), Some(&p));
+        assert!(e.conservative.unwrap() > e.expected.unwrap());
+        assert_eq!(e.searches_expected, 8);
+        assert_eq!(e.searches_conservative, 24);
+        assert!(e.tokens_conservative > 0);
+    }
+
+    #[test]
+    fn estimate_is_unknown_without_search_price() {
+        let e = estimate("text", Some(&priced(None)));
+        assert_eq!((e.expected, e.conservative), (None, None));
+        let e = estimate("text", None);
+        assert_eq!((e.expected, e.conservative), (None, None));
+    }
 
     fn src(url: &str, kind: SourceKind) -> Source {
         Source { url: url.into(), title: "t".into(), kind, publisher: None, rating: None }
