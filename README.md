@@ -39,7 +39,7 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Calm interface**: an icon rail, warm paper colours with amber accents in light and dark
   themes, a CPU renderer for low memory use, and a built-in Help screen (**F1**).
 - **Private by default**: all data is in one SQLite database on your computer. Nothing is sent
-  anywhere you did not ask for.
+  anywhere you did not ask for. Screenshots in this README use made-up demo news.
 
 ## Download
 
@@ -139,28 +139,54 @@ offline.
 - Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
   them.
 - **Read full article** (shortcut **a**) fetches the whole article when the feed only has a
-  teaser; see [Full articles and privacy](#full-articles-and-privacy). It takes about 5 to 9
-  seconds. Paywalled articles keep only the public part, with a note. The main picture is shown
-  faded above the text. If the page gives no article text, you see "Couldn't find the article
-  text on the page." (this is also what a refusing site looks like).
+  teaser; see [Full articles](#full-articles).
 
-#### Full articles and privacy
+### Full articles
 
-Nothing is fetched until you press **Read full article**. Then a helper program loads the page
-in a hidden browser with a brand-new, empty profile, so no earlier cookies or logins exist:
+Many feeds give only a headline and a teaser. To read the whole story inside Juttusihti:
 
-- Known trackers and ads are blocked with the EasyList and EasyPrivacy lists.
+1. Open the article in the reader.
+2. Press **Read full article** next to **Open in browser**, or press **a**. The button shows
+   **Fetching…** for about 5 to 10 seconds.
+3. The whole text replaces the teaser and the button says **Fetched**. The main picture is
+   shown faded behind the headline. The article now opens instantly, also offline.
+
+Subscriber-only articles keep only the part the site shows everyone, with the note "The rest
+of this article is for subscribers." Juttusihti never gets around a paywall. If a fetch does
+not work, the reader says why: "Couldn't find the article text on the page." (this is also
+what a site that refuses the visit looks like) or "The site took too long to answer." The
+teaser and **Open in browser** stay as they were.
+
+Fetched text is included in search, and in **Custom analysis** when you choose **Archived
+article text**.
+
+#### Privacy
+
+Nothing is fetched until you press the button. Then a helper program loads the page in a
+hidden browser with a brand-new, empty profile, so the site sees a stranger with no earlier
+cookies or logins:
+
+- Known trackers and ads are blocked with the EasyList and EasyPrivacy lists, which ship with
+  the app; no rules are downloaded at run time.
 - Cookie banners are accepted automatically, including the free choice of "consent or pay"
-  walls. This is deliberate: the alternative is a page with no text. Because the profile is
-  new, the cookies only live for that one visit.
-- When the text and the main picture are saved, the whole profile, cookies included, is
-  deleted.
-- The text is stored on this computer, apart from the feed, and is searchable. It is never
-  sent to an AI provider unless you include the article in an AI run.
+  walls, so you never click one. This is deliberate: the alternative is often a page with no
+  text. Because the profile is new, the cookies only live for that one visit.
+- When the text and the main picture are saved, the whole profile, cookies, storage and cache
+  included, is deleted, so the next visit cannot be linked to this one. If the helper crashes
+  or hangs, the profile is still deleted, and any leftovers are cleared when the app starts.
+- The site still sees your IP address, as with any visit.
+- The text and picture are stored on this computer, apart from the feed. They are never sent
+  to an AI provider unless you include the article in an AI run.
 
-Settings → **Full articles** turns picture downloads on or off, sets the size limit of the
-cache (500 MB by default; Saved articles are never removed to make room) and has **Clear
-cache now**.
+#### Cache
+
+Settings → **Full articles**:
+
+- **Download pictures**: on by default. Off means text only; the picture is never requested.
+- **Cache size limit**: 500 MB by default. When the cache is full, the oldest fetched articles
+  fall back to their feed teaser first; they can be fetched again. Saved articles are never
+  removed to make room.
+- **Clear cache now** removes all fetched text and pictures.
 
 ### Searching
 
@@ -184,6 +210,7 @@ not pending AI suggestions); it works with or without search text, and **Clear**
 | --- | --- |
 | `j` / `↓`, `k` / `↑` | next / previous article |
 | `o` / `Enter` | open the article in the browser |
+| `a` | read the full article in the reader |
 | `s` | save or unsave |
 | `m` | mark read or unread |
 | `n` / `p` | next / previous page |
@@ -278,8 +305,9 @@ week or month buckets, and export any report as CSV.
 ### Settings and your data
 
 Settings sets how long articles are kept (saved and researched articles are always kept), the
-refresh interval, dark or light theme, the CPU renderer (far less memory), and the map tile
-server and its cache.
+refresh interval, dark or light theme, the CPU renderer (far less memory), full-article
+pictures and cache size (see [Full articles](#full-articles)), and the map tile server and its
+cache.
 
 ![Settings](docs/screenshots/settings.png)
 
@@ -297,6 +325,8 @@ Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 | `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
+| `crates/article` (`juttusihti-article`) | Messages between the app and the browser helper, picture re-encoding | no | no |
+| `crates/browser` (`juttusihti-browser`) | Full-article helper: headless Servo, tracker blocking, cookie consent, article extraction. Its own cargo workspace | yes, only when you press Read full article | no |
 | `crates/bench` | Benchmarks at 10k/100k/1M articles (BENCHMARKS.md) | no | no |
 
 ### Build, test and run
@@ -533,6 +563,12 @@ tokenizer, or AI-assisted query expansion.
     - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
     - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
       tiles are clipped to the map area with the CPU renderer too.
+- **Full articles**: done on Windows. A separate helper (`juttusihti-browser`, headless Servo
+  0.7) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
+  DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
+  articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
+  public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
+  article text". Not verified yet: the Linux packages with the helper, and a signed release.
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).

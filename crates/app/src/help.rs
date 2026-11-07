@@ -33,7 +33,7 @@ const SEARCH: [(&str, &str); 7] = [
 ];
 
 /// Sections of the guide, as (heading, paragraphs).
-const SECTIONS: [(&str, &[&str]); 9] = [
+const SECTIONS: [(&str, &[&str]); 10] = [
     (
         "Getting started",
         &[
@@ -48,8 +48,19 @@ const SECTIONS: [(&str, &[&str]); 9] = [
             "The feed menu chooses what the list shows: all news, a folder or one feed. All / Unread filters the list. Click an article to read it on the right; the star saves it to Saved in the rail.",
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
             "Labels can be added to an article from its preview. The Labels screen renames, merges and deletes them.",
-            "When a feed only gives a teaser, \"Read full article\" (or press a) loads the whole article. Nothing is fetched until you ask. A hidden private browser with a brand-new empty profile opens the page, blocks known trackers and ads, accepts cookie banners (including the free choice of consent-or-pay walls) and keeps the text and main picture; then the whole profile, cookies included, is deleted. It takes about 5 to 9 seconds. Paywalled articles keep only the public part, with a note. Settings → Full articles sets picture downloads and the cache size, and clears the cache; Saved articles are never removed to make room.",
+            "When a feed only gives a teaser, \"Read full article\" (or press a) loads the whole article; see Full articles below.",
             "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
+        ],
+    ),
+    (
+        "Full articles",
+        &[
+            "Many feeds give only a headline and a teaser. Open the article and press \"Read full article\" next to \"Open in browser\", or press a. The button shows \"Fetching…\" for about 5 to 10 seconds, then the whole text replaces the teaser and the button says \"Fetched\". The main picture is shown faded behind the headline. A fetched article opens instantly and offline after that.",
+            "Nothing is fetched until you press the button. A hidden browser starts with a brand-new, empty profile, so the site sees a stranger with no earlier cookies or logins. Known trackers and ads are blocked (EasyList and EasyPrivacy). Cookie banners are accepted for you, including the free choice of \"consent or pay\" walls, so you never have to click one. When the text and picture are saved, the whole profile, cookies included, is deleted, so the next visit cannot be linked to this one.",
+            "Subscriber-only articles keep only the part the site shows everyone, with the note \"The rest of this article is for subscribers.\" Juttusihti never gets around a paywall.",
+            "If it does not work, the reader says why: \"Couldn't find the article text on the page.\" (also what a site that refuses the visit looks like) or \"The site took too long to answer.\" The teaser and \"Open in browser\" stay as they were.",
+            "Fetched text is searchable and is used by Custom analysis when you choose \"Archived article text\". It is never sent to an AI provider unless you include the article in an AI run.",
+            "Settings → Full articles: \"Download pictures\" (turn it off for text only; the picture is then never requested), the cache size limit (500 MB by default; the oldest fetched articles fall back to their teaser first, and Saved articles are never removed to make room) and \"Clear cache now\".",
         ],
     ),
     (
@@ -92,7 +103,7 @@ const SECTIONS: [(&str, &[&str]); 9] = [
     (
         "Settings",
         &[
-            "How long to keep articles (saved and researched articles are always kept), the refresh interval, dark or light theme, the CPU renderer for lower memory use, and the map tile server and its cache.",
+            "How long to keep articles (saved and researched articles are always kept), the refresh interval, dark or light theme, the CPU renderer for lower memory use, full-article pictures and cache size, and the map tile server and its cache.",
         ],
     ),
     (
