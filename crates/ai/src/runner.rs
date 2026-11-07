@@ -71,6 +71,9 @@ impl Control {
     pub fn reset(&self) {
         self.0.0.store(RUNNING, Ordering::SeqCst);
     }
+    pub fn is_cancelled(&self) -> bool {
+        self.state() == CANCEL
+    }
     fn state(&self) -> u8 {
         self.0.0.load(Ordering::SeqCst)
     }

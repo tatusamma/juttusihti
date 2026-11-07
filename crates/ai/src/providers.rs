@@ -13,7 +13,7 @@
 use juttusihti_core::pricing::{Provider, Usage};
 use serde_json::{Value, json};
 
-use crate::{AiError, Auth, Endpoint, Outcome, Reply, Request};
+use crate::{AiError, Auth, Endpoint, Outcome, Reply, Request, WebEvidence, WebSource};
 
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 
@@ -63,12 +63,31 @@ fn gemini_request(req: &Request) -> Value {
 
 pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
     let (url, mut body) = completion_body(e, req);
+    if let Some(search) = req.web_search {
+        add_search(e.provider, &mut body, search.max_uses);
+    }
     if e.provider == Provider::Openai
         && let Some(effort) = req.reasoning_effort
     {
         body["reasoning"] = json!({"effort": effort});
     }
     (url, body)
+}
+
+/// Adds the provider's web search tool fields to a request body.
+/// One place per provider for the tool shapes.
+fn add_search(provider: Provider, body: &mut Value, max_uses: u32) {
+    match provider {
+        Provider::Anthropic => {
+            body["tools"] = json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}]);
+        }
+        Provider::Openai => {
+            body["tools"] = json!([{"type": "web_search"}]);
+            body["max_tool_calls"] = json!(max_uses);
+            body["include"] = json!(["web_search_call.action.sources"]);
+        }
+        Provider::Gemini => body["tools"] = json!([{"google_search": {}}]),
+    }
 }
 
 fn completion_body(e: &Endpoint, req: &Request) -> (String, Value) {
@@ -253,6 +272,82 @@ fn json_or_text(text: String) -> Outcome {
     Outcome::NotJson(text.chars().take(500).collect())
 }
 
+const MAX_SOURCES: usize = 50;
+
+/// Collects distinct http(s) sources in first-seen order.
+#[derive(Default)]
+struct Sources(Vec<WebSource>);
+
+impl Sources {
+    fn add(&mut self, url: &Value, title: &Value) {
+        let Some(url) = url.as_str() else { return };
+        let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://"))
+            || self.0.len() >= MAX_SOURCES
+            || self.0.iter().any(|s| s.url == url)
+        {
+            return;
+        }
+        self.0
+            .push(WebSource { url: url.into(), title: title.as_str().unwrap_or_default().chars().take(300).collect() });
+    }
+}
+
+fn items(v: &Value) -> &[Value] {
+    v.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
+fn anthropic_web(v: &Value) -> WebEvidence {
+    let mut sources = Sources::default();
+    for block in items(&v["content"]) {
+        if block["type"] == "web_search_tool_result" {
+            for r in items(&block["content"]) {
+                sources.add(&r["url"], &r["title"]);
+            }
+        }
+        for c in items(&block["citations"]) {
+            sources.add(&c["url"], &c["title"]);
+        }
+    }
+    let searches = u(&v["usage"]["server_tool_use"]["web_search_requests"]) as u32;
+    WebEvidence { searches, sources: sources.0 }
+}
+
+fn openai_web(v: &Value) -> WebEvidence {
+    let mut sources = Sources::default();
+    let mut searches = 0;
+    for item in items(&v["output"]) {
+        match item["type"].as_str() {
+            Some("web_search_call") => {
+                searches += 1;
+                for s in items(&item["action"]["sources"]) {
+                    sources.add(&s["url"], &s["title"]);
+                }
+            }
+            Some("message") => {
+                for c in items(&item["content"]) {
+                    for a in items(&c["annotations"]) {
+                        if a["type"] == "url_citation" {
+                            sources.add(&a["url"], &a["title"]);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    WebEvidence { searches, sources: sources.0 }
+}
+
+fn gemini_web(cand: &Value) -> WebEvidence {
+    let meta = &cand["groundingMetadata"];
+    let mut sources = Sources::default();
+    for c in items(&meta["groundingChunks"]) {
+        sources.add(&c["web"]["uri"], &c["web"]["title"]);
+    }
+    WebEvidence { searches: items(&meta["webSearchQueries"]).len() as u32, sources: sources.0 }
+}
+
 pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError> {
     match provider {
         Provider::Anthropic => {
@@ -281,7 +376,7 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
                 _ => json_or_text(text),
             };
             // Anthropic bills thinking as output but does not split it out.
-            Ok(Reply { outcome, usage, reasoning_tokens: 0 })
+            Ok(Reply { outcome, usage, reasoning_tokens: 0, web: anthropic_web(v) })
         }
         Provider::Openai => {
             let usage = &v["usage"];
@@ -320,7 +415,7 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
             } else {
                 return Err(AiError::Malformed(format!("unexpected status {}", v["status"])));
             };
-            Ok(Reply { outcome, usage: usage_out, reasoning_tokens: reasoning })
+            Ok(Reply { outcome, usage: usage_out, reasoning_tokens: reasoning, web: openai_web(v) })
         }
         Provider::Gemini => {
             let m = &v["usageMetadata"];
@@ -338,6 +433,7 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
                     outcome: Outcome::Refused(format!("blocked ({reason})")),
                     usage,
                     reasoning_tokens: thoughts,
+                    web: WebEvidence::default(),
                 });
             }
             let cand = &v["candidates"][0];
@@ -357,7 +453,7 @@ pub fn parse_completion(provider: Provider, v: &Value) -> Result<Reply, AiError>
                 "MAX_TOKENS" => Outcome::Truncated,
                 other => Outcome::Refused(format!("stopped ({other})")),
             };
-            Ok(Reply { outcome, usage, reasoning_tokens: thoughts })
+            Ok(Reply { outcome, usage, reasoning_tokens: thoughts, web: gemini_web(cand) })
         }
     }
 }
@@ -375,6 +471,7 @@ mod tests {
             schema: json!({"type": "object"}),
             max_output_tokens: 100,
             reasoning_effort: None,
+            web_search: None,
         }
     }
 
@@ -505,5 +602,118 @@ mod tests {
         assert_eq!((r.usage.input, r.usage.cached_input, r.usage.output, r.reasoning_tokens), (40, 10, 20, 15));
         let blocked = json!({"promptFeedback": {"blockReason": "SAFETY"}, "usageMetadata": {"promptTokenCount": 5}});
         assert!(matches!(parse_completion(Provider::Gemini, &blocked).unwrap().outcome, Outcome::Refused(_)));
+    }
+
+    fn search_req() -> Request {
+        Request { web_search: Some(crate::WebSearch { max_uses: 3 }), ..req() }
+    }
+
+    #[test]
+    fn builds_web_search_requests() {
+        let (_, b) = completion(&ep(Provider::Anthropic), &search_req());
+        assert_eq!(b["tools"][0]["type"], "web_search_20250305");
+        assert_eq!(b["tools"][0]["name"], "web_search");
+        assert_eq!(b["tools"][0]["max_uses"], 3);
+        let (_, b) = completion(&ep(Provider::Openai), &search_req());
+        assert_eq!(b["tools"][0]["type"], "web_search");
+        assert_eq!(b["max_tool_calls"], 3);
+        assert_eq!(b["include"][0], "web_search_call.action.sources");
+        let chatgpt = Endpoint {
+            provider: Provider::Openai,
+            base_url: "http://x/".into(),
+            auth: Auth::ChatGpt(std::sync::Arc::new(
+                crate::chatgpt::Session::resume(
+                    crate::chatgpt::Servers::default(),
+                    "c".into(),
+                    "r".into(),
+                    std::sync::Arc::new(|_| Ok(())),
+                )
+                .unwrap(),
+            )),
+        };
+        let (_, b) = completion(&chatgpt, &search_req());
+        assert_eq!(b["stream"], true);
+        assert_eq!(b["tools"][0]["type"], "web_search");
+        assert_eq!(b["max_tool_calls"], 3);
+        assert_eq!(b["include"][0], "web_search_call.action.sources");
+        let (_, b) = completion(&ep(Provider::Gemini), &search_req());
+        assert_eq!(b["tools"][0], json!({"google_search": {}}));
+    }
+
+    #[test]
+    fn requests_without_search_have_no_tools() {
+        for p in [Provider::Anthropic, Provider::Openai, Provider::Gemini] {
+            let (_, b) = completion(&ep(p), &req());
+            assert!(b.get("tools").is_none() && b.get("max_tool_calls").is_none() && b.get("include").is_none());
+        }
+    }
+
+    #[test]
+    fn parses_anthropic_web_evidence() {
+        let v = json!({"stop_reason": "end_turn", "usage": {"server_tool_use": {"web_search_requests": 2}},
+            "content": [
+                {"type": "server_tool_use", "name": "web_search"},
+                {"type": "web_search_tool_result", "content": [
+                    {"type": "web_search_result", "url": "https://a.example/1", "title": "A"},
+                    {"type": "web_search_result", "url": "ftp://bad.example/x", "title": "Bad"}]},
+                {"type": "text", "text": "{\"a\":1}", "citations": [
+                    {"url": "https://a.example/1", "title": "A again"},
+                    {"url": "https://b.example/2", "title": "B"}]}]});
+        let r = parse_completion(Provider::Anthropic, &v).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 1})));
+        assert_eq!(r.web.searches, 2);
+        let urls: Vec<_> = r.web.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["https://a.example/1", "https://b.example/2"]);
+        assert_eq!(r.web.sources[0].title, "A");
+    }
+
+    #[test]
+    fn parses_openai_web_evidence() {
+        let v = json!({"status": "completed", "usage": {}, "output": [
+            {"type": "web_search_call", "action": {"type": "search", "sources": [
+                {"type": "url", "url": "https://a.example/1"}, {"url": "javascript:x"}]}},
+            {"type": "web_search_call", "action": {"sources": [{"url": "https://c.example/3"}]}},
+            {"type": "message", "content": [{"type": "output_text", "text": "{\"a\":2}", "annotations": [
+                {"type": "url_citation", "url": "https://a.example/1", "title": "A"},
+                {"type": "url_citation", "url": "https://b.example/2", "title": "B"}]}]}]});
+        let r = parse_completion(Provider::Openai, &v).unwrap();
+        assert_eq!(r.outcome, Outcome::Json(json!({"a": 2})));
+        assert_eq!(r.web.searches, 2);
+        let urls: Vec<_> = r.web.sources.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["https://a.example/1", "https://c.example/3", "https://b.example/2"]);
+    }
+
+    #[test]
+    fn parses_gemini_grounding() {
+        let v = json!({"candidates": [{"content": {"parts": [{"text": "{\"a\":3}"}]}, "finishReason": "STOP",
+            "groundingMetadata": {"webSearchQueries": ["q1", "q2", "q3"], "groundingChunks": [
+                {"web": {"uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc", "title": "a.example"}},
+                {"web": {"uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc", "title": "dup"}},
+                {"web": {"uri": "not a url", "title": "x"}}]}}],
+            "usageMetadata": {}});
+        let r = parse_completion(Provider::Gemini, &v).unwrap();
+        assert_eq!(r.web.searches, 3);
+        assert_eq!(r.web.sources.len(), 1);
+        assert_eq!(r.web.sources[0].title, "a.example");
+        let plain = json!({"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}], "usageMetadata": {}});
+        assert_eq!(parse_completion(Provider::Gemini, &plain).unwrap().web, crate::WebEvidence::default());
+    }
+
+    #[test]
+    fn caps_sources_at_fifty() {
+        let results: Vec<_> = (0..60).map(|i| json!({"url": format!("https://e.example/{i}"), "title": "t"})).collect();
+        let v = json!({"stop_reason": "end_turn", "usage": {},
+            "content": [{"type": "web_search_tool_result", "content": results}, {"type": "text", "text": "{}"}]});
+        assert_eq!(parse_completion(Provider::Anthropic, &v).unwrap().web.sources.len(), 50);
+    }
+
+    #[test]
+    fn tool_errors_are_recognized() {
+        let st = |status, m: &str| AiError::Status { status, message: m.into() };
+        assert!(crate::is_tool_unsupported(&st(400, "Tool web_search is not supported")));
+        assert!(crate::is_tool_unsupported(&st(404, "no google_search here")));
+        assert!(crate::is_tool_unsupported(&AiError::Unsupported("x")));
+        assert!(!crate::is_tool_unsupported(&st(400, "bad schema")));
+        assert!(!crate::is_tool_unsupported(&st(500, "tool exploded")));
     }
 }

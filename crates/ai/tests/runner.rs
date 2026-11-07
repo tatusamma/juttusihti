@@ -682,6 +682,7 @@ async fn provider_token_counting() {
             schema: json!({"type": "object"}),
             max_output_tokens: 10,
             reasoning_effort: None,
+            web_search: None,
         };
         assert_eq!(client.count_tokens(&req).await.unwrap(), 321, "{provider:?}");
     }
@@ -826,6 +827,7 @@ async fn chatgpt_refresh_failure_signs_out_and_counting_is_unsupported() {
         schema: json!({"type": "object"}),
         max_output_tokens: 10,
         reasoning_effort: None,
+        web_search: None,
     };
     assert!(matches!(client.count_tokens(&req).await, Err(AiError::Unsupported(_))));
     assert!(matches!(client.complete(&req).await, Err(AiError::Auth(AuthError::SignedOut))));

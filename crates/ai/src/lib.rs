@@ -92,6 +92,42 @@ pub struct Request {
     /// extraction fast and cheap). Dropped automatically if the model
     /// rejects it; ignored by the other providers.
     pub reasoning_effort: Option<&'static str>,
+    /// Lets the model search the web (the provider's own search tool).
+    pub web_search: Option<WebSearch>,
+}
+
+/// Provider web search for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebSearch {
+    /// Cap on searches where the provider supports one (Gemini has none).
+    pub max_uses: u32,
+}
+
+/// What a reply says about the web searches the provider ran.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WebEvidence {
+    pub searches: u32,
+    /// Distinct http(s) sources, at most 50.
+    pub sources: Vec<WebSource>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebSource {
+    pub url: String,
+    pub title: String,
+}
+
+/// Whether a failed request means the model or credential cannot use the
+/// web search tool, so the caller may retry without it.
+pub fn is_tool_unsupported(e: &AiError) -> bool {
+    match e {
+        AiError::Unsupported(_) => true,
+        AiError::Status { status: 400 | 404, message } => {
+            let m = message.to_ascii_lowercase();
+            ["tool", "web_search", "google_search"].iter().any(|k| m.contains(k))
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +149,8 @@ pub struct Reply {
     /// Billing categories; `output` includes reasoning tokens.
     pub usage: Usage,
     pub reasoning_tokens: u64,
+    /// Empty for requests without search.
+    pub web: WebEvidence,
 }
 
 #[derive(Debug, thiserror::Error)]
