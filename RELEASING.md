@@ -72,10 +72,12 @@ splits it on spaces, so arguments cannot contain spaces):
 ```
 
 The script checks that HEAD is the tag and the versions match, and that the draft exists. It
-then builds the NSIS installer with cargo-packager, which signs `juttusihti.exe`, the uninstaller and the installer. The script itself first builds
-and signs `juttusihti-browser.exe` (the full-article helper from `crates/browser`) with the same
-signing option, because cargo-packager signs only the main binary. It checks the Authenticode signatures and writes these files to
-`dist\`:
+builds the app and the full-article helper `juttusihti-browser.exe` (from `crates/browser`) and
+signs the helper with the same signing option, because cargo-packager signs only the main binary.
+It then builds the NSIS installer with cargo-packager, with `beforePackagingCommand` removed from
+the config so that no build can replace the signed helper. cargo-packager signs `juttusihti.exe`,
+the uninstaller and the installer. The script checks the Authenticode signatures, including the
+two exes unpacked from the installer with 7-Zip, and writes these files to `dist\`:
 
 - `juttusihti_X.Y.Z_x64-setup.exe`
 - `juttusihti-X.Y.Z-x86_64-windows.zip` (the signed `juttusihti.exe` and `juttusihti-browser.exe` with README and licenses)
