@@ -44,8 +44,10 @@ pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate 
     let extract_in = approx_tokens(article_text) + EXTRACT_PROMPT_TOKENS;
     let searches_expected = claims;
     let searches_conservative = claims * SEARCHES_PER_CLAIM;
-    let claim_in_expected = claim_in_tokens(1, SEARCH_TOKENS_EXPECTED);
-    let claim_in_conservative = claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE);
+    // Every claim call resends the whole article.
+    let article = approx_tokens(article_text);
+    let claim_in_expected = article + claim_in_tokens(1, SEARCH_TOKENS_EXPECTED);
+    let claim_in_conservative = article + claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE);
     let extract_out_expected = (EXTRACT_MAX_OUTPUT / 2) as u64;
     let claim_out_expected = (CLAIM_MAX_OUTPUT / 3) as u64;
     // Each call is its own request, so long-context rates apply per call.
@@ -425,6 +427,20 @@ mod tests {
         let expected = call(1_000, 4_000) + 8 * call(38_500, 1_500) + p.search_cost(24).unwrap();
         assert_eq!(e.conservative, Some(expected));
         assert_eq!(e.conservative, Some(581_000));
+    }
+
+    #[test]
+    fn estimate_counts_the_article_in_every_claim_call() {
+        let json = r#"{"entries":[{"provider":"anthropic","model":"m","input":1,"output":2,"web_search_per_1k":10,"source":"s"}]}"#;
+        let p = Catalog::from_json(json).unwrap().entries.remove(0);
+        // 3800 ASCII characters are 1000 tokens.
+        let text = "x".repeat(3_800);
+        assert_eq!(approx_tokens(&text), 1_000);
+        let e = estimate(&text, Some(&p));
+        // Extraction 2000 in; each claim call resends the article: 39 500 in at most, 7 500 expected.
+        assert_eq!(e.conservative, Some(10_000 + 8 * 42_500 + 240_000));
+        assert_eq!(e.expected, Some(6_000 + 8 * 8_500 + 80_000));
+        assert_eq!(e.tokens_conservative, 2_000 + 4_000 + 8 * (39_500 + 1_500));
     }
 
     #[test]
