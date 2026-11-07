@@ -20,6 +20,8 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const HELPER_TIMEOUT_SECS: u32 = 45;
 /// Upper bound for the one outcome line read from the helper.
 const MAX_LINE_BYTES: u64 = 32 * 1024 * 1024;
+/// How much of the helper's stderr (its diagnostics) is kept for the log: the last bytes.
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
 
 const PROFILES_DIR: &str = "browser-profiles";
 const FULLTEXT_DIR: &str = "fulltext";
@@ -117,10 +119,49 @@ fn check_picture(outcome: FetchOutcome, expected: &Path) -> FetchOutcome {
     }
 }
 
+/// Reads the helper's stderr to the end, keeping only its last `STDERR_TAIL_BYTES`.
+async fn stderr_tail<R: tokio::io::AsyncRead + Unpin>(mut stderr: R) -> String {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&chunk[..n]);
+                if kept.len() > 2 * STDERR_TAIL_BYTES {
+                    kept.drain(..kept.len() - STDERR_TAIL_BYTES);
+                }
+            }
+        }
+    }
+    if kept.len() > STDERR_TAIL_BYTES {
+        kept.drain(..kept.len() - STDERR_TAIL_BYTES);
+    }
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
+/// The helper's diagnostics go to the log only, never into text the user sees.
+fn log_helper_stderr(outcome: &FetchOutcome, stderr: &str) {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        return;
+    }
+    let kind = match outcome {
+        FetchOutcome::Failed { .. } => "failed",
+        FetchOutcome::Timeout => "timeout",
+        FetchOutcome::NoArticle => "no article",
+        FetchOutcome::Fetched { .. } | FetchOutcome::Refused { .. } => {
+            tracing::debug!(stderr, "browser helper diagnostics");
+            return;
+        }
+    };
+    tracing::warn!(outcome = kind, stderr, "browser helper did not fetch the article");
+}
+
 async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) -> FetchOutcome {
     let Ok(body) = serde_json::to_vec(request) else { return failed("Could not build the request.") };
     let mut cmd = tokio::process::Command::new(helper);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let mut child = match cmd.spawn() {
@@ -128,10 +169,12 @@ async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) ->
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return failed("The browser helper is missing."),
         Err(_) => return failed("The browser helper could not be started."),
     };
-    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+    let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
         let _ = child.kill().await;
         return failed("The browser helper could not be started.");
     };
+    let mut stderr = tokio::spawn(stderr_tail(stderr));
     let io = async {
         // A helper that failed early may not read stdin; a broken pipe here
         // is not fatal, its stdout and exit status still tell the story.
@@ -144,24 +187,35 @@ async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) ->
         let status = child.wait().await;
         (read, line, status)
     };
-    match tokio::time::timeout(timeout, io).await {
+    let outcome = match tokio::time::timeout(timeout, io).await {
         Err(_) => {
             let _ = child.kill().await;
             FetchOutcome::Timeout
         }
         Ok((read, line, status)) => {
             if line.trim().is_empty() || read.is_err() {
-                return failed("The browser helper gave no result.");
-            }
-            match serde_json::from_str::<FetchOutcome>(line.trim()) {
-                Ok(outcome) => match status {
-                    Ok(s) if s.success() => outcome,
-                    _ => failed("The browser helper exited abnormally."),
-                },
-                Err(_) => failed("The browser helper gave an unreadable result."),
+                failed("The browser helper gave no result.")
+            } else {
+                match serde_json::from_str::<FetchOutcome>(line.trim()) {
+                    Ok(outcome) => match status {
+                        Ok(s) if s.success() => outcome,
+                        _ => failed("The browser helper exited abnormally."),
+                    },
+                    Err(_) => failed("The browser helper gave an unreadable result."),
+                }
             }
         }
+    };
+    // The helper has exited or been killed, so its stderr ends; the limit guards against a
+    // grandchild that kept the pipe open.
+    match tokio::time::timeout(Duration::from_secs(2), &mut stderr).await {
+        Ok(Ok(tail)) => log_helper_stderr(&outcome, &tail),
+        _ => {
+            stderr.abort();
+            tracing::debug!("browser helper stderr was not read to the end");
+        }
     }
+    outcome
 }
 
 /// Deletes cache files by path relative to `dir`; a missing file is fine.
@@ -230,6 +284,16 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn stderr_tail_keeps_only_the_last_bytes() {
+        let mut input = vec![b'a'; 3 * STDERR_TAIL_BYTES];
+        input.extend_from_slice(b"the end");
+        let tail = stderr_tail(&input[..]).await;
+        assert_eq!(tail.len(), STDERR_TAIL_BYTES);
+        assert!(tail.ends_with("the end"));
+        assert_eq!(stderr_tail(&b"short"[..]).await, "short");
     }
 
     #[test]

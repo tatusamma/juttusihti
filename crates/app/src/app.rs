@@ -1359,7 +1359,8 @@ impl App {
             Key::Character("k") | Key::Named(keyboard::key::Named::ArrowUp) => self.open_relative(-1),
             Key::Character("s") => self.update(Message::ToggleSaved),
             Key::Character("m") => self.update(Message::ToggleRead),
-            Key::Character("a") => self.update(Message::FetchFullArticle),
+            // Only where the reading pane with its button is on screen.
+            Key::Character("a") if self.screen == Screen::Reader => self.update(Message::FetchFullArticle),
             Key::Character("o") | Key::Named(keyboard::key::Named::Enter) => self.update(Message::OpenInBrowser),
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
@@ -2272,6 +2273,20 @@ mod tests {
         let _ = app.update(Message::Key(Key::Character("a".into()), Default::default()));
         assert_eq!(app.fetching, Some(b));
         let _ = app.view();
+    }
+
+    #[test]
+    fn fetch_shortcut_works_only_on_the_reader_screen() {
+        let (mut app, a, _) = app_with_articles();
+        app.show_preview(a);
+        let _ = app.update(Message::ShowScreen(Screen::Settings));
+        assert_ne!(app.screen, Screen::Reader);
+        let task = app.update(Message::Key(Key::Character("a".into()), Default::default()));
+        assert_eq!(task.units(), 0);
+        assert_eq!(app.fetching, None);
+        let _ = app.update(Message::ShowScreen(Screen::Reader));
+        let _ = app.update(Message::Key(Key::Character("a".into()), Default::default()));
+        assert_eq!(app.fetching, Some(a));
     }
 
     #[test]

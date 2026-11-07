@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_PICTURE_INPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const PICTURE_MAX_WIDTH: u32 = 1600;
+/// Taller pictures keep only their top (the reader shows the picture as a hero at the top).
+pub const PICTURE_MAX_HEIGHT: u32 = 2400;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FetchRequest {
@@ -36,15 +38,23 @@ pub enum FetchOutcome {
 }
 
 /// Decodes `input` (JPEG, PNG, WebP or GIF), shrinks it to at most `PICTURE_MAX_WIDTH`
-/// pixels wide and writes it to `out` as a JPEG. Returns `None`, writing nothing, when the
-/// input is too large, cannot be decoded or cannot be written.
+/// pixels wide, crops it to its top `PICTURE_MAX_HEIGHT` pixels and writes it to `out` as a
+/// JPEG. Returns `None`, writing nothing, when the input is too large, cannot be decoded or
+/// cannot be written.
 pub fn process_picture(input: &[u8], out: &Path) -> Option<PictureInfo> {
     use image::imageops::FilterType;
 
     if input.len() > MAX_PICTURE_INPUT_BYTES {
         return None;
     }
-    let decoded = image::load_from_memory(input).ok()?;
+    let mut decoded = image::load_from_memory(input).ok()?;
+    // Crop before resizing: the height that becomes PICTURE_MAX_HEIGHT after the resize below.
+    let scale_width = decoded.width().max(PICTURE_MAX_WIDTH);
+    let max_source_height =
+        (u64::from(PICTURE_MAX_HEIGHT) * u64::from(scale_width) / u64::from(PICTURE_MAX_WIDTH)).max(1) as u32;
+    if decoded.height() > max_source_height {
+        decoded = decoded.crop_imm(0, 0, decoded.width(), max_source_height);
+    }
     let resized = if decoded.width() > PICTURE_MAX_WIDTH {
         let height =
             (u64::from(decoded.height()) * u64::from(PICTURE_MAX_WIDTH) / u64::from(decoded.width())).max(1) as u32;
@@ -150,6 +160,28 @@ mod tests {
             let written = std::fs::read(&out).unwrap();
             assert_eq!(image::guess_format(&written).unwrap(), ImageFormat::Jpeg);
         }
+    }
+
+    #[test]
+    fn very_tall_picture_keeps_its_top() {
+        let dir = tempfile::tempdir().unwrap();
+        // Top rows red, the rest blue: the kept part must be the top.
+        let tall = DynamicImage::ImageRgb8(RgbImage::from_fn(1600, 20000, |_, y| {
+            if y < 2400 { image::Rgb([220, 20, 20]) } else { image::Rgb([20, 20, 220]) }
+        }));
+        let out = dir.path().join("tall.jpg");
+        let info = process_picture(&encode(&tall, ImageFormat::Png), &out).expect("picture");
+        assert_eq!((info.width, info.height), (1600, PICTURE_MAX_HEIGHT));
+        let written = image::open(&out).unwrap().to_rgb8();
+        assert_eq!((written.width(), written.height()), (1600, PICTURE_MAX_HEIGHT));
+        let bottom = written.get_pixel(800, PICTURE_MAX_HEIGHT - 10);
+        assert!(bottom[0] > 150 && bottom[2] < 100, "bottom of the kept part is not from the top: {bottom:?}");
+
+        // Wider and tall: resized to the width first, then cropped to the same height.
+        let wide = gradient(3200, 6000);
+        let out = dir.path().join("wide.jpg");
+        let info = process_picture(&encode(&wide, ImageFormat::Jpeg), &out).expect("picture");
+        assert_eq!((info.width, info.height), (1600, PICTURE_MAX_HEIGHT));
     }
 
     #[test]
