@@ -2196,8 +2196,11 @@ mod tests {
             Some("Couldn't find the article text on the page.")
         );
         assert_eq!(
-            outcome_note(&FetchOutcome::Failed { message: "The browser helper is missing.".into() }).as_deref(),
-            Some("Fetching failed: The browser helper is missing.")
+            outcome_note(&FetchOutcome::Failed {
+                message: "The browser engine is missing. Reinstall Juttusihti.".into()
+            })
+            .as_deref(),
+            Some("Fetching failed: The browser engine is missing. Reinstall Juttusihti.")
         );
         assert_eq!(outcome_note(&fetched("x", false)), None);
     }

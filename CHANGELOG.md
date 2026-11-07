@@ -9,6 +9,11 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Changed
+
+- Full-article error messages now speak of the browser engine instead of a "browser helper", and
+  a missing engine suggests reinstalling Juttusihti.
+
 ## [0.4.0] - 2026-11-07
 
 ### Added

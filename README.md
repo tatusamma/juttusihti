@@ -72,8 +72,8 @@ gh attestation verify juttusihti_X.Y.Z_amd64.deb --repo tero-k/juttusihti
 ## Build from source
 
 Requirements: Rust 1.85+ (2024 edition) and a C/C++ toolchain, because SQLite and DuckDB are
-bundled and compiled from source. The full-article helper `juttusihti-browser` (see below) needs
-Rust 1.88+. On Windows this means MSVC (VS 2022 Build Tools); CMake and
+bundled and compiled from source. The full-article browser engine `juttusihti-browser` (see below)
+needs Rust 1.88+. On Windows this means MSVC (VS 2022 Build Tools); CMake and
 NASM are not needed. A first build of bundled DuckDB takes several minutes.
 
 On Linux, install the development libraries first:
@@ -88,10 +88,11 @@ cd juttusihti
 cargo run --release -p juttusihti
 ```
 
-**Full articles need a second binary.** `juttusihti-browser` is a headless [Servo](https://servo.org)
-browser in its own cargo workspace (`crates/browser`, with its own `Cargo.lock`, Rust 1.88+),
-so it is not built by `cargo build --workspace`. Build it into the same `target` folder, so
-the app finds it next to itself (or point `JUTTUSIHTI_BROWSER` at it):
+**Full articles need one more build command.** The app's browser engine, based on
+[Servo](https://servo.org), is built as `juttusihti-browser` from its own cargo workspace
+(`crates/browser`, with its own `Cargo.lock`, Rust 1.88+), so `cargo build --workspace` does not
+build it. Build it into the same `target` folder, so the app finds it next to itself (or point
+`JUTTUSIHTI_BROWSER` at it):
 
 ```sh
 cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target
@@ -105,8 +106,8 @@ pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz
 libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`; at run time it needs `libegl1`, and
 with no GPU or display Mesa's `libegl-mesa0` and `libgl1-mesa-dri` (software OpenGL). The Linux
 dependency list is checked in CI on Ubuntu 22.04 but not yet on a clean desktop machine. Without
-the helper the rest of the app works as before: the **Read full article** button is still shown,
-and pressing it reports that the browser helper is missing.
+the browser engine the rest of the app works as before: the **Read full article** button is
+still shown, and pressing it reports that the browser engine is missing.
 
 ## Using Juttusihti
 
@@ -325,8 +326,8 @@ Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
 | `crates/ai` (`juttusihti-ai`) | OpenAI / Anthropic / Gemini clients, prompts and output validation, the approved-session runner | yes, only for approved runs | yes |
 | `crates/analytics` (`juttusihti-analytics`) | DuckDB reports over a consistent SQLite snapshot, on a bounded, cancellable worker | no | no |
 | `crates/app` (`juttusihti`) | Iced 0.14 desktop UI | via `fetch` | no |
-| `crates/article` (`juttusihti-article`) | Messages between the app and the browser helper, picture re-encoding | no | no |
-| `crates/browser` (`juttusihti-browser`) | Full-article helper: headless Servo, tracker blocking, cookie consent, article extraction. Its own cargo workspace | yes, only when you press Read full article | no |
+| `crates/article` (`juttusihti-article`) | Messages between the app and its browser engine, picture re-encoding | no | no |
+| `crates/browser` (`juttusihti-browser`) | Full-article browser engine: Servo with no window, tracker blocking, cookie consent, article extraction. Its own cargo workspace | yes, only when you press Read full article | no |
 | `crates/bench` | Benchmarks at 10k/100k/1M articles (BENCHMARKS.md) | no | no |
 
 ### Build, test and run
@@ -364,14 +365,14 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
 Unsigned local packages, for testing. `beforePackagingCommand` in `Packager.toml` builds both
 the app and `juttusihti-browser`, and every format ships both binaries; for the `.rpm`, build the
-helper first with the command under [Build from source](#build-from-source):
+browser engine first with the command under [Build from source](#build-from-source):
 
 ```sh
 cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
 cargo install cargo-generate-rpm --version 0.21.1 --locked
-cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm (helper built first)
+cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm (browser engine built first)
 ```
 
 - **Build Linux packages on Ubuntu 22.04** (glibc 2.35), for example in a container. Built on
@@ -563,8 +564,8 @@ tokenizer, or AI-assisted query expansion.
     - There is no geocoder: Nominatim's policy rules out automatic bulk lookups.
     - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
       tiles are clipped to the map area with the CPU renderer too.
-- **Full articles**: done on Windows. A separate helper (`juttusihti-browser`, headless Servo
-  0.7) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
+- **Full articles**: done on Windows. The built-in browser engine (`juttusihti-browser`, Servo
+  0.7 with no window) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
   DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
   articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
   public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
@@ -631,7 +632,7 @@ any additional terms or conditions.
 The bundled [Lucide](https://lucide.dev) icon font is under the ISC license, with some icons
 under MIT (`crates/app/assets/LUCIDE-LICENSE.txt`). Map data © OpenStreetMap contributors.
 
-The full-article helper embeds Servo (MPL-2.0) and bundles Readability.js (Apache-2.0), the
+The full-article browser engine embeds Servo (MPL-2.0) and bundles Readability.js (Apache-2.0), the
 EasyList and EasyPrivacy filter lists (CC BY-SA 3.0) and autoconsent (MPL-2.0); see
 [crates/browser/assets/LICENSES.md](crates/browser/assets/LICENSES.md), which every package
 ships as `LICENSES-browser.md` next to `LICENSE-MIT` and `LICENSE-APACHE`.

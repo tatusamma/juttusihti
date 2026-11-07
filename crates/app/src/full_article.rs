@@ -166,13 +166,15 @@ async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) ->
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return failed("The browser helper is missing."),
-        Err(_) => return failed("The browser helper could not be started."),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return failed("The browser engine is missing. Reinstall Juttusihti.");
+        }
+        Err(_) => return failed("The browser engine could not be started."),
     };
     let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         let _ = child.kill().await;
-        return failed("The browser helper could not be started.");
+        return failed("The browser engine could not be started.");
     };
     let mut stderr = tokio::spawn(stderr_tail(stderr));
     let io = async {
@@ -194,14 +196,14 @@ async fn run_helper(helper: &Path, request: &FetchRequest, timeout: Duration) ->
         }
         Ok((read, line, status)) => {
             if line.trim().is_empty() || read.is_err() {
-                failed("The browser helper gave no result.")
+                failed("The browser engine gave no result.")
             } else {
                 match serde_json::from_str::<FetchOutcome>(line.trim()) {
                     Ok(outcome) => match status {
                         Ok(s) if s.success() => outcome,
-                        _ => failed("The browser helper exited abnormally."),
+                        _ => failed("The browser engine stopped unexpectedly."),
                     },
-                    Err(_) => failed("The browser helper gave an unreadable result."),
+                    Err(_) => failed("The browser engine gave an unreadable result."),
                 }
             }
         }
