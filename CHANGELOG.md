@@ -9,6 +9,21 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Full articles**: "Read full article" (shortcut `a`) loads the whole article when a feed only
+  has a teaser. The page opens in a hidden Servo browser with a brand-new empty profile; known
+  trackers and ads are blocked (EasyList and EasyPrivacy) and cookie banners are accepted,
+  including the free choice of consent-or-pay walls. When the text and main picture are saved,
+  the whole profile, cookies included, is deleted. Nothing is fetched until you ask. The text
+  is searchable, the picture is shown faded above it, and paywalled articles keep only their
+  public part with a note. Settings → Full articles has picture downloads, a cache size limit
+  (500 MB by default; Saved articles are never removed) and "Clear cache now". A fetch takes
+  about 5 to 9 seconds.
+- **New helper program**: `juttusihti-browser` now ships next to `juttusihti` in the Windows
+  installer and zip and in the Linux deb, rpm, AppImage and tarball. Building it from source needs
+  Rust 1.88 and its own build command; see the README.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

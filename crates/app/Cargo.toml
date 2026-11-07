@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 # The Linux .rpm, built with cargo-generate-rpm (cargo-packager has no rpm format):
-#   cargo build --release -p juttusihti && cargo generate-rpm -p crates/app
+#   cargo build --release -p juttusihti && cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target && cargo generate-rpm -p crates/app
 # Asset sources are relative to this crate. The libraries below are loaded at run time, so
 # the automatic dependency scan cannot see them; sonames keep them distro-neutral.
 [package.metadata.generate-rpm]
@@ -15,6 +15,7 @@ summary = "Local-first RSS reader and news research desktop app"
 url = "https://github.com/tero-k/juttusihti"
 assets = [
   { source = "target/release/juttusihti", dest = "/usr/bin/juttusihti", mode = "755" },
+  { source = "target/release/juttusihti-browser", dest = "/usr/bin/juttusihti-browser", mode = "755" },
   { source = "../../packaging/linux/juttusihti.desktop", dest = "/usr/share/applications/juttusihti.desktop", mode = "644" },
   { source = "../../packaging/icons/juttusihti-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/juttusihti.png", mode = "644" },
   { source = "../../packaging/icons/juttusihti-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/juttusihti.png", mode = "644" },

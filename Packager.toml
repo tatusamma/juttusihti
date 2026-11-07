@@ -16,7 +16,9 @@ homepage = "https://github.com/tero-k/juttusihti"
 authors = ["tero-k"]
 publisher = "Juttusihti"
 category = "News"
-beforePackagingCommand = "cargo build --release -p juttusihti"
+# The browser helper is a separate cargo workspace (Servo needs its own lock file), built into the
+# same target/release so both binaries sit side by side.
+beforePackagingCommand = "cargo build --release -p juttusihti --locked && cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target"
 binariesDir = "target/release"
 outDir = "target/packages"
 icons = ["packaging/icons/juttusihti-*.png"]
@@ -24,6 +26,10 @@ icons = ["packaging/icons/juttusihti-*.png"]
 [[binaries]]
 path = "juttusihti"
 main = true
+
+# Full articles: the app starts this next to itself, so it must ship in every format.
+[[binaries]]
+path = "juttusihti-browser"
 
 [linux]
 generateDesktopEntry = true

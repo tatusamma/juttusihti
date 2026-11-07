@@ -73,6 +73,8 @@ jobs:
       - run: cargo install cargo-generate-rpm --version 0.21.1 --locked
       # Packager.toml's beforePackagingCommand then finds the binary up to date.
       - run: cargo build --release -p juttusihti --locked
+      # The Servo helper is its own workspace (see crates/browser); --target-dir puts it next to the app.
+      - run: cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target
       - run: cargo packager --release -f deb,appimage -c Packager.toml
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
@@ -85,7 +87,7 @@ jobs:
           cp target/packages/*.deb target/packages/*.rpm target/packages/*.AppImage dist/
           stage="juttusihti-$VERSION-x86_64-linux"
           mkdir "$stage"
-          cp target/release/juttusihti README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          cp target/release/juttusihti target/release/juttusihti-browser README.md LICENSE-MIT LICENSE-APACHE "$stage/"
           tar -czf "dist/$stage.tar.gz" "$stage"
           cd dist
           sha256sum -- * > SHA256SUMS-linux.txt

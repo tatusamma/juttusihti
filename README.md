@@ -19,6 +19,9 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Reader**: subscribe by site or feed address (feeds are discovered for you), folders, OPML
   import and export, unread and saved views, scheduled refresh, offline reading and keyboard
   shortcuts.
+- **Full articles**: when a feed only gives a teaser, one click (or **a**) loads the article in a
+  throwaway private browser, blocks known trackers and ads, accepts cookie banners, keeps the
+  text and the main picture, and deletes the browser profile. Nothing is fetched until you ask.
 - **Search**: local FTS5 full-text search with phrases, `OR`, `NOT`, prefixes, field filters
   and `NEAR`, plus a label filter next to the search box.
 - **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
@@ -69,7 +72,8 @@ gh attestation verify juttusihti_X.Y.Z_amd64.deb --repo tero-k/juttusihti
 ## Build from source
 
 Requirements: Rust 1.85+ (2024 edition) and a C/C++ toolchain, because SQLite and DuckDB are
-bundled and compiled from source. On Windows this means MSVC (VS 2022 Build Tools); CMake and
+bundled and compiled from source. The full-article helper `juttusihti-browser` (see below) needs
+Rust 1.88+. On Windows this means MSVC (VS 2022 Build Tools); CMake and
 NASM are not needed. A first build of bundled DuckDB takes several minutes.
 
 On Linux, install the development libraries first:
@@ -83,6 +87,24 @@ git clone https://github.com/tero-k/juttusihti.git
 cd juttusihti
 cargo run --release -p juttusihti
 ```
+
+**Full articles need a second binary.** `juttusihti-browser` is a headless [Servo](https://servo.org)
+browser in its own cargo workspace (`crates/browser`, with its own `Cargo.lock`, Rust 1.88+),
+so it is not built by `cargo build --workspace`. Build it into the same `target` folder, so
+the app finds it next to itself (or point `JUTTUSIHTI_BROWSER` at it):
+
+```sh
+cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target
+```
+
+Do not run a plain `cargo update` there: the lock file pins a pre-release crate. Servo also
+needs LLVM/clang (set `LIBCLANG_PATH` if it is not found) and, for the first build, network
+access to download a prebuilt SpiderMonkey; the first build takes a few minutes. On Windows it
+needs a working OpenGL driver at run time. On Debian/Ubuntu add `clang libclang-dev cmake
+pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev
+libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`. The Linux dependency list is not yet
+verified on a clean machine. Without the helper the app still works; only "Read full article" is
+unavailable.
 
 ## Using Juttusihti
 
@@ -114,6 +136,29 @@ offline.
   moves it to a folder or unsubscribes.
 - Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
   them.
+- **Read full article** (shortcut **a**) fetches the whole article when the feed only has a
+  teaser; see [Full articles and privacy](#full-articles-and-privacy). It takes about 5 to 9
+  seconds. Paywalled articles keep only the public part, with a note. The main picture is shown
+  faded above the text. If the page gives no article text, you see "Couldn't find the article
+  text on the page." (this is also what a refusing site looks like).
+
+#### Full articles and privacy
+
+Nothing is fetched until you press **Read full article**. Then a helper program loads the page
+in a hidden browser with a brand-new, empty profile, so no earlier cookies or logins exist:
+
+- Known trackers and ads are blocked with the EasyList and EasyPrivacy lists.
+- Cookie banners are accepted automatically, including the free choice of "consent or pay"
+  walls. This is deliberate: the alternative is a page with no text. Because the profile is
+  new, the cookies only live for that one visit.
+- When the text and the main picture are saved, the whole profile, cookies included, is
+  deleted.
+- The text is stored on this computer, apart from the feed, and is searchable. It is never
+  sent to an AI provider unless you include the article in an AI run.
+
+Settings → **Full articles** turns picture downloads on or off, sets the size limit of the
+cache (500 MB by default; Saved articles are never removed to make room) and has **Clear
+cache now**.
 
 ### Searching
 
@@ -273,7 +318,8 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 ### CI and releases
 
 - **CI** (`.github/workflows/ci.yml`, on pushes to `master` and pull requests): `cargo fmt`,
-  clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows, and `cargo audit`.
+  clippy with `-D warnings` and tests on Ubuntu 22.04 and Windows (the app workspace and the
+  separate `crates/browser` workspace), and `cargo audit`.
 - **Release** (`.github/workflows/release.yml`, on `v*` tags): runs CI, builds the Linux
   `.deb`, `.rpm`, AppImage and tarball with checksums and provenance attestations, and puts them on a
   **draft** GitHub Release. The Windows installer is built and signed locally with
@@ -284,14 +330,16 @@ Settings → CPU renderer uses far less memory (see BENCHMARKS.md).
 
 ### Packages
 
-Unsigned local packages, for testing:
+Unsigned local packages, for testing. `beforePackagingCommand` in `Packager.toml` builds both
+the app and `juttusihti-browser`, and every format ships both binaries; for the `.rpm`, build the
+helper first with the command under [Build from source](#build-from-source):
 
 ```sh
 cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release -f nsis -c Packager.toml            # Windows: per-user NSIS installer
 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release -f deb,appimage -c Packager.toml   # Linux
 cargo install cargo-generate-rpm --version 0.21.1 --locked
-cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm
+cargo build --release -p juttusihti && cargo generate-rpm -p crates/app   # Linux .rpm (helper built first)
 ```
 
 - **Build Linux packages on Ubuntu 22.04** (glibc 2.35), for example in a container. Built on
@@ -543,3 +591,7 @@ any additional terms or conditions.
 
 The bundled [Lucide](https://lucide.dev) icon font is under the ISC license, with some icons
 under MIT (`crates/app/assets/LUCIDE-LICENSE.txt`). Map data © OpenStreetMap contributors.
+
+The full-article helper embeds Servo (MPL-2.0) and bundles Readability.js (Apache-2.0), the
+EasyList and EasyPrivacy filter lists (CC BY-SA 3.0) and autoconsent (MPL-2.0); see
+[crates/browser/assets/LICENSES.md](crates/browser/assets/LICENSES.md).

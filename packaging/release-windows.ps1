@@ -7,10 +7,11 @@ Run from the repository root with the release tag checked out and a clean workin
 The Release workflow must already have created the draft for the tag. The script:
 
   1. writes Packager.local.toml: Packager.toml plus a [windows] signing section,
-  2. builds the NSIS installer with cargo-packager, which signs the app binary, the
-     uninstaller and the installer,
+  2. builds the app and the juttusihti-browser helper (full articles), signs the helper itself
+     (cargo-packager only signs the main binary), then builds the NSIS installer with
+     cargo-packager, which signs the app binary, the uninstaller and the installer,
   3. checks the Authenticode signatures,
-  4. puts the installer, a portable zip and SHA256SUMS-windows.txt in dist\, and
+  4. puts the installer, a portable zip (both exes) and SHA256SUMS-windows.txt in dist\, and
   5. uploads them to the draft release (unless -NoUpload).
 
 See RELEASING.md.
@@ -75,6 +76,24 @@ function Get-TomlVersion([string]$Path, [string]$Section) {
     throw "No version in $Path"
 }
 
+# Signs one file with the same mechanism cargo-packager is given below.
+$usesCommand = $PSCmdlet.ParameterSetName -eq 'Command'
+function Sign-File([string]$Path) {
+    if ($usesCommand) {
+        # Split on spaces like cargo-packager does, so both behave the same.
+        $parts = @($SignCommand -split ' ' | Where-Object { $_ } | ForEach-Object { $_.Replace('%1', $Path) })
+        Invoke-Native $parts[0] @($parts | Select-Object -Skip 1)
+    } else {
+        $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+        if (-not $signtool) {
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+                Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+        }
+        if (-not $signtool) { throw 'signtool.exe not found; install the Windows SDK.' }
+        Invoke-Native $signtool @('sign', '/sha1', $CertificateThumbprint, '/fd', 'sha256', '/tr', $TimestampUrl, '/td', 'sha256', $Path)
+    }
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $version = $Tag.Substring(1)
@@ -113,6 +132,10 @@ $localConfig = Join-Path $root 'Packager.local.toml'
 
 try {
     Invoke-Native cargo @('build', '--release', '-p', 'juttusihti', '--locked')
+    # The helper is a separate workspace; --target-dir puts it next to the app in target\release.
+    Invoke-Native cargo @('build', '--release', '--locked', '--manifest-path', 'crates\browser\Cargo.toml', '--target-dir', 'target')
+    # Packaged unsigned otherwise: sign it before cargo-packager copies it into the installer.
+    Sign-File (Resolve-Path 'target\release\juttusihti-browser.exe').Path
     Remove-Item 'target\packages\*-setup.exe' -ErrorAction SilentlyContinue
     Invoke-Native cargo @('packager', '--release', '-f', 'nsis', '-c', $localConfig)
 } finally {
@@ -122,6 +145,7 @@ try {
 $installer = @(Get-ChildItem 'target\packages\*-setup.exe')
 if ($installer.Count -ne 1) { throw "Expected one installer in target\packages, found $($installer.Count)." }
 $exe = Get-Item 'target\release\juttusihti.exe'
+$helper = Get-Item 'target\release\juttusihti-browser.exe'
 
 $dist = Join-Path $root 'dist'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
@@ -134,7 +158,7 @@ $portable = "juttusihti-$version-x86_64-windows"
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::Open((Join-Path $dist "$portable.zip"), 'Create')
 try {
-    foreach ($file in @($exe.FullName, 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
+    foreach ($file in @($exe.FullName, $helper.FullName, 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
         $item = Get-Item $file
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $item.FullName, "$portable/$($item.Name)", 'Optimal') | Out-Null
     }
@@ -148,7 +172,7 @@ $sums = $assets | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA25
 [IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS-windows.txt'), (($sums -join "`n") + "`n"))
 Get-Content (Join-Path $dist 'SHA256SUMS-windows.txt')
 
-foreach ($file in @($exe.FullName, (Join-Path $dist $installer[0].Name))) {
+foreach ($file in @($exe.FullName, $helper.FullName, (Join-Path $dist $installer[0].Name))) {
     $signature = Get-AuthenticodeSignature $file
     if ($signature.Status -ne 'Valid') { throw "$file is not validly signed: $($signature.Status) $($signature.StatusMessage)" }
     Write-Host "Signed: $file ($($signature.SignerCertificate.Subject))"

@@ -54,6 +54,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Paid live API tests and the network probe stay ignored.
       - run: cargo test --workspace --locked
+      # The browser helper (Servo) is a separate workspace with its own lock file and Rust 1.88.
+      - name: Browser helper clippy and tests
+        working-directory: crates/browser
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then export LIBCLANG_PATH='C:/Program Files/LLVM/bin'; fi
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
 
   audit:
     runs-on: ubuntu-22.04

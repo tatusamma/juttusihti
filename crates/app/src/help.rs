@@ -48,6 +48,7 @@ const SECTIONS: [(&str, &[&str]); 9] = [
             "The feed menu chooses what the list shows: all news, a folder or one feed. All / Unread filters the list. Click an article to read it on the right; the star saves it to Saved in the rail.",
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
             "Labels can be added to an article from its preview. The Labels screen renames, merges and deletes them.",
+            "When a feed only gives a teaser, \"Read full article\" (or press a) loads the whole article. Nothing is fetched until you ask. A hidden private browser with a brand-new empty profile opens the page, blocks known trackers and ads, accepts cookie banners (including the free choice of consent-or-pay walls) and keeps the text and main picture; then the whole profile, cookies included, is deleted. It takes about 5 to 9 seconds. Paywalled articles keep only the public part, with a note. Settings → Full articles sets picture downloads and the cache size, and clears the cache; Saved articles are never removed to make room.",
             "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
         ],
     ),
