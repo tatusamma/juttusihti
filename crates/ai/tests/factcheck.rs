@@ -561,6 +561,37 @@ async fn refused_retry_after_malformed_output_is_unverified() {
     assert_eq!(fc.claims[0].reason, FAILED);
 }
 
+#[tokio::test]
+async fn reasoning_model_gets_room_to_think() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1])
+        } else {
+            claim_reply(&verdict("contradicted", &[WEB_SOURCE]), &[WEB_SOURCE])
+        }
+    }))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let reasoning = Catalog::from_json(&format!(
+        r#"{{"entries":[{{"provider":"openai","model":"{MODEL}","input":1,"output":2,"web_search_per_1k":100,"reasoning":true,"source":"test"}}]}}"#
+    ))
+    .unwrap();
+    run_priced(&m, &l, false, &db, job(id, PLENTY), &Control::default(), &reasoning).await.result.unwrap();
+    let caps: Vec<(bool, Value)> =
+        m.requests().iter().map(|r| (is_extract(r), r.body["max_output_tokens"].clone())).collect();
+    assert_eq!(caps, [(true, json!(8000)), (false, json!(6000))]);
+    // A model without reasoning keeps the smaller caps.
+    let m2 = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) { extraction(&[CLAIM_1]) } else { claim_reply(&verdict("unverified", &[]), &[]) }
+    }))
+    .await;
+    let (db, id) = seed();
+    run(&m2, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap();
+    let caps: Vec<Value> = m2.requests().iter().map(|r| r.body["max_output_tokens"].clone()).collect();
+    assert_eq!(caps, [json!(4000), json!(1500)]);
+}
+
 /// The app runs a check on a spawned task.
 #[allow(dead_code)]
 fn run_is_send(job: FactCheckJob, c: &Client, s: &Sources, cat: &Catalog, db: Arc<Mutex<Store>>, ctl: &Control) {

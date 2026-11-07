@@ -22,6 +22,10 @@ pub const DEFAULT_FACT_CHECK_LIMIT: Micros = 1_000_000;
 
 pub const EXTRACT_MAX_OUTPUT: u32 = 4000;
 pub const CLAIM_MAX_OUTPUT: u32 = 1500;
+/// Output caps for a model that thinks before answering: its thinking
+/// counts against the cap, so the reply needs more room.
+pub const EXTRACT_MAX_OUTPUT_REASONING: u32 = 8000;
+pub const CLAIM_MAX_OUTPUT_REASONING: u32 = 6000;
 pub const SEARCHES_PER_CLAIM: u32 = 3;
 pub const SEARCH_TOKENS_EXPECTED: u64 = 4000;
 pub const SEARCH_TOKENS_CONSERVATIVE: u64 = 12000;
@@ -39,7 +43,27 @@ pub struct FactCheckEstimate {
     pub tokens_conservative: u64,
 }
 
+/// Output token caps for the extraction and for each claim call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCaps {
+    pub extract: u32,
+    pub claim: u32,
+}
+
+impl OutputCaps {
+    /// The bigger caps when the model bills reasoning tokens as output.
+    pub fn for_price(price: Option<&Price>) -> Self {
+        if price.is_some_and(|p| p.reasoning) {
+            OutputCaps { extract: EXTRACT_MAX_OUTPUT_REASONING, claim: CLAIM_MAX_OUTPUT_REASONING }
+        } else {
+            OutputCaps { extract: EXTRACT_MAX_OUTPUT, claim: CLAIM_MAX_OUTPUT }
+        }
+    }
+}
+
 pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate {
+    let caps = OutputCaps::for_price(price);
+    let (extract_max, claim_max) = (u64::from(caps.extract), u64::from(caps.claim));
     let claims = MAX_CLAIMS as u32;
     let extract_in = approx_tokens(article_text) + EXTRACT_PROMPT_TOKENS;
     let searches_expected = claims;
@@ -48,8 +72,8 @@ pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate 
     let article = approx_tokens(article_text);
     let claim_in_expected = article + claim_in_tokens(1, SEARCH_TOKENS_EXPECTED);
     let claim_in_conservative = article + claim_in_tokens(SEARCHES_PER_CLAIM, SEARCH_TOKENS_CONSERVATIVE);
-    let extract_out_expected = (EXTRACT_MAX_OUTPUT / 2) as u64;
-    let claim_out_expected = (CLAIM_MAX_OUTPUT / 3) as u64;
+    let extract_out_expected = extract_max / 2;
+    let claim_out_expected = claim_max / 3;
     // Each call is its own request, so long-context rates apply per call.
     let cost = |extract_out: u64, claim_in: u64, claim_out: u64, searches: u32| {
         let p = price?;
@@ -58,17 +82,10 @@ pub fn estimate(article_text: &str, price: Option<&Price>) -> FactCheckEstimate 
     };
     FactCheckEstimate {
         expected: cost(extract_out_expected, claim_in_expected, claim_out_expected, searches_expected),
-        conservative: cost(
-            EXTRACT_MAX_OUTPUT as u64,
-            claim_in_conservative,
-            CLAIM_MAX_OUTPUT as u64,
-            searches_conservative,
-        ),
+        conservative: cost(extract_max, claim_in_conservative, claim_max, searches_conservative),
         searches_expected,
         searches_conservative,
-        tokens_conservative: extract_in
-            + EXTRACT_MAX_OUTPUT as u64
-            + (claim_in_conservative + CLAIM_MAX_OUTPUT as u64) * claims as u64,
+        tokens_conservative: extract_in + extract_max + (claim_in_conservative + claim_max) * claims as u64,
     }
 }
 
@@ -427,6 +444,21 @@ mod tests {
         let expected = call(1_000, 4_000) + 8 * call(38_500, 1_500) + p.search_cost(24).unwrap();
         assert_eq!(e.conservative, Some(expected));
         assert_eq!(e.conservative, Some(581_000));
+    }
+
+    #[test]
+    fn estimate_with_reasoning_price_uses_bigger_caps() {
+        let json = r#"{"entries":[{"provider":"anthropic","model":"m","input":1,"output":2,"web_search_per_1k":10,
+            "reasoning":true,"source":"s"}]}"#;
+        let p = Catalog::from_json(json).unwrap().entries.remove(0);
+        let e = estimate("", Some(&p));
+        let call = |input, output| p.cost(&Usage { input, output, ..Default::default() }, false).unwrap();
+        // Extraction may write 8000 tokens and each claim 6000, thinking included.
+        assert_eq!(e.conservative, Some(call(1_000, 8_000) + 8 * call(38_500, 6_000) + p.search_cost(24).unwrap()));
+        assert_eq!(e.conservative, Some(661_000));
+        assert_eq!(e.expected, Some(call(1_000, 4_000) + 8 * call(6_500, 2_000) + p.search_cost(8).unwrap()));
+        assert_eq!(e.expected, Some(173_000));
+        assert_eq!(e.tokens_conservative, 365_000);
     }
 
     #[test]

@@ -12,8 +12,7 @@ mod run;
 
 use juttusihti_core::ArticleId;
 use juttusihti_core::factcheck::{
-    CLAIM_MAX_OUTPUT, CitedSource, EXTRACT_MAX_OUTPUT, Guideline, GuidelineCheck, GuidelineStatus, MAX_CLAIMS, Verdict,
-    bound_text,
+    CitedSource, Guideline, GuidelineCheck, GuidelineStatus, MAX_CLAIMS, Verdict, bound_text,
 };
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
@@ -119,14 +118,14 @@ fn article_json(a: &ArticleForCheck) -> Value {
     json!({"title": a.title, "text": a.text})
 }
 
-pub fn extract_request(model: &str, a: &ArticleForCheck) -> Request {
+pub fn extract_request(model: &str, a: &ArticleForCheck, max_output_tokens: u32) -> Request {
     Request {
         model: model.into(),
         system: EXTRACT_SYSTEM.into(),
         user: format!("{EXTRACT_TASK}\n\n<data>\n{}\n</data>", data_json(&json!({"article": article_json(a)}))),
         schema_name: "fact_check_claims".into(),
         schema: extract_schema(),
-        max_output_tokens: EXTRACT_MAX_OUTPUT,
+        max_output_tokens,
         reasoning_effort: None,
         web_search: None,
     }
@@ -256,6 +255,8 @@ fn claim_schema() -> Value {
     )
 }
 
+// One argument per part of the prompt; bundling them would only rename the list.
+#[allow(clippy::too_many_arguments)]
 pub fn claim_request(
     model: &str,
     a: &ArticleForCheck,
@@ -264,6 +265,7 @@ pub fn claim_request(
     published: &[PublishedCheck],
     wiki: &[WikiPage],
     search: Option<WebSearch>,
+    max_output_tokens: u32,
 ) -> Request {
     let published: Vec<Value> = published
         .iter()
@@ -289,7 +291,7 @@ pub fn claim_request(
         user: format!("{CLAIM_TASK}\n\n<data>\n{}\n</data>", data_json(&data)),
         schema_name: "fact_check_verdict".into(),
         schema: claim_schema(),
-        max_output_tokens: CLAIM_MAX_OUTPUT,
+        max_output_tokens,
         reasoning_effort: None,
         web_search: search,
     }
@@ -423,7 +425,7 @@ mod tests {
             rating: "Väärä".into(),
             review_date: None,
         };
-        let r = claim_request("m", &a, "fi", &claim, &[pc], &[], Some(WebSearch { max_uses: 3 }));
+        let r = claim_request("m", &a, "fi", &claim, &[pc], &[], Some(WebSearch { max_uses: 3 }), 1500);
         assert_eq!(r.web_search, Some(WebSearch { max_uses: 3 }));
         assert_eq!(r.schema_name, "fact_check_verdict");
         let block = r.user.split("<data>\n").nth(1).unwrap().split("\n</data>").next().unwrap();
@@ -432,7 +434,7 @@ mod tests {
         assert_eq!(data["published_fact_checks"][0]["rating"], "Väärä");
         assert_eq!(r.user.matches("</data>").count(), 1, "article text cannot close the block");
         assert!(r.system.contains("\"verdict\""));
-        let ex = extract_request("m", &a);
+        let ex = extract_request("m", &a, 4000);
         assert_eq!(ex.schema_name, "fact_check_claims");
         assert_eq!(ex.web_search, None);
     }
@@ -477,8 +479,8 @@ mod tests {
     fn requests_use_provider_default_reasoning_and_untrusted_reminder() {
         let a = article("T", "x");
         let c = ExtractedClaim { quote: "q".into(), query: "q".into() };
-        let e = extract_request("m", &a);
-        let r = claim_request("m", &a, "en", &c, &[], &[], None);
+        let e = extract_request("m", &a, 4000);
+        let r = claim_request("m", &a, "en", &c, &[], &[], None, 1500);
         assert_eq!((e.reasoning_effort, r.reasoning_effort), (None, None));
         assert!(e.user.contains("untrusted data") && r.user.contains("untrusted data"));
         assert!(r.user.contains("at most 3 web searches"));

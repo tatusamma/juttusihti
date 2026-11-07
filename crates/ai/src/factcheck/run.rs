@@ -9,8 +9,8 @@ use futures_util::StreamExt;
 use juttusihti_core::budget::{Guard, Limits, Refusal, Reservation, Totals};
 use juttusihti_core::estimate::approx_tokens;
 use juttusihti_core::factcheck::{
-    ClaimResult, FACT_CHECK_PROMPT_VERSION, FactCheck, Gathered, SEARCH_TOKENS_CONSERVATIVE, SEARCHES_PER_CLAIM,
-    Source, SourceKind, Verdict, bound_text, judge_sources,
+    ClaimResult, FACT_CHECK_PROMPT_VERSION, FactCheck, Gathered, OutputCaps, SEARCH_TOKENS_CONSERVATIVE,
+    SEARCHES_PER_CLAIM, Source, SourceKind, Verdict, bound_text, judge_sources,
 };
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Usage};
 use juttusihti_core::store::Store;
@@ -92,6 +92,7 @@ pub async fn run_fact_check(
         sources,
         db: &db,
         control,
+        caps: OutputCaps::for_price(Some(&price)),
         price,
         guard: Mutex::new(Guard::new(limits, Totals::default())),
         cost: Mutex::new(Some(0)),
@@ -126,6 +127,8 @@ struct Run<'a> {
     sources: &'a Sources,
     db: &'a Mutex<Store>,
     control: &'a Control,
+    /// Bigger for a model whose thinking counts against the cap.
+    caps: OutputCaps,
     price: Price,
     guard: Mutex<Guard>,
     /// Sum of settled costs; `None` once any cost is unknown.
@@ -261,7 +264,7 @@ impl Run<'_> {
     /// the output is unusable.
     async fn extract(&self) -> Result<Extraction, FactCheckError> {
         let article = &self.job.article;
-        let req = extract_request(&self.job.model, article);
+        let req = extract_request(&self.job.model, article, self.caps.extract);
         for _ in 0..2 {
             self.cancelled()?;
             let held = self.reserve(&req, 0, 0).map_err(|r| {
@@ -350,7 +353,7 @@ impl Run<'_> {
         searching: bool,
     ) -> Request {
         let search = searching.then_some(WebSearch { max_uses: SEARCHES_PER_CLAIM });
-        claim_request(&self.job.model, &self.job.article, lang, claim, published, wiki, search)
+        claim_request(&self.job.model, &self.job.article, lang, claim, published, wiki, search, self.caps.claim)
     }
 
     async fn check_claim(
