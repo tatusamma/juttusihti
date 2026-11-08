@@ -6,7 +6,7 @@
 [package]
 name = "juttusihti-browser"
 description = "Headless Servo helper that loads one article in a throwaway profile and extracts its text"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 # Servo 0.7 needs Rust 1.88; the main workspace stays at 1.85.
 rust-version = "1.88"

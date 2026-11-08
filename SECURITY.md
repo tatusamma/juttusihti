@@ -27,6 +27,8 @@ Untrusted inputs:
 - Map tiles.
 - Article web pages and their pictures, loaded by the full-article helper (Servo) only when the
   user presses "Read full article".
+- Fact check evidence: the provider's web search results, Wikipedia search replies and Google
+  Fact Check Tools replies, requested only after the user consents to a check.
 - CSV consumers (spreadsheets that open our exports).
 
 Valuables:
@@ -61,6 +63,9 @@ Valuables:
 | Path traversal | Cache paths are built from integers only; files are chosen through OS dialogs. | — |
 | Hostile article pages (full-article helper) | Servo runs in a separate helper process, one per click, killed after 60 s, so a crash or hang cannot take the app down. The helper writes exactly one JSON line to a private copy of stdout; anything a page prints goes to stderr. The app accepts the picture only at the path it asked for, and deletes files only inside its own cache folders. Only http(s) article and picture URLs are loaded, the picture input is capped at 8 MB and re-encoded to JPEG. Extracted text is plain text; no page HTML is ever rendered by the app. | `page_output_cannot_reach_stdout`, `hanging_page_times_out_and_profile_is_removed`, `hung_helper_is_killed_and_profile_removed`, `foreign_or_missing_picture_is_dropped`, `local_file_picture_is_never_read`, `non_web_scheme_picture_is_never_read`, `non_http_url_is_rejected_before_spawn`, `delete_guard_rejects_unsafe_paths` |
 | Tracking across full-article fetches | Every fetch gets a brand-new profile that is deleted afterwards (also after a crash or timeout; leftovers are cleared at startup). Service workers are refused. EasyList and EasyPrivacy block known trackers; the lists and consent rules ship with the app and are never downloaded at run time. Servo's own user agent is used unchanged. | `second_fetch_sees_no_state_from_first`, `service_worker_registration_is_refused`, `startup_sweep_removes_leftovers_and_orphans` |
+| Fact check: prompt injection and invented evidence | The article, search results, published fact checks and Wikipedia extracts go to the model as escaped JSON in a data block, marked as data, not instructions. Claim quotes must appear in the article; cited URLs must have been gathered in this run, be http(s) and not on the article's own site; Wikipedia (also behind a Gemini redirect) cannot decide a verdict alone. A verdict without such a source is downgraded to Unverified. All strings and lists are bounded; links open only on click. | `extraction_drops_invented_quotes`, `cited_urls_must_come_from_gathered_results`, `invented_only_sources_downgrade_to_unverified`, `wikipedia_found_by_search_cannot_decide_alone`, `a_wikipedia_page_behind_a_redirect_is_background_only` |
+| Fact check: Google key and lookups | The Google Fact Check Tools key is kept in the OS secret store and sent only to Google. Lookup errors are built without the request URL, which holds the key. Google and Wikipedia receive only a short search phrase per claim, never the article, with a generic Juttusihti User-Agent; replies are capped at 1 MB with no redirects. Without a key, nothing is sent to Google. | `errors_do_not_contain_the_key`, `no_key_sends_nothing`, `sends_generic_user_agent` |
+| Fact check: spending | Nothing is sent before the consent panel's `Check with <provider>`, which names every recipient and shows the estimate. Each check has its own limit; every call reserves its worst case first and later claims are marked Not checked when they no longer fit. Usage goes to the ledger. | `limit_marks_remaining_claims_not_checked`, `too_low_limit_stops_before_extraction`, `cancel_saves_nothing` |
 | Paywall bypass or paid clicks | Content a page hides, and parts its structured data marks as paid, are never read. Consent-or-pay walls get only the free "accept" choice; a priced choice is never clicked. | `hidden_and_paid_parts_are_never_read`, `priced_accept_choice_is_never_clicked`, `consent_or_pay_wall_is_accepted_for_free` |
 
 ### Accepted risks and follow-ups
@@ -80,9 +85,9 @@ Valuables:
    address.
 5. **Dependency advisories:** see the next section.
 
-### Dependency audit (`cargo audit`, RustSec database of 2026-11-07)
+### Dependency audit (`cargo audit`, RustSec database of 2026-11-08)
 
-**App workspace** (`Cargo.lock`, 653 crates): no vulnerabilities. `arrow` was updated to 60.1.0
+**App workspace** (`Cargo.lock`, 654 crates): no vulnerabilities. `arrow` was updated to 60.1.0
 for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays). Warnings, all from
 transitive dependencies:
 

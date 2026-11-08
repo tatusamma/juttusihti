@@ -9,26 +9,48 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
 ### Added
 
-- **Fact check**: press "Fact check" in the reader to have an AI check an article's factual
-  claims (up to 8). It searches the web with the provider's own search, looks up Wikipedia and,
-  with a Google Fact Check Tools key, published fact checks, then gives each claim a verdict:
-  Supported, Contradicted, Misleading, Unverified or Not checked (limit reached). It also checks
-  the article against four Finnish journalists' guidelines (JSN 15, 12, 21 and 16). Nothing is
-  sent until you press `Check with <provider>` in the panel that shows what goes where and the
-  limit. The result shows as a score above the article ("2 of 8 supported · 1 contradicted ·
-  5 unverified"); click it to see each claim. A note under the score reminds that the check was
-  made with AI and is a guide, not a guarantee. A red "!" in the article list marks articles with
-  contradicted or misleading claims. How it works in detail: [docs/fact-check.md](docs/fact-check.md).
-- **AI setup → Fact check**: the limit per check ($1.00 by default; claims that no longer fit are
-  marked Not checked, and on a ChatGPT plan the plan's own limits apply instead) and the optional
-  Google Fact Check Tools API key, kept in the system's secret store.
+- **Fact check**: when an article seems off, press "Fact check" in the reader (after "Read full
+  article") to have your AI check its factual claims. It picks up to 8 claims, searches the web
+  with the provider's own search, and looks up Wikipedia and, with an optional key, published
+  fact checks. Each claim gets a verdict: Supported, Contradicted, Misleading, Unverified or Not
+  checked (limit reached), with a short reason and source links.
+- **Verdicts need real evidence**: a verdict must rest on a source actually found during the
+  check. The article's own site and copies of the same story do not count, and Wikipedia is
+  background only; otherwise the claim stays Unverified.
+- **Journalists' guidelines**: the article is also checked against four points of the Finnish
+  journalists' guidelines (JSN 15 headline backed by text, 12 source criticism, 21 right to
+  reply, 16 hidden advertising).
+- **A score you can open**: the result shows as one line above the article, such as "Fact check:
+  3 of 5 supported · 1 misleading · 1 unverified"; click it to see each claim. A note under the
+  score reminds that the check was made with AI and is a helpful guide, not a guarantee. A red
+  "!" in the article list marks articles with contradicted or misleading claims.
+- **You stay in control**: nothing is sent until you press `Check with <provider>` in a panel that
+  shows the model, what goes where and the cost estimate. Each check has its own limit ($1.00 by
+  default, under AI setup → Fact check); claims that no longer fit are marked Not checked. On a
+  ChatGPT plan the plan's own limits apply, and all claims are checked at once.
+- **AI setup → Fact check**: the limit per check and an optional Google Fact Check Tools API key
+  (free from Google Cloud), kept in the system's secret store. If Google rejects the key, the
+  result says so.
+- Articles in any language can be checked; explanations are in English. How the check works in
+  detail is in [docs/fact-check.md](https://github.com/tero-k/juttusihti/blob/master/docs/fact-check.md).
 
 ### Changed
 
 - Full-article error messages now speak of the browser engine instead of a "browser helper", and
   a missing engine suggests reinstalling Juttusihti.
+
+### Known issues
+
+- Fact check has been tried against the real service only with OpenAI on a ChatGPT plan. OpenAI
+  with an API key, Anthropic and Gemini are covered by tests against local fake servers.
+- Fresh news is often Unverified: independent sources may not have reported it yet, and
+  published fact checks rarely exist for it.
+- A check of 8 claims takes about 20 to 40 seconds, and each claim's call uses roughly 10,000 to
+  27,000 input tokens, mostly search results added by the provider.
 
 ## [0.4.0] - 2026-11-07
 
@@ -188,7 +210,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tero-k/juttusihti/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tero-k/juttusihti/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tero-k/juttusihti/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/tero-k/juttusihti/compare/v0.2.0...v0.2.1
