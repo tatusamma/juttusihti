@@ -564,7 +564,9 @@ fn gathered(published: &[PublishedCheck], wiki: &[WikiPage], web: &[WebSource]) 
         });
     }
     for s in web {
-        let kind = if is_wikipedia(&s.url) { SourceKind::Wikipedia } else { SourceKind::Web };
+        // Gemini's URL is a redirect; its site tells where it really points.
+        let wikipedia = is_wikipedia(&s.url) || s.site.as_deref().is_some_and(is_wikipedia_host);
+        let kind = if wikipedia { SourceKind::Wikipedia } else { SourceKind::Web };
         g.add(Source {
             url: s.url.clone(),
             title: s.title.clone(),
@@ -578,10 +580,12 @@ fn gathered(published: &[PublishedCheck], wiki: &[WikiPage], web: &[WebSource]) 
 }
 
 fn is_wikipedia(raw: &str) -> bool {
-    url::Url::parse(raw.trim())
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| h == "wikipedia.org" || h.ends_with(".wikipedia.org"))
+    url::Url::parse(raw.trim()).ok().and_then(|u| u.host_str().map(is_wikipedia_host)).unwrap_or(false)
+}
+
+fn is_wikipedia_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    h == "wikipedia.org" || h.ends_with(".wikipedia.org")
 }
 
 /// A provider failure in words the user can act on.
@@ -618,5 +622,17 @@ mod tests {
         let (v, s) = judge_sources(Verdict::Supported, &cited, &g, None);
         assert_eq!(v, Verdict::Supported);
         assert_eq!((s[0].url.as_str(), s[0].site.as_deref()), (redirect, Some("yle.fi")));
+    }
+
+    #[test]
+    fn a_wikipedia_page_behind_a_redirect_is_background_only() {
+        let redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/w";
+        let site = Some("fi.wikipedia.org".to_string());
+        let web = [WebSource { url: redirect.into(), title: "fi.wikipedia.org".into(), site }];
+        let g = gathered(&[], &[], &web);
+        let cited = [CitedSource { url: redirect.into(), same_story: false }];
+        let (v, s) = judge_sources(Verdict::Supported, &cited, &g, None);
+        assert_eq!(s[0].kind, SourceKind::Wikipedia);
+        assert_eq!(v, Verdict::Unverified, "Wikipedia alone cannot decide a verdict");
     }
 }
