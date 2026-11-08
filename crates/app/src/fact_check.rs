@@ -294,7 +294,7 @@ impl State {
         } else if matches!(p.provider, Provider::Openai | Provider::Gemini) {
             col = col.push(small("Web searches can run slightly over the limit.".into()));
         }
-        col = col.push(style::note(format!("Limit {}", format_usd(p.limit))));
+        col = col.push(style::note(limit_line(p.billing, p.limit)));
         if let Err(problem) = &p.ready {
             col = col.push(text(problem).size(SIZE_SMALL).style(style::danger));
         }
@@ -398,6 +398,15 @@ async fn check(
 fn sends_line(provider: Provider, has_google: bool) -> String {
     let google = if has_google { ", its claims to Google Fact Check" } else { "" };
     format!("Sends the article to {provider}{google} and searches to Wikipedia.")
+}
+
+/// The panel's limit line. A plan check costs no money, so the money limit
+/// never applies there.
+fn limit_line(billing: Billing, limit: Micros) -> String {
+    match billing {
+        Billing::ChatGptPlan => "Your ChatGPT plan's usage limits apply.".into(),
+        Billing::ApiKey => format!("Limit {} per check", format_usd(limit)),
+    }
 }
 
 /// The cost range before sending.
@@ -649,6 +658,8 @@ mod tests {
         };
         assert_eq!(estimate_line(Billing::ApiKey, &e), "About $0.0200, at most about $0.1500");
         assert_eq!(estimate_line(Billing::ApiKey, &estimate("x", None)), "Cost unknown");
+        assert_eq!(limit_line(Billing::ApiKey, 1_000_000), "Limit $1.00 per check");
+        assert_eq!(limit_line(Billing::ChatGptPlan, 1_000_000), "Your ChatGPT plan's usage limits apply.");
     }
 
     fn result(verdicts: &[Verdict]) -> FactCheck {

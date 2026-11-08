@@ -368,6 +368,7 @@ impl State {
         if parse_limit(&self.fact_limit).is_none() && !self.fact_limit.is_empty() {
             col = col.push(style::note("Enter an amount above 0."));
         }
+        col = col.push(style::note(FACT_LIMIT_NOTE));
         col.push(style::heading("Google Fact Check Tools API key (optional)"))
             .push(style::note(
                 "Free from Google Cloud. Adds published fact checks (Faktabaari, AFP and others) and makes checks \
@@ -653,10 +654,29 @@ fn small_input<'a>(placeholder: &'a str, value: &'a str, on: fn(String) -> Msg) 
         .into()
 }
 
+/// Under the fact check limit: what the limit does when a check reaches it.
+const FACT_LIMIT_NOTE: &str = concat!(
+    "Each claim sets aside the most it could cost before it starts. If a check reaches the limit, ",
+    "the remaining claims are marked Not checked; raise the limit to check more. ",
+    "On a ChatGPT plan the plan's own usage limits apply instead.",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use juttusihti_core::store::Store;
+
+    #[test]
+    fn limit_note_explains_what_happens_at_the_limit() {
+        assert!(FACT_LIMIT_NOTE.starts_with(
+            "Each claim sets aside the most it could cost before it starts. If a check reaches the limit, the remaining"
+        ));
+        assert!(
+            FACT_LIMIT_NOTE.ends_with(
+                "raise the limit to check more. On a ChatGPT plan the plan's own usage limits apply instead."
+            )
+        );
+    }
 
     #[test]
     fn limit_input_parses_dollars() {

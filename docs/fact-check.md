@@ -86,7 +86,9 @@ local settings and whether a Google key is stored. It shows:
 - the estimate: "About $0.05, at most about $0.40", "On your ChatGPT plan", or "Cost unknown";
 - "Web searches can run slightly over the limit." for OpenAI and Gemini, or a note that the check
   runs without web search when the model's search price is unknown;
-- the per-check limit, and any setup problem (missing key, signed out) in red.
+- the limit, "Limit $1.00 per check" on an API key; on a ChatGPT plan, "Your ChatGPT plan's usage
+  limits apply." instead, since a plan check costs no money;
+- any setup problem (missing key, signed out) in red.
 
 `Check with <provider>` is the consent. It is disabled when credentials are missing, and on an API
 key also when the cost cannot be estimated.
@@ -448,7 +450,10 @@ newer schema.
 **AI setup → Fact check** ([`providers.rs`](../crates/app/src/providers.rs)):
 
 - **Limit per fact check (USD)**, default 1.00, stored in the settings table as
-  `fact_check_max_cost` in micro-dollars.
+  `fact_check_max_cost` in micro-dollars. A note under it explains: "Each claim sets aside the most
+  it could cost before it starts. If a check reaches the limit, the remaining claims are marked Not
+  checked; raise the limit to check more. On a ChatGPT plan the plan's own usage limits apply
+  instead."
 - **Google Fact Check Tools API key (optional)**: free from Google Cloud (enable the Fact Check
   Tools API). Stored in the secret store, with a remove button.
 
