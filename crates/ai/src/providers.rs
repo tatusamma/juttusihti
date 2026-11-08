@@ -64,7 +64,7 @@ fn gemini_request(req: &Request) -> Value {
 pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
     let (url, mut body) = completion_body(e, req);
     if let Some(search) = req.web_search {
-        add_search(e.provider, &mut body, search.max_uses);
+        add_search(e, &mut body, search.max_uses);
     }
     if e.provider == Provider::Openai
         && let Some(effort) = req.reasoning_effort
@@ -76,8 +76,8 @@ pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
 
 /// Adds the provider's web search tool fields to a request body.
 /// One place per provider for the tool shapes.
-fn add_search(provider: Provider, body: &mut Value, max_uses: u32) {
-    match provider {
+fn add_search(e: &Endpoint, body: &mut Value, max_uses: u32) {
+    match e.provider {
         Provider::Anthropic => {
             body["tools"] = json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}]);
             // Search citations cannot be combined with structured outputs.
@@ -87,7 +87,11 @@ fn add_search(provider: Provider, body: &mut Value, max_uses: u32) {
         }
         Provider::Openai => {
             body["tools"] = json!([{"type": "web_search"}]);
-            body["max_tool_calls"] = json!(max_uses);
+            // The ChatGPT plan backend rejects max_tool_calls; the run is
+            // charged to the plan there, so the cap is not needed for cost.
+            if !matches!(e.auth, Auth::ChatGpt(_)) {
+                body["max_tool_calls"] = json!(max_uses);
+            }
             body["include"] = json!(["web_search_call.action.sources"]);
         }
         Provider::Gemini => {
@@ -657,7 +661,8 @@ mod tests {
         let (_, b) = completion(&chatgpt, &search_req());
         assert_eq!(b["stream"], true);
         assert_eq!(b["tools"][0]["type"], "web_search");
-        assert_eq!(b["max_tool_calls"], 3);
+        // The ChatGPT backend rejects max_tool_calls ("Unsupported parameter").
+        assert!(b.get("max_tool_calls").is_none());
         assert_eq!(b["include"][0], "web_search_call.action.sources");
         let (_, b) = completion(&ep(Provider::Gemini), &search_req());
         assert_eq!(b["tools"][0], json!({"google_search": {}}));
@@ -755,6 +760,7 @@ mod tests {
         assert!(crate::is_tool_unsupported(&AiError::Unsupported("x")));
         assert!(!crate::is_tool_unsupported(&st(400, "bad schema")));
         assert!(!crate::is_tool_unsupported(&st(400, "Unsupported parameter: reasoning.effort")));
+        assert!(!crate::is_tool_unsupported(&st(400, "{\"detail\":\"Unsupported parameter: max_tool_calls\"}")));
         assert!(!crate::is_tool_unsupported(&st(400, "max_tokens must be at most 8192")));
         assert!(!crate::is_tool_unsupported(&st(500, "tool exploded")));
     }

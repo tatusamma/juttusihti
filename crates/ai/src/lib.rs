@@ -132,6 +132,11 @@ pub fn is_tool_unsupported(e: &AiError) -> bool {
         AiError::Unsupported(_) => true,
         AiError::Status { status: 400 | 404, message } => {
             let m = message.to_ascii_lowercase();
+            // A rejected request field (e.g. max_tool_calls) is a request
+            // shape bug, not a model that cannot search; do not hide it.
+            if m.contains("unsupported parameter") {
+                return false;
+            }
             ["tool", "web_search", "google_search"].iter().any(|k| m.contains(k))
         }
         _ => false,
