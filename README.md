@@ -221,9 +221,11 @@ The article is also checked against the Finnish journalists' guidelines
 ([Journalistin ohjeet](https://jsn.fi/journalistin-ohjeet/)): JSN 15 (the headline is backed by
 the text), 12 (source criticism), 21 (right to reply) and 16 (hidden advertising).
 
-The result card appears above the article with the note "AI-assisted check. Verify the sources
-before relying on it." "Reduced check: web search was not available." means the model or plan
-could not search the web. A red **!** in the article list marks articles whose check found
+The result appears above the article as a score, such as "Fact check: 2 of 8 supported ·
+1 contradicted · 5 unverified"; click it to see each claim with its verdict, reason and sources,
+and the guideline checks. Under the score a short note reminds that the check was made with AI and
+is a helpful guide rather than a guarantee. "Reduced check: web search was not available." means
+the model or plan could not search the web. A red **!** in the article list marks articles whose check found
 contradicted or misleading claims.
 
 **AI setup → Fact check** sets the limit per check ($1.00 by default) and the optional Google
@@ -231,6 +233,9 @@ Fact Check Tools API key (free from Google Cloud), kept in the system's secret s
 searches can run slightly over the limit with OpenAI and Gemini. Any article language works;
 explanations are in English. Only the latest check per article is kept, and if credit or sign-in
 runs out the check stops without replacing an earlier result.
+
+How the check works in detail (prompts, evidence rules, cost limits, storage and code) is in
+[docs/fact-check.md](docs/fact-check.md).
 
 ### Searching
 
