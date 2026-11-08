@@ -33,7 +33,7 @@ const SEARCH: [(&str, &str); 7] = [
 ];
 
 /// Sections of the guide, as (heading, paragraphs).
-const SECTIONS: [(&str, &[&str]); 10] = [
+const SECTIONS: [(&str, &[&str]); 11] = [
     (
         "Getting started",
         &[
@@ -71,6 +71,17 @@ const SECTIONS: [(&str, &[&str]); 10] = [
             "Results arrive while the run goes on. Rewritten headlines show an AI tag with the original underneath. Runs can be paused, resumed and cancelled, and the spending limits from AI setup are never exceeded.",
             "With an OpenAI API key, clickbait headlines are checked first: a fast, cheap classifier (OpenAI's Decisions API) rates how likely each headline is clickbait, and only those at or above the threshold (70% by default) are sent for a rewrite. Ratings are remembered, so a new threshold costs nothing. Turn the check off or change the threshold on AI setup. The check needs API credit, so on a ChatGPT plan you can choose: \"Pay with\" on AI setup offers the plan alone (headlines are rewritten in one step without the check), or the plan with API credit for the check only, which needs both the sign-in and a key. With Claude or Gemini, headlines are rewritten in one step without the check.",
             "An API key is billed to the provider account behind it, which needs credit; a ChatGPT plan is not. If the account runs out of credit, the run pauses and says so. Add credit on the provider's billing page, then press Resume under Custom analysis: finished work is kept and never paid for twice.",
+        ],
+    ),
+    (
+        "Fact check",
+        &[
+            "Press \"Fact check\" in the reader, after \"Read full article\", to have an AI check the factual claims of an article. It needs the full text: until the article is fetched (or the feed gave at least 300 characters of full content) the button is disabled, and its tooltip says \"Load the full article first\". Once a result exists the button says \"Check again\".",
+            "The button only opens a panel. It shows the provider and its Quality model, what will be sent where, an estimate and the limit for one check. Nothing is sent until you press \"Check with <provider>\". The article goes to your AI provider; the claims go to Google Fact Check only if you added a key, and searches go to Wikipedia.",
+            "The AI picks up to 8 checkable factual claims (opinions are skipped), searches the web with the provider's own search (up to 3 searches per claim), looks up Wikipedia and, with a key, published fact checks. Each claim gets a verdict: Supported, Contradicted, Misleading, Unverified or Not checked (limit reached). Sources from the article's own site or copies of the same story do not count, Wikipedia is only background, and a verdict needs a real source found during the check, otherwise it becomes Unverified. Published fact checks show the publisher and the rating as published.",
+            "It also checks the article against the Finnish journalists' guidelines (Journalistin ohjeet, https://jsn.fi/journalistin-ohjeet/): JSN 15 (the headline is backed by the text), 12 (source criticism), 21 (right to reply) and 16 (hidden advertising).",
+            "The result appears above the article as a score, such as \"Fact check: 2 of 8 supported · 1 contradicted · 5 unverified\". Click it to see each claim with its verdict, reason and sources and the guideline checks. Under the score is a reminder that the check was made with AI and is a helpful guide rather than a guarantee, so look at the sources before relying on it. \"Reduced check: web search was not available.\" means the model or plan could not search the web, so the verdicts rest on the article, Wikipedia and published fact checks only. A red ! in the article list marks articles with contradicted or misleading claims.",
+            "AI setup → Fact check sets the limit per check ($1.00 by default; each claim sets aside the most it could cost before it starts, and if a check reaches the limit the remaining claims are marked Not checked, so raise the limit to check more; on a ChatGPT plan the plan's own usage limits apply instead) and the optional Google Fact Check Tools API key (free from Google Cloud; if Google rejects it, the result card says so), kept in the system's secret store. Web searches can run slightly over the limit with OpenAI and Gemini. Articles in any language work; explanations are in English. Only the latest check per article is kept. If credit or sign-in runs out, the check stops and an earlier result is kept.",
         ],
     ),
     (

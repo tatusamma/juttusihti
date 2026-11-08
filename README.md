@@ -31,6 +31,9 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Clickbait headlines rewritten** from the article text, shown with an AI tag and the
   original underneath. With an OpenAI API key, a cheap clickbait check picks out the headlines
   worth rewriting first.
+- **Fact check**: one button in the reader has an AI check an article's factual claims against
+  web sources, Wikipedia and published fact checks, and against the Finnish journalists'
+  guidelines. It starts only when you press it, after showing what is sent where and the limit.
 - **Review**: everything AI produces is a suggestion until you confirm it.
 - **Reports**: volume per source, topics, labels, co-occurring entities, relevance and AI cost,
   with CSV export.
@@ -141,6 +144,7 @@ offline.
   them.
 - **Read full article** (shortcut **a**) fetches the whole article when the feed only has a
   teaser; see [Full articles](#full-articles).
+- **Fact check** has an AI check the article's claims; see [Fact check](#fact-check).
 
 ### Full articles
 
@@ -188,6 +192,55 @@ Settings → **Full articles**:
   fall back to their feed teaser first; they can be fetched again. Saved articles are never
   removed to make room.
 - **Clear cache now** removes all fetched text and pictures.
+
+### Fact check
+
+Press **Fact check** in the reader, after **Read full article**, to have an AI check the factual
+claims of an article. It needs the full text: until the article is fetched (or the feed gave at
+least 300 characters of full content) the button is disabled, and its tooltip says "Load the full
+article first". Once there is a result it says **Check again**.
+
+The button only opens a panel with the provider and its Quality model, what will be sent where,
+an estimate and the limit for one check. Nothing is sent until you press
+`Check with <provider>`:
+
+- the article goes to your AI provider;
+- the claims go to [Google Fact Check Tools](https://developers.google.com/fact-check/tools/api),
+  only if you added a key;
+- searches go to Wikipedia.
+
+The AI picks up to 8 checkable factual claims (opinions are skipped), searches the web with the
+provider's own search (up to 3 searches per claim), looks up Wikipedia and, with a key,
+published fact checks. Each claim gets a verdict: **Supported**, **Contradicted**,
+**Misleading**, **Unverified** or **Not checked (limit reached)**. Sources from the article's own
+site or copies of the same story do not count, Wikipedia is only background, and a verdict needs
+a real source found during the check, otherwise it becomes Unverified. Published fact checks
+show the publisher and the rating as published.
+
+The article is also checked against the Finnish journalists' guidelines
+([Journalistin ohjeet](https://jsn.fi/journalistin-ohjeet/)): JSN 15 (the headline is backed by
+the text), 12 (source criticism), 21 (right to reply) and 16 (hidden advertising).
+
+The result appears above the article as a score, such as "Fact check: 2 of 8 supported ·
+1 contradicted · 5 unverified"; click it to see each claim with its verdict, reason and sources,
+and the guideline checks. Under the score a short note reminds that the check was made with AI and
+is a helpful guide rather than a guarantee. "Reduced check: web search was not available." means
+the model or plan could not search the web. A red **!** in the article list marks articles whose check found
+contradicted or misleading claims.
+
+![A fact check result, expanded (fictional example)](docs/screenshots/fact-check.png)
+
+**AI setup → Fact check** sets the limit per check ($1.00 by default) and the optional Google
+Fact Check Tools API key (free from Google Cloud), kept in the system's secret store. Each claim
+sets aside the most it could cost before it starts; if a check reaches the limit, the remaining
+claims are marked Not checked, so raise the limit to check more. On a ChatGPT plan the limit does
+not apply (a plan check costs no money) and the plan's own usage limits apply instead. Web
+searches can run slightly over the limit with OpenAI and Gemini. Any article language works;
+explanations are in English. Only the latest check per article is kept, and if credit or sign-in
+runs out the check stops without replacing an earlier result.
+
+How the check works in detail (prompts, evidence rules, cost limits, storage and code) is in
+[docs/fact-check.md](docs/fact-check.md).
 
 ### Searching
 

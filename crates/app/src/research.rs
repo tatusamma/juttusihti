@@ -1083,10 +1083,7 @@ pub fn run_session(
 ) -> impl iced::futures::Stream<Item = RunEvent> {
     iced::stream::channel(64, async move |mut out: iced::futures::channel::mpsc::Sender<RunEvent>| {
         use iced::futures::SinkExt;
-        let endpoint = match billing {
-            Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
-            Billing::ApiKey => api_key_endpoint(provider).await,
-        };
+        let endpoint = endpoint(provider, billing).await;
         let client = |e: Result<juttusihti_ai::Endpoint, String>| {
             e.and_then(|e| {
                 juttusihti_ai::Client::new(e, juttusihti_ai::RetryPolicy::default()).map_err(|e| e.to_string())
@@ -1119,6 +1116,15 @@ pub fn run_session(
         };
         let _ = out.send(RunEvent::Finished(result)).await;
     })
+}
+
+/// The endpoint for a run billed with `billing`: the shared ChatGPT plan
+/// session, or the provider's stored API key.
+pub(crate) async fn endpoint(provider: Provider, billing: Billing) -> Result<juttusihti_ai::Endpoint, String> {
+    match billing {
+        Billing::ChatGptPlan => crate::plan::session().await.map(juttusihti_ai::Endpoint::chatgpt),
+        Billing::ApiKey => api_key_endpoint(provider).await,
+    }
 }
 
 /// The endpoint for a provider's stored API key.

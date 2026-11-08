@@ -9,6 +9,7 @@ pub mod budget;
 pub mod db;
 pub mod discovery;
 pub mod estimate;
+pub mod factcheck;
 pub mod feed;
 pub mod fulltext;
 pub mod graph;

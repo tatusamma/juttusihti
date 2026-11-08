@@ -8,6 +8,7 @@ mod ai_setup;
 mod app;
 mod crash_log;
 mod db;
+mod fact_check;
 mod feeds_menu;
 mod format;
 mod full_article;

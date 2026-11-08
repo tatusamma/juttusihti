@@ -302,6 +302,11 @@ pub fn accent(theme: &Theme) -> text::Style {
     colored(tokens(theme).accent)
 }
 
+/// Success-coloured text (a supported claim).
+pub fn success(theme: &Theme) -> text::Style {
+    colored(tokens(theme).success)
+}
+
 /// Error text.
 pub fn danger(theme: &Theme) -> text::Style {
     colored(tokens(theme).danger)

@@ -9,9 +9,11 @@
 
 pub mod chatgpt;
 pub mod decisions;
+pub mod factcheck;
 pub mod prompts;
 mod providers;
 pub mod runner;
+pub mod sources;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +23,10 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 pub use runner::{Approval, Control, Progress, RunError, RunSummary, Runner};
+
+/// What to tell the user when the OpenAI API account is empty; callers add
+/// what to do next.
+pub(crate) const NO_CREDIT: &str = "Your OpenAI API account has no credit left. Add credit at https://platform.openai.com/settings/organization/billing/";
 
 /// Upper bound for a provider response body.
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -92,6 +98,58 @@ pub struct Request {
     /// extraction fast and cheap). Dropped automatically if the model
     /// rejects it; ignored by the other providers.
     pub reasoning_effort: Option<&'static str>,
+    /// Lets the model search the web (the provider's own search tool).
+    pub web_search: Option<WebSearch>,
+}
+
+/// Provider web search for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebSearch {
+    /// Cap on searches where the provider supports one (Gemini has none).
+    pub max_uses: u32,
+    /// Ask for less search result text in the model's context (OpenAI
+    /// `search_context_size: "low"`), which is most of a search call's tokens.
+    pub low_context: bool,
+}
+
+/// What a reply says about the web searches the provider ran.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WebEvidence {
+    pub searches: u32,
+    /// Distinct http(s) sources, at most 50.
+    pub sources: Vec<WebSource>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebSource {
+    pub url: String,
+    pub title: String,
+    /// The source's domain when the URL is a redirect (Gemini).
+    pub site: Option<String>,
+}
+
+/// Whether a failed request rejected the `search_context_size` search
+/// option, so the caller may retry with the default search context.
+pub fn is_context_size_rejected(e: &AiError) -> bool {
+    matches!(e, AiError::Status { status: 400, message } if message.contains("search_context_size"))
+}
+
+/// Whether a failed request means the model or credential cannot use the
+/// web search tool, so the caller may retry without it.
+pub fn is_tool_unsupported(e: &AiError) -> bool {
+    match e {
+        AiError::Unsupported(_) => true,
+        AiError::Status { status: 400 | 404, message } => {
+            let m = message.to_ascii_lowercase();
+            // A rejected request field (e.g. max_tool_calls) is a request
+            // shape bug, not a model that cannot search; do not hide it.
+            if m.contains("unsupported parameter") {
+                return false;
+            }
+            ["tool", "web_search", "google_search"].iter().any(|k| m.contains(k))
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +171,8 @@ pub struct Reply {
     /// Billing categories; `output` includes reasoning tokens.
     pub usage: Usage,
     pub reasoning_tokens: u64,
+    /// Empty for requests without search.
+    pub web: WebEvidence,
 }
 
 #[derive(Debug, thiserror::Error)]

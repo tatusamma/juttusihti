@@ -71,10 +71,13 @@ impl Control {
     pub fn reset(&self) {
         self.0.0.store(RUNNING, Ordering::SeqCst);
     }
+    pub fn is_cancelled(&self) -> bool {
+        self.state() == CANCEL
+    }
     fn state(&self) -> u8 {
         self.0.0.load(Ordering::SeqCst)
     }
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         loop {
             let notified = self.0.1.notified();
             if self.state() == CANCEL {
@@ -162,11 +165,7 @@ struct InFlight {
 
 /// A run stopped by an empty OpenAI API account; it resumes after a top-up.
 fn no_credit() -> Stop {
-    Stop::Paused(
-        "Your OpenAI API account has no credit left. Add credit at \
-            https://platform.openai.com/settings/organization/billing/, then resume."
-            .into(),
-    )
+    Stop::Paused(format!("{}, then resume.", crate::NO_CREDIT))
 }
 
 enum Stop {
