@@ -107,6 +107,9 @@ pub struct Request {
 pub struct WebSearch {
     /// Cap on searches where the provider supports one (Gemini has none).
     pub max_uses: u32,
+    /// Ask for less search result text in the model's context (OpenAI
+    /// `search_context_size: "low"`), which is most of a search call's tokens.
+    pub low_context: bool,
 }
 
 /// What a reply says about the web searches the provider ran.
@@ -123,6 +126,12 @@ pub struct WebSource {
     pub title: String,
     /// The source's domain when the URL is a redirect (Gemini).
     pub site: Option<String>,
+}
+
+/// Whether a failed request rejected the `search_context_size` search
+/// option, so the caller may retry with the default search context.
+pub fn is_context_size_rejected(e: &AiError) -> bool {
+    matches!(e, AiError::Status { status: 400, message } if message.contains("search_context_size"))
 }
 
 /// Whether a failed request means the model or credential cannot use the

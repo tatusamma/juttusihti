@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use juttusihti_core::budget::{Guard, Limits, Refusal, Reservation, Totals};
 use juttusihti_core::estimate::approx_tokens;
 use juttusihti_core::factcheck::{
-    ClaimResult, FACT_CHECK_PROMPT_VERSION, FactCheck, Gathered, OutputCaps, SEARCH_TOKENS_CONSERVATIVE,
+    ClaimResult, FACT_CHECK_PROMPT_VERSION, FactCheck, Gathered, MAX_CLAIMS, OutputCaps, SEARCH_TOKENS_CONSERVATIVE,
     SEARCHES_PER_CLAIM, Source, SourceKind, Verdict, bound_text, judge_sources,
 };
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Usage};
@@ -20,10 +20,24 @@ use super::{
     ArticleForCheck, ExtractedClaim, Extraction, claim_request, extract_request, parse_extraction, parse_judgement,
 };
 use crate::sources::{PublishedCheck, Sources, WikiPage};
-use crate::{AiError, Client, Control, Outcome, Reply, Request, WebSearch, WebSource, is_tool_unsupported};
+use crate::{
+    AiError, Client, Control, Outcome, Reply, Request, WebSearch, WebSource, is_context_size_rejected,
+    is_tool_unsupported,
+};
 
-/// Claims checked at the same time.
+/// Claims checked at the same time on an API key. Each in-flight claim holds
+/// a worst-case reservation, so fewer at once leaves room for more claims
+/// within the limit once earlier ones settle at their real cost.
 const CLAIMS_IN_FLIGHT: usize = 3;
+
+/// Claims checked at the same time. A ChatGPT plan has no money limit to
+/// keep, so every claim starts at once for speed.
+fn claims_in_flight(billing: Billing) -> usize {
+    match billing {
+        Billing::ChatGptPlan => MAX_CLAIMS,
+        Billing::ApiKey => CLAIMS_IN_FLIGHT,
+    }
+}
 /// Published fact checks passed to the model per claim.
 const MAX_PUBLISHED: usize = 5;
 /// Room in a claim's reservation for the published fact checks and
@@ -99,6 +113,7 @@ pub async fn run_fact_check(
         guard: Mutex::new(Guard::new(limits, Totals::default())),
         cost: Mutex::new(Some(0)),
         web_search: AtomicBool::new(search_priced),
+        low_context: AtomicBool::new(true),
         limit_reached: AtomicBool::new(false),
         stopped: Mutex::new(None),
     };
@@ -141,6 +156,9 @@ struct Run<'a> {
     cost: Mutex<Option<Micros>>,
     /// Cleared for this and all later claims once the model rejects the search tool.
     web_search: AtomicBool,
+    /// Cleared for this and all later claims once the provider rejects the
+    /// low search context option.
+    low_context: AtomicBool,
     /// Set when a claim no longer fit the limit; later claims are not started.
     limit_reached: AtomicBool,
     /// Why the run stops: an account-level provider error on a claim. Later
@@ -315,7 +333,7 @@ impl Run<'_> {
                 let start = self.start_claim(lang, claim);
                 async move { (i, self.check_claim(lang, claim, start).await) }
             })
-            .buffer_unordered(CLAIMS_IN_FLIGHT);
+            .buffer_unordered(claims_in_flight(self.client.billing()));
         let mut done = Vec::with_capacity(total);
         while let Some(result) = checks.next().await {
             done.push(result);
@@ -358,7 +376,8 @@ impl Run<'_> {
         wiki: &[WikiPage],
         searching: bool,
     ) -> Request {
-        let search = searching.then_some(WebSearch { max_uses: SEARCHES_PER_CLAIM });
+        let low_context = self.low_context.load(Ordering::SeqCst);
+        let search = searching.then_some(WebSearch { max_uses: SEARCHES_PER_CLAIM, low_context });
         claim_request(&self.job.model, &self.job.article, lang, claim, published, wiki, search, self.caps.claim)
     }
 
@@ -401,6 +420,11 @@ impl Run<'_> {
                 }
             };
             match self.finish(h, "fact_check_claim", self.send(&req).await)? {
+                // Checked first: "Unknown parameter: 'tools[0]...'" also names a tool.
+                Err(e) if searching && req_low_context(&req) && is_context_size_rejected(&e) => {
+                    tracing::info!(error = %e, "low search context not accepted; using the default");
+                    self.low_context.store(false, Ordering::SeqCst);
+                }
                 Err(e) if searching && is_tool_unsupported(&e) => {
                     tracing::info!(error = %e, "the model cannot search the web; checking without search");
                     self.web_search.store(false, Ordering::SeqCst);
@@ -513,6 +537,10 @@ fn non_empty(s: &str) -> Option<String> {
 
 /// Everything a claim's verdict may cite. Published checks come first so
 /// their publisher and rating win when a search finds the same page.
+fn req_low_context(req: &Request) -> bool {
+    req.web_search.is_some_and(|s| s.low_context)
+}
+
 fn gathered(published: &[PublishedCheck], wiki: &[WikiPage], web: &[WebSource]) -> Gathered {
     let mut g = Gathered::new();
     for p in published {
@@ -574,6 +602,12 @@ mod tests {
     use juttusihti_core::factcheck::{CitedSource, Verdict, judge_sources};
 
     use super::*;
+
+    #[test]
+    fn a_chatgpt_plan_checks_every_claim_at_once() {
+        assert_eq!(claims_in_flight(Billing::ChatGptPlan), juttusihti_core::factcheck::MAX_CLAIMS);
+        assert_eq!(claims_in_flight(Billing::ApiKey), 3, "an API key keeps room to fit more claims in the limit");
+    }
 
     #[test]
     fn gathered_web_sources_keep_their_site() {

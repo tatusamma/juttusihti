@@ -13,7 +13,7 @@
 use juttusihti_core::pricing::{Provider, Usage};
 use serde_json::{Value, json};
 
-use crate::{AiError, Auth, Endpoint, Outcome, Reply, Request, WebEvidence, WebSource};
+use crate::{AiError, Auth, Endpoint, Outcome, Reply, Request, WebEvidence, WebSearch, WebSource};
 
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 
@@ -64,7 +64,7 @@ fn gemini_request(req: &Request) -> Value {
 pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
     let (url, mut body) = completion_body(e, req);
     if let Some(search) = req.web_search {
-        add_search(e, &mut body, search.max_uses);
+        add_search(e, &mut body, search);
     }
     if e.provider == Provider::Openai
         && let Some(effort) = req.reasoning_effort
@@ -76,7 +76,8 @@ pub fn completion(e: &Endpoint, req: &Request) -> (String, Value) {
 
 /// Adds the provider's web search tool fields to a request body.
 /// One place per provider for the tool shapes.
-fn add_search(e: &Endpoint, body: &mut Value, max_uses: u32) {
+fn add_search(e: &Endpoint, body: &mut Value, search: WebSearch) {
+    let max_uses = search.max_uses;
     match e.provider {
         Provider::Anthropic => {
             body["tools"] = json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": max_uses}]);
@@ -86,7 +87,11 @@ fn add_search(e: &Endpoint, body: &mut Value, max_uses: u32) {
             }
         }
         Provider::Openai => {
-            body["tools"] = json!([{"type": "web_search"}]);
+            body["tools"] = if search.low_context {
+                json!([{"type": "web_search", "search_context_size": "low"}])
+            } else {
+                json!([{"type": "web_search"}])
+            };
             // The ChatGPT plan backend rejects max_tool_calls; the run is
             // charged to the plan there, so the cap is not needed for cost.
             if !matches!(e.auth, Auth::ChatGpt(_)) {
@@ -631,7 +636,7 @@ mod tests {
     }
 
     fn search_req() -> Request {
-        Request { web_search: Some(crate::WebSearch { max_uses: 3 }), ..req() }
+        Request { web_search: Some(crate::WebSearch { max_uses: 3, low_context: true }), ..req() }
     }
 
     #[test]
@@ -643,7 +648,11 @@ mod tests {
         assert!(b.get("output_config").is_none());
         let (_, b) = completion(&ep(Provider::Openai), &search_req());
         assert_eq!(b["tools"][0]["type"], "web_search");
+        assert_eq!(b["tools"][0]["search_context_size"], "low");
         assert_eq!(b["max_tool_calls"], 3);
+        let full = Request { web_search: Some(crate::WebSearch { max_uses: 3, low_context: false }), ..req() };
+        let (_, b) = completion(&ep(Provider::Openai), &full);
+        assert_eq!(b["tools"][0], json!({"type": "web_search"}));
         assert_eq!(b["include"][0], "web_search_call.action.sources");
         let chatgpt = Endpoint {
             provider: Provider::Openai,
@@ -663,6 +672,7 @@ mod tests {
         assert_eq!(b["tools"][0]["type"], "web_search");
         // The ChatGPT backend rejects max_tool_calls ("Unsupported parameter").
         assert!(b.get("max_tool_calls").is_none());
+        assert_eq!(b["tools"][0]["search_context_size"], "low");
         assert_eq!(b["include"][0], "web_search_call.action.sources");
         let (_, b) = completion(&ep(Provider::Gemini), &search_req());
         assert_eq!(b["tools"][0], json!({"google_search": {}}));

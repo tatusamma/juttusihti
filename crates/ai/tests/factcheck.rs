@@ -381,6 +381,34 @@ async fn malformed_claim_output_becomes_unverified() {
 }
 
 #[tokio::test]
+async fn rejected_search_context_size_is_retried_with_full_search() {
+    let m = mock(Arc::new(|r: &Recorded, _| {
+        if is_extract(r) {
+            extraction(&[CLAIM_1, CLAIM_2])
+        } else if r.body["tools"][0].get("search_context_size").is_some() {
+            MockReply {
+                status: 400,
+                body: json!({"error": {"message": "Unknown parameter: 'tools[0].search_context_size'."}}),
+                delay: Duration::ZERO,
+            }
+        } else {
+            claim_reply(&verdict("supported", &[WEB_SOURCE]), &[WEB_SOURCE])
+        }
+    }))
+    .await;
+    let l = empty_lookups().await;
+    let (db, id) = seed();
+    let fc = run(&m, &l, false, &db, job(id, PLENTY), &Control::default()).await.result.unwrap();
+    assert!(fc.web_search, "search stays on");
+    assert!(fc.claims.iter().all(|c| c.verdict == Verdict::Supported));
+    let claim_calls: Vec<Recorded> = m.requests().into_iter().filter(|r| !is_extract(r)).collect();
+    let rejected = claim_calls.iter().filter(|r| r.body["tools"][0].get("search_context_size").is_some()).count();
+    assert!((1..=2).contains(&rejected), "each claim in flight may hit the rejection once");
+    let last = claim_calls.last().unwrap();
+    assert!(has_tools(last) && last.body["tools"][0].get("search_context_size").is_none());
+}
+
+#[tokio::test]
 async fn limit_marks_remaining_claims_not_checked() {
     let m = mock(Arc::new(|r: &Recorded, _| {
         if is_extract(r) {

@@ -425,8 +425,9 @@ mod tests {
             rating: "Väärä".into(),
             review_date: None,
         };
-        let r = claim_request("m", &a, "fi", &claim, &[pc], &[], Some(WebSearch { max_uses: 3 }), 1500);
-        assert_eq!(r.web_search, Some(WebSearch { max_uses: 3 }));
+        let r =
+            claim_request("m", &a, "fi", &claim, &[pc], &[], Some(WebSearch { max_uses: 3, low_context: true }), 1500);
+        assert_eq!(r.web_search, Some(WebSearch { max_uses: 3, low_context: true }));
         assert_eq!(r.schema_name, "fact_check_verdict");
         let block = r.user.split("<data>\n").nth(1).unwrap().split("\n</data>").next().unwrap();
         let data: Value = serde_json::from_str(block).unwrap();
