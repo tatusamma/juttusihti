@@ -229,7 +229,10 @@ the model or plan could not search the web. A red **!** in the article list mark
 contradicted or misleading claims.
 
 **AI setup → Fact check** sets the limit per check ($1.00 by default) and the optional Google
-Fact Check Tools API key (free from Google Cloud), kept in the system's secret store. Web
+Fact Check Tools API key (free from Google Cloud), kept in the system's secret store. Each claim
+sets aside the most it could cost before it starts; if a check reaches the limit, the remaining
+claims are marked Not checked, so raise the limit to check more. On a ChatGPT plan the limit does
+not apply (a plan check costs no money) and the plan's own usage limits apply instead. Web
 searches can run slightly over the limit with OpenAI and Gemini. Any article language works;
 explanations are in English. Only the latest check per article is kept, and if credit or sign-in
 runs out the check stops without replacing an earlier result.

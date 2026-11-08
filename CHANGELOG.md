@@ -18,10 +18,12 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   the article against four Finnish journalists' guidelines (JSN 15, 12, 21 and 16). Nothing is
   sent until you press `Check with <provider>` in the panel that shows what goes where and the
   limit. The result shows as a score above the article ("2 of 8 supported · 1 contradicted ·
-  5 unverified"); click it to see each claim. A red "!" in the article list marks articles with
-  contradicted or misleading claims.
-- **AI setup → Fact check**: the limit per check ($1.00 by default) and the optional Google Fact
-  Check Tools API key, kept in the system's secret store.
+  5 unverified"); click it to see each claim. A note under the score reminds that the check was
+  made with AI and is a guide, not a guarantee. A red "!" in the article list marks articles with
+  contradicted or misleading claims. How it works in detail: [docs/fact-check.md](docs/fact-check.md).
+- **AI setup → Fact check**: the limit per check ($1.00 by default; claims that no longer fit are
+  marked Not checked, and on a ChatGPT plan the plan's own limits apply instead) and the optional
+  Google Fact Check Tools API key, kept in the system's secret store.
 
 ### Changed
 
