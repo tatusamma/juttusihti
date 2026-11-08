@@ -298,6 +298,10 @@ amber with its reason.
 
 Code: [`view_card`](../crates/app/src/fact_check.rs), [`FactCheck::summary_line`](../crates/core/src/factcheck.rs).
 
+The screenshots use a fictional article and made-up sources on reserved `example.*` addresses.
+
+![The result card collapsed to its score line](screenshots/fact-check-score.png)
+
 **Collapsed** (the default, also right after a check), the card shows:
 
 - the score line, for example **Fact check: 2 of 8 supported · 1 contradicted · 5 unverified**.
@@ -316,6 +320,8 @@ Code: [`view_card`](../crates/app/src/fact_check.rs), [`FactCheck::summary_line`
 The score line is coloured by the worst verdict: red if anything is contradicted; amber if anything
 is misleading or unverified, or if nothing was supported; green only when at least one claim is
 supported and nothing worse was found. A check that confirmed nothing is not good news.
+
+![The result card expanded](screenshots/fact-check.png)
 
 **Expanded** (click the score line), it adds the date, provider and model; each claim with its
 verdict tag, quote, reason and source links; and the four JSN rows. The expanded state is

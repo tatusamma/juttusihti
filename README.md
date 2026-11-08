@@ -228,6 +228,8 @@ is a helpful guide rather than a guarantee. "Reduced check: web search was not a
 the model or plan could not search the web. A red **!** in the article list marks articles whose check found
 contradicted or misleading claims.
 
+![A fact check result, expanded (fictional example)](docs/screenshots/fact-check.png)
+
 **AI setup → Fact check** sets the limit per check ($1.00 by default) and the optional Google
 Fact Check Tools API key (free from Google Cloud), kept in the system's secret store. Each claim
 sets aside the most it could cost before it starts; if a check reaches the limit, the remaining
