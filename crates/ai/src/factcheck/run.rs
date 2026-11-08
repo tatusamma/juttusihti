@@ -78,7 +78,7 @@ pub enum FactCheckError {
 }
 
 /// Checks one article: extracts its claims, checks each against evidence
-/// (several at a time, see [`claims_in_flight`], most important first) and saves the result as
+/// (several at a time, all at once on a ChatGPT plan, most important first) and saves the result as
 /// the article's only check. Every call is reserved against `job.limit`
 /// first; claims that no longer fit are marked not checked. A cancelled run,
 /// or one where no claim could be judged, saves nothing, but its usage stays
