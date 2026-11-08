@@ -241,8 +241,9 @@ for extraction), or 6,000 (8,000 for extraction) for models that bill their thin
 - OpenAI: `web_search_call.action.sources` and the message's `url_citation` annotations;
 - Anthropic: `web_search_tool_result` results and block citations;
 - Gemini: `groundingMetadata.groundingChunks`. These URLs are Google redirect links; the chunk's
-  title (the source's domain) is kept as the source's `site`, so the own-site rule and citation
-  matching still work. Redirect links are shown as they are and not resolved by the app.
+  title (the source's domain) is kept as the source's `site`, so the own-site rule, citation
+  matching and the Wikipedia rule (a `*.wikipedia.org` site is background only) still work.
+  Redirect links are shown as they are and not resolved by the app.
 
 Together with the published fact checks and Wikipedia pages, these form the claim's **gathered**
 set (`Gathered`). Published checks are added first, so when a search finds the same page, its
@@ -306,6 +307,8 @@ Code: [`view_card`](../crates/app/src/fact_check.rs), [`FactCheck::summary_line`
 - **Check again**;
 - "Reduced check: web search was not available." when the check ran without web search, since that
   explains a low score;
+- in amber, why Google Fact Check could not be used, when a lookup failed, so a broken key is not
+  mistaken for "no published fact checks";
 - the disclaimer: "This check was made with AI. It does its best, but it can miss things or get
   them wrong, so treat it as a helpful guide rather than a guarantee, and look at the sources
   before relying on it."
@@ -391,7 +394,8 @@ check's `cost` is the sum, or unknown if any part was.
 | Any other claim request error | That claim is Unverified ("could not be completed"); the others continue |
 | No credit, plan limit, rejected key or sign-in (401/403) | The whole check stops, saves nothing, and keeps any earlier result. The message says what to fix |
 | Every claim failed | Nothing is saved: "The fact check could not be completed. Your earlier result, if any, was kept." |
-| Google or Wikipedia lookup fails | Less evidence; the claim is still checked (logged at debug level) |
+| Google Fact Check lookup fails (rejected key, API not enabled, network) | The claim is still checked without published fact checks. The first failure is logged as a warning and saved with the result, and the card shows it: "Google Fact Check could not be used (request failed with HTTP 403). Check the key under AI setup." |
+| Wikipedia lookup fails | Less evidence; the claim is still checked (logged at debug level) |
 | Cancelled | Nothing is saved. Calls in flight are charged at their worst case in the ledger |
 
 A claim stopped by the limit counts as judged, so a run with some claims checked and the rest
@@ -437,8 +441,9 @@ CREATE TABLE article_fact_checks (
   find flagged articles without parsing it (`fact_check_flags`, in chunks of 500 ids).
 - `result_json` is the serialised `FactCheck`: article id, time, provider, model, billing, prompt
   version, language, whether web search was used, the claims (quote, verdict, reason, sources with
-  kind, publisher, rating and site), the guideline checks, and the cost in micro-dollars. A row that
-  no longer parses reads as no check.
+  kind, publisher, rating and site), the guideline checks, the cost in micro-dollars, and
+  `lookup_problem` (why Google Fact Check could not be used, if it failed; missing in older rows). A
+  row that no longer parses reads as no check.
 - Deleting an article deletes its check.
 - Search results themselves are not stored, only the sources a verdict cites.
 
@@ -504,11 +509,6 @@ Run them with `cargo test --workspace --locked`.
 - **Low search context had little measured effect.** On a ChatGPT plan, claim calls still used
   roughly 10,000–27,000 input tokens each after `search_context_size: "low"` was added; most of that
   is search results the provider adds.
-- **Gemini and Wikipedia.** A Wikipedia page found by Gemini's search arrives as a Google redirect
-  URL, so it is classed as a web source and can count as evidence, against the "Wikipedia is
-  background only" rule. Fix: also check the source's `site` in `is_wikipedia`.
-- **Google key problems are quiet.** A rejected Google key looks like "no published fact checks";
-  the failure is logged only at debug level.
 - **Date for prices.** The estimate looks up prices by the local date and the run by the UTC date;
   this only matters around midnight on a day a price changes.
 - **Fresh news rarely has published fact checks**, so Google Fact Check adds most for claims that

@@ -204,6 +204,10 @@ pub struct FactCheck {
     pub claims: Vec<ClaimResult>,
     pub guidelines: Vec<GuidelineCheck>,
     pub cost: Option<Micros>,
+    /// Why an evidence lookup could not be used (a rejected Google key),
+    /// so it is not mistaken for "no published fact checks".
+    #[serde(default)]
+    pub lookup_problem: Option<String>,
 }
 
 impl FactCheck {
@@ -538,7 +542,16 @@ mod tests {
             claims: verdicts.iter().map(|v| claim(*v)).collect(),
             guidelines: vec![],
             cost: None,
+            lookup_problem: None,
         }
+    }
+
+    #[test]
+    fn a_check_saved_before_lookup_problems_still_loads() {
+        let mut v = serde_json::to_value(check(&[Verdict::Supported])).unwrap();
+        v.as_object_mut().unwrap().remove("lookup_problem");
+        let fc: FactCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(fc.lookup_problem, None);
     }
 
     #[test]

@@ -442,6 +442,9 @@ pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
     if !fc.web_search {
         col = col.push(style::note("Reduced check: web search was not available."));
     }
+    if let Some(problem) = &fc.lookup_problem {
+        col = col.push(text(problem).size(SIZE_SMALL).style(style::accent));
+    }
     if !collapsed {
         col = col.push(style::note(format!(
             "Checked {} · {} {}",
@@ -683,6 +686,7 @@ mod tests {
                 .collect(),
             guidelines: vec![],
             cost: None,
+            lookup_problem: None,
         }
     }
 

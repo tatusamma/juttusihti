@@ -61,6 +61,7 @@ fn check(article_id: ArticleId, claims: Vec<ClaimResult>) -> FactCheck {
             reason: "fine".into(),
         }],
         cost: Some(12_345),
+        lookup_problem: None,
     }
 }
 

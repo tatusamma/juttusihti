@@ -116,6 +116,7 @@ pub async fn run_fact_check(
         low_context: AtomicBool::new(true),
         limit_reached: AtomicBool::new(false),
         stopped: Mutex::new(None),
+        lookup_problem: Mutex::new(None),
     };
     let _ = progress.send(FactCheckProgress::Extracting);
     let extraction = run.extract().await?;
@@ -136,6 +137,7 @@ pub async fn run_fact_check(
         claims,
         guidelines: extraction.guidelines,
         cost: *lock(&run.cost),
+        lookup_problem: lock(&run.lookup_problem).take(),
     };
     lock(&db).save_fact_check(&fc).map_err(|e| FactCheckError::Store(e.to_string()))?;
     Ok(fc)
@@ -164,6 +166,8 @@ struct Run<'a> {
     /// Why the run stops: an account-level provider error on a claim. Later
     /// claims are not started and the run fails without saving.
     stopped: Mutex<Option<String>>,
+    /// The first Google Fact Check failure, shown on the card.
+    lookup_problem: Mutex<Option<String>>,
 }
 
 /// A reserved call's worst case.
@@ -461,7 +465,10 @@ impl Run<'_> {
         )
         .await;
         let mut published = published.unwrap_or_else(|e| {
-            tracing::debug!(error = %e, "published fact check lookup failed");
+            tracing::warn!(error = %e, "published fact check lookup failed");
+            lock(&self.lookup_problem).get_or_insert_with(|| {
+                format!("Google Fact Check could not be used ({e}). Check the key under AI setup.")
+            });
             Vec::new()
         });
         published.truncate(MAX_PUBLISHED);

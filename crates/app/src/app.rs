@@ -2425,6 +2425,7 @@ mod tests {
             }],
             guidelines: vec![],
             cost: Some(1234),
+            lookup_problem: None,
         };
         app.db.shared().lock().unwrap().save_fact_check(&fc).unwrap();
         app.show_preview(a);
@@ -2459,6 +2460,7 @@ mod tests {
             claims: vec![ClaimResult { quote: "Q".into(), verdict, reason: "R".into(), sources: vec![] }],
             guidelines: vec![],
             cost: None,
+            lookup_problem: None,
         };
         let list = |app: &App| {
             let shared = app.db.shared();

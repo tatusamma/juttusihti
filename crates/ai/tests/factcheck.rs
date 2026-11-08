@@ -233,6 +233,7 @@ fn save_earlier(db: &Arc<Mutex<Store>>, id: ArticleId) -> FactCheck {
         claims: vec![],
         guidelines: vec![],
         cost: Some(1),
+        lookup_problem: None,
     };
     db.lock().unwrap().save_fact_check(&earlier).unwrap();
     earlier
@@ -323,6 +324,11 @@ async fn lookup_failures_do_not_fail_the_run() {
     assert!(l.count() >= 2, "both lookups were tried");
     assert_eq!(fc.claims[0].verdict, Verdict::Contradicted);
     assert_eq!(fc.claims[0].sources[0].url, WEB_SOURCE);
+    assert_eq!(
+        fc.lookup_problem.as_deref(),
+        Some("Google Fact Check could not be used (request failed with HTTP 500). Check the key under AI setup."),
+        "a failing Google lookup is not mistaken for no matches"
+    );
 }
 
 #[tokio::test]
