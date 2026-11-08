@@ -624,6 +624,11 @@ tokenizer, or AI-assisted query expansion.
   public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
   article text". Released in 0.4.0 (signed on Windows); the Linux packages are built and tested
   in CI but not yet tried on a desktop machine.
+- **Fact check**: done. One extraction call picks up to 8 claims and judges four JSN points; one
+  call per claim searches with the provider's own web search, Wikipedia and (with a key) Google
+  Fact Check Tools, with evidence rules enforced in code. Tried against OpenAI on a ChatGPT plan;
+  OpenAI with an API key, Anthropic and Gemini are tested against local fake servers only.
+  Released in 0.5.0. Details: [docs/fact-check.md](docs/fact-check.md).
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).

@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-article"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "image",
  "serde",
@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-browser"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "adblock",
  "base64 0.22.1",

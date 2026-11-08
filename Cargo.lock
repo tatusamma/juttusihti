@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "directories",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-ai"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-analytics"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "duckdb",
  "juttusihti-core",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-article"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "image",
  "serde",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-bench"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "juttusihti-analytics",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "feed-rs",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "juttusihti-fetch"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "juttusihti-core",
