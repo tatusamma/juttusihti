@@ -2430,9 +2430,9 @@ mod tests {
         app.show_preview(a);
         assert_eq!(app.preview.as_ref().unwrap().fact_check.as_ref(), Some(&fc));
         let _ = app.view();
-        assert!(!app.fact_check.card_collapsed(a), "a card starts expanded");
+        assert!(app.fact_check.card_collapsed(a), "a card starts collapsed");
         let _ = app.update(Message::FactCheck(crate::fact_check::Msg::ToggleCard));
-        assert!(app.fact_check.card_collapsed(a));
+        assert!(!app.fact_check.card_collapsed(a));
         let _ = app.view();
         // A finished check reloads the list, and the preview while its article is shown.
         let done = |fc: &FactCheck| Message::FactCheck(crate::fact_check::Msg::Finished(a, Ok(Box::new(fc.clone()))));

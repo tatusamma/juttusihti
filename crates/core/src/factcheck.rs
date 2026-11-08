@@ -216,21 +216,20 @@ impl FactCheck {
         if self.claims.is_empty() {
             return "No checkable factual claims found.".to_string();
         }
-        let order = [
+        let count = |v: Verdict| self.claims.iter().filter(|c| c.verdict == v).count();
+        // The score leads; problems follow so they are never hidden.
+        let mut parts = vec![format!("{} of {} supported", count(Verdict::Supported), self.claims.len())];
+        let rest = [
             (Verdict::Contradicted, "contradicted"),
             (Verdict::Misleading, "misleading"),
             (Verdict::Unverified, "unverified"),
-            (Verdict::Supported, "supported"),
             (Verdict::NotChecked, "not checked"),
         ];
-        let parts: Vec<String> = order
-            .iter()
-            .filter_map(|(verdict, word)| {
-                let n = self.claims.iter().filter(|c| c.verdict == *verdict).count();
-                (n > 0).then(|| format!("{n} {word}"))
-            })
-            .collect();
-        format!("Fact check: {}", parts.join(", "))
+        parts.extend(rest.iter().filter_map(|(v, word)| {
+            let n = count(*v);
+            (n > 0).then(|| format!("{n} {word}"))
+        }));
+        format!("Fact check: {}", parts.join(" · "))
     }
 }
 
@@ -680,7 +679,10 @@ mod tests {
     #[test]
     fn summary_line_counts_verdicts() {
         let c = check(&[Verdict::Contradicted, Verdict::Unverified, Verdict::Supported, Verdict::Supported]);
-        assert_eq!(c.summary_line(), "Fact check: 1 contradicted, 1 unverified, 2 supported");
+        assert_eq!(c.summary_line(), "Fact check: 2 of 4 supported · 1 contradicted · 1 unverified");
+        let none = check(&[Verdict::Unverified, Verdict::Unverified]);
+        assert_eq!(none.summary_line(), "Fact check: 0 of 2 supported · 2 unverified");
+        assert_eq!(check(&[Verdict::Supported]).summary_line(), "Fact check: 1 of 1 supported");
         assert_eq!(c.flagged_count(), 1);
         assert_eq!(check(&[]).summary_line(), "No checkable factual claims found.");
     }

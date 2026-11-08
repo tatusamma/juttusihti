@@ -401,7 +401,7 @@ async fn limit_marks_remaining_claims_not_checked() {
     assert_eq!(fc.claims[1].quote, CLAIM_2);
     assert_eq!(fc.claims[1].reason, "Not checked (limit reached)");
     assert_eq!(fc.cost, Some(700 + 102_400));
-    assert_eq!(fc.summary_line(), "Fact check: 1 contradicted, 2 not checked");
+    assert_eq!(fc.summary_line(), "Fact check: 0 of 3 supported · 1 contradicted · 2 not checked");
 }
 
 #[tokio::test]

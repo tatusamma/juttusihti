@@ -121,13 +121,14 @@ pub struct State {
     generation: u64,
     panel: Option<(ArticleId, Panel)>,
     run: Option<Running>,
-    /// Articles whose card the user collapsed this session.
-    collapsed: HashSet<ArticleId>,
+    /// Articles whose card the user expanded this session; cards start
+    /// collapsed to their score line.
+    expanded: HashSet<ArticleId>,
 }
 
 impl State {
     pub fn new(db: Db) -> Self {
-        Self { db, catalog: Catalog::builtin(), generation: 0, panel: None, run: None, collapsed: HashSet::new() }
+        Self { db, catalog: Catalog::builtin(), generation: 0, panel: None, run: None, expanded: HashSet::new() }
     }
 
     pub fn is_running(&self) -> bool {
@@ -135,12 +136,12 @@ impl State {
     }
 
     pub fn card_collapsed(&self, article: ArticleId) -> bool {
-        self.collapsed.contains(&article)
+        !self.expanded.contains(&article)
     }
 
     pub fn toggle_card(&mut self, article: ArticleId) {
-        if !self.collapsed.remove(&article) {
-            self.collapsed.insert(article);
+        if !self.expanded.remove(&article) {
+            self.expanded.insert(article);
         }
     }
 
@@ -189,7 +190,7 @@ impl State {
                 match r {
                     Ok(_) => {
                         self.panel = None;
-                        self.collapsed.remove(&id);
+                        self.expanded.remove(&id);
                     }
                     Err(Stopped::Cancelled) => self.panel = Some((id, Panel::Cancelled)),
                     Err(Stopped::Failed(e)) => self.panel = Some((id, Panel::Failed(e))),
@@ -411,8 +412,8 @@ fn estimate_line(billing: Billing, e: &FactCheckEstimate) -> String {
     }
 }
 
-/// The result card: the summary (press to collapse), when and how it was
-/// checked, then each claim and guideline.
+/// The result card: the score line (press to expand). Expanded, it adds
+/// when and how it was checked, each claim and guideline, and the note.
 pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
     let chevron = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
     let summary = row![
@@ -427,15 +428,17 @@ pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
     ]
     .spacing(SPACE[1])
     .align_y(Center);
-    let mut col = column![
-        header,
-        style::note(format!("Checked {} · {} {}", format::full_date(fc.checked_at), fc.provider, fc.model)),
-    ]
-    .spacing(SPACE[2]);
+    let mut col = column![header].spacing(SPACE[2]);
     if !fc.web_search {
         col = col.push(style::note("Reduced check: web search was not available."));
     }
     if !collapsed {
+        col = col.push(style::note(format!(
+            "Checked {} · {} {}",
+            format::full_date(fc.checked_at),
+            fc.provider,
+            fc.model
+        )));
         for c in &fc.claims {
             col = col.push(view_claim(c));
         }
@@ -444,8 +447,8 @@ pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
             guidelines = guidelines.push(view_guideline(g));
         }
         col = col.push(guidelines);
+        col = col.push(text(NOTE).size(SIZE_SMALL).style(style::faint));
     }
-    col = col.push(text(NOTE).size(SIZE_SMALL).style(style::faint));
     container(col).padding(SPACE[3]).width(Fill).style(style::card).into()
 }
 
@@ -683,18 +686,16 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_cards_are_remembered_per_article() {
+    fn expanded_cards_are_remembered_per_article() {
         let mut st = State::new(Db::new(Store::open_in_memory().unwrap()));
-        assert!(!st.card_collapsed(1) && !st.card_collapsed(2));
+        assert!(st.card_collapsed(1) && st.card_collapsed(2), "cards start collapsed");
         st.toggle_card(1);
         st.toggle_card(2);
-        assert!(st.card_collapsed(1) && st.card_collapsed(2));
+        assert!(!st.card_collapsed(1) && !st.card_collapsed(2));
         st.toggle_card(2);
-        assert!(st.card_collapsed(1) && !st.card_collapsed(2), "each article keeps its own state");
-        st.toggle_card(2);
+        assert!(!st.card_collapsed(1) && st.card_collapsed(2), "each article keeps its own state");
         let _ = st.update(Msg::Finished(1, Ok(Box::new(result(&[Verdict::Supported])))));
-        assert!(!st.card_collapsed(1), "a card is expanded right after its run");
-        assert!(st.card_collapsed(2));
+        assert!(st.card_collapsed(1), "a card is collapsed right after its run");
     }
 
     #[test]
