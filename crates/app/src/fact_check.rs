@@ -29,7 +29,8 @@ use crate::{ai_setup, format, research, secrets};
 pub const MIN_CHECK_CHARS: usize = 300;
 
 /// The card's fixed note.
-const NOTE: &str = "AI-assisted check. Verify the sources before relying on it.";
+/// Shown under the score at all times, collapsed or not.
+const NOTE: &str = "This check was made with AI. It does its best, but it can miss things or get them wrong, so treat it as a helpful guide rather than a guarantee, and look at the sources before relying on it.";
 
 /// Shown, muted, after the user cancels a run.
 const CANCELLED: &str = "The fact check was cancelled.";
@@ -412,8 +413,8 @@ fn estimate_line(billing: Billing, e: &FactCheckEstimate) -> String {
     }
 }
 
-/// The result card: the score line (press to expand). Expanded, it adds
-/// when and how it was checked, each claim and guideline, and the note.
+/// The result card: the score line (press to expand) and the AI note.
+/// Expanded, it adds when and how it was checked, each claim and guideline.
 pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
     let chevron = if collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
     let summary = row![
@@ -447,8 +448,8 @@ pub fn view_card<'a>(fc: &'a FactCheck, collapsed: bool) -> Element<'a, Msg> {
             guidelines = guidelines.push(view_guideline(g));
         }
         col = col.push(guidelines);
-        col = col.push(text(NOTE).size(SIZE_SMALL).style(style::faint));
     }
+    col = col.push(text(NOTE).size(SIZE_SMALL).style(style::faint));
     container(col).padding(SPACE[3]).width(Fill).style(style::card).into()
 }
 
@@ -734,5 +735,9 @@ mod tests {
             reason: String::new(),
         };
         assert_eq!(guideline_line(&g), "JSN 15 Headline backed by text: Not applicable");
+        assert_eq!(
+            NOTE,
+            "This check was made with AI. It does its best, but it can miss things or get them wrong, so treat it as a helpful guide rather than a guarantee, and look at the sources before relying on it."
+        );
     }
 }
