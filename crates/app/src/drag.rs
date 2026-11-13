@@ -24,6 +24,8 @@ pub struct Drag<I, T> {
     pub cursor: Point,
     pub over: Option<T>,
     pub active: bool,
+    /// Every target the pointer is inside, outermost first; `over` is the innermost.
+    entered: Vec<T>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +54,8 @@ impl<I: Clone, T: Clone + PartialEq> DragState<I, T> {
     pub fn update(&mut self, msg: DragMsg<I, T>) -> Option<(I, T)> {
         match msg {
             DragMsg::Press(item, label, at) => {
-                self.0 = Some(Drag { item, label, start: at, cursor: at, over: None, active: false });
+                self.0 =
+                    Some(Drag { item, label, start: at, cursor: at, over: None, active: false, entered: Vec::new() });
             }
             DragMsg::Move(p) => {
                 if let Some(d) = &mut self.0 {
@@ -67,14 +70,15 @@ impl<I: Clone, T: Clone + PartialEq> DragState<I, T> {
             }
             DragMsg::Enter(t) => {
                 if let Some(d) = &mut self.0 {
-                    d.over = Some(t);
+                    d.entered.retain(|e| *e != t);
+                    d.entered.push(t);
+                    d.over = d.entered.last().cloned();
                 }
             }
             DragMsg::Leave(t) => {
-                if let Some(d) = &mut self.0
-                    && d.over.as_ref() == Some(&t)
-                {
-                    d.over = None;
+                if let Some(d) = &mut self.0 {
+                    d.entered.retain(|e| *e != t);
+                    d.over = d.entered.last().cloned();
                 }
             }
             DragMsg::Release => {
@@ -206,6 +210,43 @@ mod tests {
         s.update(DragMsg::Leave("a"));
         assert_eq!(s.dragging().unwrap().over, None);
         assert_eq!(s.update(DragMsg::Release), None);
+    }
+
+    #[test]
+    fn adjacent_targets_drop_on_the_latest() {
+        let mut s = pressed();
+        s.update(DragMsg::Move(p(30.0, 10.0)));
+        s.update(DragMsg::Enter("a"));
+        s.update(DragMsg::Enter("b"));
+        s.update(DragMsg::Leave("a"));
+        assert_eq!(s.update(DragMsg::Release), Some((7, "b")));
+    }
+
+    #[test]
+    fn leaving_a_nested_target_falls_back_to_the_parent() {
+        let mut s = pressed();
+        s.update(DragMsg::Move(p(30.0, 10.0)));
+        s.update(DragMsg::Enter("g"));
+        s.update(DragMsg::Enter("c"));
+        s.update(DragMsg::Leave("c"));
+        assert_eq!(s.update(DragMsg::Release), Some((7, "g")));
+    }
+
+    #[test]
+    fn movement_of_exactly_the_threshold_activates() {
+        let mut s = pressed();
+        s.update(DragMsg::Move(p(10.0 + DRAG_THRESHOLD, 10.0)));
+        assert!(s.dragging().unwrap().active);
+    }
+
+    #[test]
+    fn a_new_press_replaces_the_drag() {
+        let mut s = pressed();
+        s.update(DragMsg::Move(p(30.0, 10.0)));
+        s.update(DragMsg::Enter("a"));
+        s.update(DragMsg::Press(8, "Eight".into(), p(0.0, 0.0)));
+        let d = s.dragging().unwrap();
+        assert_eq!((d.item, d.active, d.over), (8, false, None));
     }
 
     #[test]
