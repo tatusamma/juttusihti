@@ -423,3 +423,195 @@ fn counts_follow_folder_and_saved_view() {
     let c = s.category_counts(saved).unwrap();
     assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
 }
+
+mod draft {
+    use super::*;
+    use juttusihti_core::category_draft::*;
+    use juttusihti_core::pricing::Provider;
+
+    fn term_ids(s: &Store) -> Vec<TermId> {
+        s.unsorted_terms().unwrap().iter().map(|t| t.id).collect()
+    }
+
+    fn term_named(s: &Store, name: &str) -> TermId {
+        s.unsorted_terms().unwrap().iter().find(|t| t.name == name).unwrap().id
+    }
+
+    fn setup(names: &[&str]) -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        let f = feed(&mut s, "https://a.example/rss");
+        s.ingest(f, &[entry("1", names)]).unwrap();
+        s
+    }
+
+    fn group_of(s: &Store, l: LabelId) -> Option<GroupId> {
+        s.conn().query_row("SELECT group_id FROM labels WHERE id = ?1", [l], |r| r.get(0)).unwrap()
+    }
+
+    fn label_of(s: &Store, t: TermId) -> Option<LabelId> {
+        s.conn().query_row("SELECT label_id FROM feed_terms WHERE id = ?1", [t], |r| r.get(0)).unwrap()
+    }
+
+    fn ng(temp: u32, name: &str) -> NewGroupDraft {
+        NewGroupDraft { temp, name: name.into(), by_user: false, ticked: true }
+    }
+    fn nc(temp: u32, name: &str, group: GroupRef) -> NewCategoryDraft {
+        NewCategoryDraft { temp, name: name.into(), group, ticked: true }
+    }
+    fn mp(term: TermId, category: CategoryRef) -> Mapping {
+        Mapping { term, category, ticked: true }
+    }
+
+    #[test]
+    fn plan_input_contains_only_unsorted_terms_and_flags_more() {
+        let s = setup(&["a", "b", "c", "d", "e", "f", "g"]);
+        let ids = term_ids(&s);
+        let l = s.create_label("L").unwrap();
+        s.map_term(ids[0], Some(l)).unwrap();
+        s.set_term_ignored(ids[1], true).unwrap();
+        let g = s.create_group("G").unwrap();
+        let input = s.category_plan_input(3).unwrap();
+        assert_eq!(input.terms.len(), 3);
+        assert_eq!(input.more_terms, 2);
+        assert!(input.terms.iter().all(|t| t.id != ids[0] && t.id != ids[1]));
+        assert_eq!(input.groups.iter().map(|x| x.id).collect::<Vec<_>>(), vec![g]);
+        assert_eq!(input.categories.len(), 1);
+    }
+
+    #[test]
+    fn draft_round_trips_and_survives_reopen() {
+        let s = setup(&["a"]);
+        let t = term_ids(&s)[0];
+        let mut d = CategoryDraft {
+            new_groups: vec![ng(1, "Politiikka")],
+            new_categories: vec![nc(1, "Vaalit", GroupRef::New(1))],
+            mappings: vec![mp(t, CategoryRef::New(1))],
+            vague: vec![t],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Anthropic, "m").unwrap();
+        assert_eq!(s.pending_category_draft().unwrap(), Some((id, d.clone())));
+        d.new_groups[0].ticked = false;
+        s.update_category_draft(id, &d).unwrap();
+        assert_eq!(s.pending_category_draft().unwrap(), Some((id, d)));
+    }
+
+    #[test]
+    fn apply_creates_groups_categories_and_mappings() {
+        let mut s = setup(&["a", "b"]);
+        let (a, b) = (term_named(&s, "a"), term_named(&s, "b"));
+        let loose = s.create_label("Loose").unwrap();
+        let existing = s.create_group("Old").unwrap();
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "Politiikka")],
+            new_categories: vec![nc(1, "Vaalit", GroupRef::New(1)), nc(2, "Muu", GroupRef::Existing(existing))],
+            placements: vec![Placement {
+                label: loose,
+                rename: Some("Vapaa".into()),
+                group: GroupRef::New(1),
+                ticked: true,
+            }],
+            mappings: vec![mp(a, CategoryRef::New(1)), mp(b, CategoryRef::Existing(loose))],
+            vague: vec![],
+        };
+        let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
+        let r = s.apply_category_draft(id, &d).unwrap();
+        assert_eq!((r.applied, r.skipped), (6, 0));
+        let tree = s.category_tree().unwrap();
+        let pol = tree.groups.iter().find(|g| g.group.name == "Politiikka").unwrap();
+        let names: Vec<_> = pol.categories.iter().map(|c| c.label.name.as_str()).collect();
+        assert_eq!(names, vec!["Vaalit", "Vapaa"]);
+        assert_eq!(label_of(&s, a), Some(pol.categories[0].label.id));
+        assert_eq!(label_of(&s, b), Some(loose));
+        assert_eq!(tree.groups.last().unwrap().group.name, "Politiikka");
+        assert!(s.pending_category_draft().unwrap().is_none());
+        let status: String =
+            s.conn().query_row("SELECT status FROM ai_suggestions WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(status, "confirmed");
+    }
+
+    #[test]
+    fn unticked_group_drops_its_contents() {
+        let mut s = setup(&["a"]);
+        let a = term_ids(&s)[0];
+        let mut g = ng(1, "Politiikka");
+        g.ticked = false;
+        let d = CategoryDraft {
+            new_groups: vec![g],
+            new_categories: vec![nc(1, "Vaalit", GroupRef::New(1))],
+            mappings: vec![mp(a, CategoryRef::New(1))],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Gemini, "m").unwrap();
+        let r = s.apply_category_draft(id, &d).unwrap();
+        assert_eq!((r.applied, r.skipped), (0, 0));
+        assert_eq!(count(&s, "category_groups"), 0);
+        assert_eq!(count(&s, "labels"), 0);
+        assert_eq!(label_of(&s, a), None);
+    }
+
+    #[test]
+    fn apply_skips_stale_items() {
+        let mut s = setup(&["a", "b"]);
+        let (a, b) = (term_named(&s, "a"), term_named(&s, "b"));
+        let gone = s.create_group("Gone").unwrap();
+        let keep = s.create_group("Keep").unwrap();
+        let p1 = s.create_label("P1").unwrap();
+        let p2 = s.create_label("P2").unwrap();
+        let d = CategoryDraft {
+            placements: vec![
+                Placement { label: p1, rename: None, group: GroupRef::Existing(gone), ticked: true },
+                Placement { label: p2, rename: None, group: GroupRef::Existing(keep), ticked: true },
+            ],
+            mappings: vec![mp(a, CategoryRef::Existing(p1)), mp(b, CategoryRef::Existing(p1))],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Anthropic, "m").unwrap();
+        s.map_term(a, Some(p2)).unwrap(); // mapped by hand
+        s.delete_group(gone).unwrap(); // deleted target group
+        s.move_category(p2, Some(keep), 0).unwrap(); // grouped by hand
+        let r = s.apply_category_draft(id, &d).unwrap();
+        // skipped: placement p1 (group gone), placement p2 (already grouped), mapping a (already mapped)
+        assert_eq!(r.skipped, 3);
+        // applied: mapping b
+        assert_eq!(r.applied, 1);
+        assert_eq!(label_of(&s, b), Some(p1));
+        assert_eq!(label_of(&s, a), Some(p2));
+    }
+
+    #[test]
+    fn duplicate_new_group_name_reuses_existing_group() {
+        let mut s = setup(&["a"]);
+        let a = term_ids(&s)[0];
+        let g = s.create_group("Politiikka").unwrap();
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "  politiikka ")],
+            new_categories: vec![nc(1, "Vaalit", GroupRef::New(1))],
+            mappings: vec![mp(a, CategoryRef::New(1))],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Anthropic, "m").unwrap();
+        let r = s.apply_category_draft(id, &d).unwrap();
+        assert_eq!(r.skipped, 0);
+        assert_eq!(count(&s, "category_groups"), 1);
+        let l = label_of(&s, a).unwrap();
+        assert_eq!(group_of(&s, l), Some(g));
+    }
+
+    #[test]
+    fn discard_leaves_everything_unchanged() {
+        let s = setup(&["a"]);
+        let a = term_ids(&s)[0];
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "G")],
+            new_categories: vec![nc(1, "C", GroupRef::New(1))],
+            mappings: vec![mp(a, CategoryRef::New(1))],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Anthropic, "m").unwrap();
+        s.discard_category_draft(id).unwrap();
+        assert!(s.pending_category_draft().unwrap().is_none());
+        assert_eq!((count(&s, "category_groups"), count(&s, "labels")), (0, 0));
+        assert_eq!(label_of(&s, a), None);
+    }
+}
