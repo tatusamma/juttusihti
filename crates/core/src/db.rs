@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_headlines.sql"),
     include_str!("../migrations/0006_fulltext.sql"),
     include_str!("../migrations/0007_factcheck.sql"),
+    include_str!("../migrations/0008_categories.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
