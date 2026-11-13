@@ -75,3 +75,26 @@ fn removing_feed_removes_its_terms() {
     assert_eq!(count(&s, "feed_terms"), 0);
     assert_eq!(count(&s, "article_terms"), 0);
 }
+
+fn entry_scheme(guid: &str, name: &str, scheme: &str) -> NewArticle {
+    let mut e = entry(guid, &[]);
+    e.terms = vec![NewTerm { name: name.into(), scheme: scheme.into() }];
+    e
+}
+
+#[test]
+fn term_identity_is_normalized() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[" ai "])]).unwrap();
+    assert_eq!(count(&s, "feed_terms"), 1);
+    assert_eq!(count(&s, "article_terms"), 2);
+}
+
+#[test]
+fn same_name_different_schemes_are_two_terms() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry_scheme("1", "AI", ""), entry_scheme("2", "AI", "urn:x")]).unwrap();
+    assert_eq!(count(&s, "feed_terms"), 2);
+}
