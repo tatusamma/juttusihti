@@ -616,6 +616,7 @@ mod tests {
             ("research.rs", include_str!("research.rs")),
             ("review.rs", include_str!("review.rs")),
             ("organise.rs", include_str!("organise.rs")),
+            ("organise_draft.rs", include_str!("organise_draft.rs")),
             ("providers.rs", include_str!("providers.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("timeline_view.rs", include_str!("timeline_view.rs")),

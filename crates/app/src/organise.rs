@@ -9,12 +9,15 @@ use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, operation, pick_list, row, scrollable, text, text_input};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event};
 use juttusihti_core::categories::{CategoryNode, GroupId, GroupNode, TermId, TermRow};
+use juttusihti_core::category_draft::CategoryDraft;
+use juttusihti_core::pricing::Catalog;
 use juttusihti_core::store::Store;
 use juttusihti_core::{LabelId, Status};
 
 use crate::db::Db;
 use crate::drag::{self, DragMsg, DragState};
 use crate::icons::{Icon, icon};
+use crate::organise_draft::{self as ai, Draft, DraftMsg, Outcome, Panel, SuggestPlan};
 use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
 /// Something that can be dragged or moved.
@@ -75,14 +78,16 @@ enum Editing {
 /// Everything the screen shows, loaded in one call.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    groups: Vec<GroupNode>,
-    ungrouped: Vec<CategoryNode>,
+    pub(crate) groups: Vec<GroupNode>,
+    pub(crate) ungrouped: Vec<CategoryNode>,
     /// Confirmed articles and pending AI label suggestions per category.
     counts: HashMap<LabelId, (u64, u64)>,
     /// Terms of the opened categories.
     terms: HashMap<LabelId, Vec<TermRow>>,
-    unsorted: Vec<TermRow>,
+    pub(crate) unsorted: Vec<TermRow>,
     ignored: Vec<TermRow>,
+    /// The AI draft waiting for Approve or Cancel.
+    pending: Option<Box<(i64, CategoryDraft)>>,
 }
 
 fn snapshot(s: &Store, expanded: &BTreeSet<LabelId>) -> juttusihti_core::Result<Snapshot> {
@@ -100,6 +105,7 @@ fn snapshot(s: &Store, expanded: &BTreeSet<LabelId>) -> juttusihti_core::Result<
         terms,
         unsorted: s.unsorted_terms()?,
         ignored: s.ignored_terms()?,
+        pending: s.pending_category_draft()?.map(Box::new),
     })
 }
 
@@ -118,6 +124,9 @@ pub enum Op {
     Decide(LabelId, Status),
     MapTerm(TermId, Option<LabelId>),
     Ignore(TermId, bool),
+    SaveDraft(i64, Box<CategoryDraft>),
+    ApproveDraft(i64, Box<CategoryDraft>),
+    DiscardDraft(i64),
 }
 
 impl Op {
@@ -151,6 +160,9 @@ impl Op {
             }
             Op::MapTerm(id, label) => s.map_term(id, label).map(|_| String::new()),
             Op::Ignore(id, ignored) => s.set_term_ignored(id, ignored).map(|_| String::new()),
+            Op::SaveDraft(id, draft) => s.update_category_draft(id, &draft).map(|_| String::new()),
+            Op::ApproveDraft(id, draft) => s.apply_category_draft(id, &draft).map(ai::applied_text),
+            Op::DiscardDraft(id) => s.discard_category_draft(id).map(|_| String::new()),
         }
     }
 }
@@ -163,6 +175,10 @@ enum Effect {
     Run(Op),
     /// Focus the inline name field.
     Focus,
+    /// Work out the AI estimate for the consent panel (this generation).
+    Plan(u64),
+    /// Send the consented AI request.
+    Suggest,
 }
 
 #[derive(Debug, Clone)]
@@ -189,9 +205,18 @@ pub enum Msg {
     Merge,
     Decide(Status),
     Ignore(TermId, bool),
+    /// "Suggest categories": opens the consent panel.
+    Suggest,
+    Planned(u64, Result<Box<SuggestPlan>, String>),
+    /// The consent: sends the request.
+    SendSuggest,
+    CloseSuggest,
+    /// The saved draft's id, the draft and the terms left for later.
+    Suggested(Result<(i64, Box<CategoryDraft>, usize), String>),
+    Draft(DraftMsg),
 }
 
-const NAME_ID: &str = "organise-name";
+pub(crate) const NAME_ID: &str = "organise-name";
 
 /// Left indent of category rows under their group heading, and of terms under their category.
 const INDENT: f32 = 22.0;
@@ -208,6 +233,15 @@ pub struct State {
     merge_target: Option<Target>,
     confirm: Option<Confirm>,
     message: Option<Result<String, String>>,
+    catalog: Catalog,
+    /// The AI consent panel, while open.
+    suggest: Option<Panel>,
+    /// Drops estimates of a panel that was closed meanwhile.
+    generation: u64,
+    /// The AI draft; while open it replaces the normal organising controls.
+    draft: Option<Draft>,
+    /// Terms left for a later run, for the draft of this id.
+    more_terms: Option<(i64, usize)>,
 }
 
 impl State {
@@ -224,6 +258,11 @@ impl State {
             merge_target: None,
             confirm: None,
             message: None,
+            catalog: Catalog::builtin(),
+            suggest: None,
+            generation: 0,
+            draft: None,
+            more_terms: None,
         }
     }
 
@@ -242,6 +281,13 @@ impl State {
                 Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, Msg::Done)
             }
             Effect::Focus => operation::focus(NAME_ID).chain(operation::select_all(NAME_ID)),
+            Effect::Plan(generation) => {
+                Cmd::perform(ai::plan(self.db.clone(), self.catalog.clone()), move |r| Msg::Planned(generation, r))
+            }
+            Effect::Suggest => match &self.suggest {
+                Some(Panel::Running(p)) => Cmd::perform(ai::run(self.db.clone(), (**p).clone()), Msg::Suggested),
+                _ => Cmd::none(),
+            },
         }
     }
 
@@ -250,12 +296,19 @@ impl State {
     /// is open.
     pub fn subscription(&self) -> Subscription<Msg> {
         let dragging = self.drag.dragging().is_some();
-        let pointer = if dragging {
+        let draft_dragging = self.draft.as_ref().is_some_and(Draft::dragging);
+        let pointer = if draft_dragging {
+            drag::subscription(
+                |p| Msg::Draft(DraftMsg::Drag(DragMsg::Move(p))),
+                || Msg::Draft(DraftMsg::Drag(DragMsg::Release)),
+            )
+        } else if dragging {
             drag::subscription(|p| Msg::Drag(DragMsg::Move(p)), || Msg::Drag(DragMsg::Release))
         } else {
             Subscription::none()
         };
-        let escape = if dragging || self.editing.is_some() || self.confirm.is_some() {
+        let draft_busy = self.draft.as_ref().is_some_and(Draft::busy);
+        let escape = if draft_busy || dragging || self.editing.is_some() || self.confirm.is_some() {
             event::listen_with(|e, _status, _window| match e {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(key::Named::Escape),
@@ -271,12 +324,16 @@ impl State {
 
     /// The label and cursor position of the chip to draw at the pointer, while dragging.
     pub fn ghost(&self) -> Option<(&str, Point)> {
+        if let Some(d) = &self.draft {
+            return d.ghost();
+        }
         self.drag.dragging().filter(|d| d.active).map(|d| (d.label.as_str(), d.cursor))
     }
 
     fn handle(&mut self, msg: Msg) -> Effect {
         match msg {
-            Msg::Loaded(Ok(snap)) => {
+            Msg::Loaded(Ok(mut snap)) => {
+                self.sync_draft(snap.pending.take().map(|p| *p));
                 self.snap = snap;
                 self.loaded = true;
                 let gone: Vec<LabelId> =
@@ -351,6 +408,9 @@ impl State {
                 return Effect::Run(op);
             }
             Msg::Escape => {
+                if let Some(d) = self.draft.as_mut() {
+                    d.update(DraftMsg::Escape, &self.snap);
+                }
                 self.drag.update(DragMsg::Cancel);
                 self.editing = None;
                 self.confirm = None;
@@ -389,8 +449,83 @@ impl State {
                 }
             }
             Msg::Ignore(id, ignored) => return Effect::Run(Op::Ignore(id, ignored)),
+            Msg::Suggest
+            | Msg::Planned(..)
+            | Msg::SendSuggest
+            | Msg::CloseSuggest
+            | Msg::Suggested(_)
+            | Msg::Draft(_) => return self.handle_ai(msg),
         }
         Effect::None
+    }
+
+    /// The AI suggestion messages: consent panel, run and draft.
+    fn handle_ai(&mut self, msg: Msg) -> Effect {
+        match msg {
+            Msg::Suggest => {
+                if self.draft.is_some() || matches!(self.suggest, Some(Panel::Planning | Panel::Running(_))) {
+                    return Effect::None;
+                }
+                self.generation += 1;
+                self.suggest = Some(Panel::Planning);
+                return Effect::Plan(self.generation);
+            }
+            Msg::Planned(g, r) => {
+                if g == self.generation && matches!(self.suggest, Some(Panel::Planning | Panel::Ready(_))) {
+                    self.suggest = Some(match r {
+                        Ok(p) => Panel::Ready(p),
+                        Err(e) => Panel::Failed(e),
+                    });
+                }
+            }
+            Msg::SendSuggest => {
+                if let Some(Panel::Ready(p)) = &self.suggest
+                    && p.blocker().is_none()
+                {
+                    self.suggest = Some(Panel::Running(p.clone()));
+                    return Effect::Suggest;
+                }
+            }
+            Msg::CloseSuggest => {
+                if !matches!(self.suggest, Some(Panel::Running(_))) {
+                    self.suggest = None;
+                }
+            }
+            Msg::Suggested(Ok((id, draft, more))) => {
+                self.suggest = None;
+                self.more_terms = Some((id, more));
+                self.draft = Some(Draft::new(id, *draft, more));
+                return Effect::Load;
+            }
+            Msg::Suggested(Err(e)) => self.suggest = Some(Panel::Failed(e)),
+            Msg::Draft(m) => {
+                let Some(d) = self.draft.as_mut() else { return Effect::None };
+                return match d.update(m, &self.snap) {
+                    Outcome::None => Effect::None,
+                    Outcome::Focus => Effect::Focus,
+                    Outcome::Changed => Effect::Run(Op::SaveDraft(d.id, Box::new(d.plan.clone()))),
+                    Outcome::Approve => Effect::Run(Op::ApproveDraft(d.id, Box::new(d.plan.clone()))),
+                    Outcome::Discard => Effect::Run(Op::DiscardDraft(d.id)),
+                };
+            }
+            _ => {}
+        }
+        Effect::None
+    }
+
+    /// Opens the stored draft, or closes the shown one once it is approved or
+    /// discarded. The in-memory draft wins over the stored one, which may lag
+    /// behind an edit still being saved.
+    fn sync_draft(&mut self, pending: Option<(i64, CategoryDraft)>) {
+        match (&self.draft, pending) {
+            (Some(d), Some((id, _))) if d.id == id => {}
+            (_, Some((id, plan))) => {
+                let more = self.more_terms.filter(|(m, _)| *m == id).map_or(0, |(_, n)| n);
+                self.draft = Some(Draft::new(id, plan, more));
+                self.suggest = None;
+            }
+            (_, None) => self.draft = None,
+        }
     }
 
     fn group(&self, id: GroupId) -> Option<&GroupNode> {
@@ -518,6 +653,9 @@ impl State {
     // ---- view ----------------------------------------------------------
 
     pub fn view(&self) -> Element<'_, Msg> {
+        if let Some(d) = &self.draft {
+            return d.view(&self.snap, self.message.as_ref()).map(Msg::Draft);
+        }
         // While a drag is armed, rows become the drop zones that fit what is dragged.
         let kind = self.drag.dragging().map(|d| d.item);
         let mut body = column![].spacing(SPACE[4]);
@@ -540,11 +678,18 @@ impl State {
         let header = row![
             style::title("Categories"),
             Space::new().width(Fill),
-            // Wired to the AI category plan in a later step.
-            style::quiet_button(Some(Icon::Sparkles), "Suggest categories", style::quiet, None::<Msg>),
+            style::quiet_button(
+                Some(Icon::Sparkles),
+                "Suggest categories",
+                style::quiet,
+                (self.suggest.is_none() && self.loaded).then_some(Msg::Suggest),
+            ),
         ]
         .align_y(Center);
         let mut page = column![header].spacing(SPACE[3]).max_width(720.0);
+        if let Some(panel) = &self.suggest {
+            page = page.push(ai::view_panel(panel));
+        }
         if let Some(m) = &self.message {
             page = page.push(style::message(m));
         }
@@ -899,7 +1044,7 @@ mod tests {
                 reload(st);
             }
             Effect::Load => reload(st),
-            Effect::None | Effect::Focus => {}
+            Effect::None | Effect::Focus | Effect::Plan(_) | Effect::Suggest => {}
         }
     }
 
@@ -1142,5 +1287,268 @@ mod tests {
         let first = st.dests(OrgItem::Category(ai))[0].clone();
         send(&mut st, Msg::MoveTo(OrgItem::Category(ai), first));
         assert_eq!(with(&st, |s| s.category_tree()).unwrap().groups[0].categories.len(), 1);
+    }
+
+    // ---- AI suggestions ------------------------------------------------
+
+    use juttusihti_ai::categorize::MAX_TERMS;
+    use juttusihti_core::ai_defaults::AiDefaults;
+    use juttusihti_core::category_draft::{CategoryRef, GroupRef, Mapping, NewCategoryDraft, NewGroupDraft, Placement};
+    use juttusihti_core::pricing::{Billing, Price, Provider};
+
+    use crate::organise_draft::{DItem, DTarget, Name};
+
+    /// A plan on a ChatGPT plan (a known, zero price) for what the store would send now.
+    fn suggest_plan(st: &State, ready: Result<(), String>) -> Box<SuggestPlan> {
+        let d = AiDefaults { billing: Billing::ChatGptPlan, ..Default::default() };
+        let input = with(st, |s| s.category_plan_input(MAX_TERMS)).unwrap();
+        Box::new(SuggestPlan::build(&d, input, Some(Price::chatgpt_plan(&d.model())), ready))
+    }
+
+    fn pending(st: &State) -> Option<(i64, CategoryDraft)> {
+        with(st, |s| s.pending_category_draft()).unwrap()
+    }
+
+    /// Stores `draft` as the pending AI draft and reloads the screen.
+    fn open_draft(st: &mut State, draft: &CategoryDraft) -> i64 {
+        let id = with(st, |s| s.save_category_draft(draft, Provider::Openai, "m")).unwrap();
+        reload(st);
+        id
+    }
+
+    fn draft_msg(st: &mut State, m: DraftMsg) {
+        send(st, Msg::Draft(m));
+    }
+
+    fn draft_drag(st: &mut State, item: DItem, target: DTarget) {
+        let nan = Point::new(f32::NAN, f32::NAN);
+        for m in [
+            DragMsg::Press(item, "x".into(), nan),
+            DragMsg::Move(Point::new(0.0, 0.0)),
+            DragMsg::Move(Point::new(40.0, 0.0)),
+            DragMsg::Enter(target),
+            DragMsg::Release,
+        ] {
+            draft_msg(st, DraftMsg::Drag(m));
+        }
+    }
+
+    #[test]
+    fn consent_sends_nothing_until_send() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly", "Avaruus"]);
+        reload(&mut st);
+
+        assert_eq!(st.handle(Msg::Suggest), Effect::Plan(st.generation), "opening only estimates");
+        assert!(matches!(st.suggest, Some(Panel::Planning)));
+        let plan = suggest_plan(&st, Ok(()));
+        assert_eq!(
+            plan.sends_line(),
+            "Sends 2 publisher terms with their feed names, and your category and group names, to OpenAI. No article text."
+        );
+        assert_eq!(plan.blocker(), None);
+        assert_eq!(st.handle(Msg::Planned(st.generation, Ok(plan.clone()))), Effect::None);
+        assert!(matches!(st.suggest, Some(Panel::Ready(_))));
+        let _ = st.view();
+        assert_eq!(st.handle(Msg::CloseSuggest), Effect::None);
+        assert!(st.suggest.is_none(), "Cancel closes the panel");
+        assert!(pending(&st).is_none(), "nothing was sent or saved");
+
+        // A late estimate for the closed panel is dropped.
+        let old = st.generation;
+        let _ = st.handle(Msg::Suggest);
+        assert_eq!(st.handle(Msg::Planned(old, Ok(plan.clone()))), Effect::None);
+        assert!(matches!(st.suggest, Some(Panel::Planning)));
+
+        // Not ready: Send does nothing.
+        let not_ready = suggest_plan(&st, Err("Add an API key under AI setup.".into()));
+        assert_eq!(not_ready.blocker().as_deref(), Some("Add an API key under AI setup."));
+        let _ = st.handle(Msg::Planned(st.generation, Ok(not_ready)));
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::None);
+        assert!(matches!(st.suggest, Some(Panel::Ready(_))));
+
+        // Ready: Send is the one thing that sends.
+        let _ = st.handle(Msg::Planned(st.generation, Ok(plan)));
+        assert!(matches!(st.suggest, Some(Panel::Ready(_))), "a newer estimate replaces the shown one");
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::Suggest);
+        assert!(matches!(st.suggest, Some(Panel::Running(_))));
+        assert_eq!(st.handle(Msg::Suggest), Effect::None, "no second run while one is going");
+
+        // A failure shows in the panel and saves nothing.
+        let _ = st.handle(Msg::Suggested(Err("the provider declined".into())));
+        assert!(matches!(&st.suggest, Some(Panel::Failed(e)) if e == "the provider declined"));
+        assert!(st.draft.is_none() && pending(&st).is_none());
+    }
+
+    #[test]
+    fn nothing_to_sort_disables_send() {
+        let st = state();
+        let plan = suggest_plan(&st, Ok(()));
+        assert_eq!(plan.blocker().as_deref(), Some("Nothing is unsorted or ungrouped."));
+        let tight = SuggestPlan {
+            limits: juttusihti_core::budget::Limits { max_tokens: Some(10), ..plan.limits },
+            input: with(&st, |s| {
+                s.create_label("AI").unwrap();
+                s.category_plan_input(MAX_TERMS)
+            })
+            .unwrap(),
+            ..(*plan).clone()
+        };
+        assert!(tight.blocker().unwrap().contains("more than the per-run limit"));
+        assert_eq!(tight.limit_line(), "Limit 10 tokens per run. Your ChatGPT plan's usage limits apply.");
+    }
+
+    #[test]
+    fn pending_draft_reopens_in_draft_mode() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        assert!(st.draft.is_none());
+        let t = term_id(&st, "Tekoäly");
+        let draft = CategoryDraft { vague: vec![t], ..Default::default() };
+        let id = open_draft(&mut st, &draft);
+        let d = st.draft.as_ref().expect("the pending draft opens on load");
+        assert_eq!((d.id, &d.plan), (id, &draft));
+        let _ = st.view();
+
+        // A run's answer opens too, with the terms left for later.
+        let mut st = state();
+        let id = with(&st, |s| s.save_category_draft(&draft, Provider::Openai, "m")).unwrap();
+        st.suggest = Some(Panel::Failed(String::new()));
+        assert_eq!(st.handle(Msg::Suggested(Ok((id, Box::new(draft.clone()), 3)))), Effect::Load);
+        assert!(st.suggest.is_none());
+        reload(&mut st);
+        assert_eq!(st.draft.as_ref().map(|d| (d.id, d.more_terms)), Some((id, 3)));
+
+        // Cancel discards it and normal organising returns.
+        draft_msg(&mut st, DraftMsg::Cancel);
+        assert!(st.draft.is_none() && pending(&st).is_none());
+    }
+
+    /// A draft with AI group 1 holding new category 1 (with a term) and a placement.
+    fn ai_draft(st: &State) -> (CategoryDraft, LabelId, TermId) {
+        let space = with(st, |s| s.create_label("Space")).unwrap();
+        let t = term_id(st, "Tekoäly");
+        let draft = CategoryDraft {
+            new_groups: vec![NewGroupDraft { temp: 1, name: "Tech".into(), by_user: false, ticked: true }],
+            new_categories: vec![NewCategoryDraft {
+                temp: 1,
+                name: "AI".into(),
+                group: GroupRef::New(1),
+                ticked: true,
+            }],
+            placements: vec![Placement { label: space, rename: None, group: GroupRef::New(1), ticked: true }],
+            mappings: vec![Mapping { term: t, category: CategoryRef::New(1), ticked: true }],
+            vague: vec![],
+        };
+        (draft, space, t)
+    }
+
+    #[test]
+    fn unticking_group_unticks_contents() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, space, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        draft_msg(&mut st, DraftMsg::Tick(Name::Group(1)));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert!(!plan.new_groups[0].ticked);
+        assert!(!plan.new_categories[0].ticked && !plan.placements[0].ticked, "its contents are unticked");
+        assert_eq!(pending(&st).unwrap().1, *plan, "every edit is stored");
+
+        // Ticking a category in an unticked group ticks the group again.
+        draft_msg(&mut st, DraftMsg::Tick(Name::Category(CategoryRef::Existing(space))));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert!(plan.new_groups[0].ticked && plan.placements[0].ticked);
+        assert!(!plan.new_categories[0].ticked);
+        assert_eq!(pending(&st).unwrap().1, *plan);
+    }
+
+    #[test]
+    fn dragging_category_into_user_group_updates_draft() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        let work = with(&st, |s| s.create_group("Work")).unwrap();
+        reload(&mut st);
+        let (draft, space, t) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        // + New group adds the user's own group.
+        draft_msg(&mut st, DraftMsg::NewGroup);
+        draft_msg(&mut st, DraftMsg::EditName("  Mine ".into()));
+        draft_msg(&mut st, DraftMsg::SaveName);
+        let plan = &st.draft.as_ref().unwrap().plan;
+        let mine = plan.new_groups.iter().find(|g| g.by_user).expect("a user group");
+        assert_eq!((mine.name.as_str(), mine.ticked), ("Mine", true));
+        let mine = mine.temp;
+        assert_ne!(mine, 1);
+
+        draft_drag(&mut st, DItem::Category(CategoryRef::New(1)), DTarget::Group(GroupRef::New(mine)));
+        draft_drag(&mut st, DItem::Category(CategoryRef::Existing(space)), DTarget::Group(GroupRef::Existing(work)));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert_eq!(plan.new_categories[0].group, GroupRef::New(mine));
+        assert_eq!(plan.placements[0].group, GroupRef::Existing(work));
+
+        // Terms move between categories; placements are renamed by clicking.
+        draft_drag(&mut st, DItem::Term(t), DTarget::Category(CategoryRef::Existing(space)));
+        draft_msg(&mut st, DraftMsg::StartRename(Name::Category(CategoryRef::Existing(space))));
+        draft_msg(&mut st, DraftMsg::EditName("Space travel".into()));
+        draft_msg(&mut st, DraftMsg::SaveName);
+        let plan = st.draft.as_ref().unwrap().plan.clone();
+        assert_eq!(plan.mappings[0].category, CategoryRef::Existing(space));
+        assert_eq!(plan.placements[0].rename.as_deref(), Some("Space travel"));
+        assert_eq!(pending(&st).unwrap().1, plan, "every edit is stored");
+        let _ = st.view();
+
+        // Renaming back to the original name drops the rename.
+        draft_msg(&mut st, DraftMsg::StartRename(Name::Category(CategoryRef::Existing(space))));
+        draft_msg(&mut st, DraftMsg::EditName("Space".into()));
+        draft_msg(&mut st, DraftMsg::SaveName);
+        assert_eq!(st.draft.as_ref().unwrap().plan.placements[0].rename, None);
+    }
+
+    #[test]
+    fn approve_reports_skipped() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly", "Avaruus"]);
+        reload(&mut st);
+        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let (a, b) = (term_id(&st, "Tekoäly"), term_id(&st, "Avaruus"));
+        let draft = CategoryDraft {
+            mappings: vec![
+                Mapping { term: a, category: CategoryRef::Existing(ai), ticked: true },
+                Mapping { term: b, category: CategoryRef::Existing(ai), ticked: true },
+            ],
+            vague: vec![],
+            ..Default::default()
+        };
+        open_draft(&mut st, &draft);
+        // The user ignores one term meanwhile.
+        with(&st, |s| s.set_term_ignored(b, true)).unwrap();
+
+        draft_msg(&mut st, DraftMsg::Approve);
+        assert_eq!(st.message, Some(Ok("Applied 1 change, skipped 1 that changed meanwhile.".to_string())));
+        assert!(st.draft.is_none(), "normal organising returns");
+        assert!(pending(&st).is_none());
+        assert_eq!(with(&st, |s| s.category_terms(ai)).unwrap()[0].id, a);
+
+        use juttusihti_core::category_draft::ApplyReport;
+        assert_eq!(ai::applied_text(ApplyReport { applied: 3, skipped: 0 }), "Applied 3 changes.");
+    }
+
+    #[test]
+    fn draft_copy() {
+        let mut st = state();
+        add_terms(&st, &["Sää"]);
+        reload(&mut st);
+        let t = term_id(&st, "Sää");
+        open_draft(&mut st, &CategoryDraft { vague: vec![t], ..Default::default() });
+        assert_eq!(
+            crate::organise_draft::vague_line(3).as_deref(),
+            Some("3 terms were too vague to sort and stay unsorted.")
+        );
+        assert_eq!(crate::organise_draft::vague_line(0), None);
     }
 }

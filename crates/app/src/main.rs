@@ -18,6 +18,7 @@ mod help;
 mod icons;
 mod map_view;
 mod organise;
+mod organise_draft;
 mod plan;
 mod providers;
 mod quick;
