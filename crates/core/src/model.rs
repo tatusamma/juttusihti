@@ -244,6 +244,8 @@ pub struct ArticleLabel {
     pub label: Label,
     pub origin: Origin,
     pub status: Status,
+    /// True when membership comes from a publisher term mapped to the label.
+    pub via_terms: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

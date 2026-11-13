@@ -187,6 +187,7 @@ impl Store {
                              ELSE 'rejected' END",
             params![from, into],
         )?;
+        tx.execute("UPDATE feed_terms SET label_id = ?2 WHERE label_id = ?1", params![from, into])?;
         if tx.execute("DELETE FROM labels WHERE id = ?1", [from])? == 0 {
             return Err(Error::NotFound);
         }
@@ -237,22 +238,49 @@ impl Store {
         )?)
     }
 
+    /// Removes a label from an article. When the article reaches the label
+    /// through a mapped term, a user rejection is recorded instead so the
+    /// mapping does not bring it back.
     pub fn untag_article(&self, article: ArticleId, label: LabelId) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM article_labels WHERE article_id = ?1 AND label_id = ?2", params![article, label])?;
+        let via_terms: bool = self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                            WHERE t.article_id = ?1 AND ft.label_id = ?2)",
+            params![article, label],
+            |r| r.get(0),
+        )?;
+        if via_terms {
+            self.conn().execute(
+                "INSERT INTO article_labels(article_id, label_id, origin, status, suggestion_id, created_at)
+                 VALUES (?1, ?2, 'user', 'rejected', NULL, ?3)
+                 ON CONFLICT(article_id, label_id) DO UPDATE SET origin = 'user', status = 'rejected'",
+                params![article, label, now()],
+            )?;
+        } else {
+            self.conn().execute(
+                "DELETE FROM article_labels WHERE article_id = ?1 AND label_id = ?2",
+                params![article, label],
+            )?;
+        }
         Ok(())
     }
 
     pub fn article_labels(&self, article: ArticleId) -> Result<Vec<ArticleLabel>> {
         let mut stmt = self.conn().prepare(
-            "SELECT l.id, l.name, l.color, al.origin, al.status FROM article_labels al
-             JOIN labels l ON l.id = al.label_id WHERE al.article_id = ?1 ORDER BY l.name COLLATE NOCASE",
+            "SELECT l.id, l.name, l.color, al.origin, al.status, 0 FROM article_labels al
+             JOIN labels l ON l.id = al.label_id WHERE al.article_id = ?1
+             UNION
+             SELECT l.id, l.name, l.color, 'user', 'confirmed', 1 FROM labels l
+             WHERE EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                           WHERE t.article_id = ?1 AND ft.label_id = l.id)
+               AND NOT EXISTS (SELECT 1 FROM article_labels r WHERE r.article_id = ?1 AND r.label_id = l.id)
+             ORDER BY 2 COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([article], |r| {
             Ok(ArticleLabel {
                 label: Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? },
                 origin: r.get(3)?,
                 status: r.get(4)?,
+                via_terms: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
