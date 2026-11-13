@@ -192,6 +192,18 @@ impl Store {
 
     pub fn apply_category_draft(&mut self, id: i64, draft: &CategoryDraft) -> Result<ApplyReport> {
         let tx = self.conn_mut().transaction()?;
+        // Only a pending draft applies: a second Approve, or one after Cancel, changes nothing.
+        let pending = tx
+            .query_row(
+                "SELECT 1 FROM ai_suggestions WHERE id = ?1 AND kind = ?2 AND status = 'suggested'",
+                params![id, DRAFT_KIND],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !pending {
+            return Err(Error::NotFound);
+        }
         let (mut applied, mut skipped) = (0, 0);
         let mut groups: HashMap<u32, GroupId> = HashMap::new();
         let mut cats: HashMap<u32, LabelId> = HashMap::new();

@@ -124,7 +124,6 @@ pub enum Op {
     Decide(LabelId, Status),
     MapTerm(TermId, Option<LabelId>),
     Ignore(TermId, bool),
-    SaveDraft(i64, Box<CategoryDraft>),
     ApproveDraft(i64, Box<CategoryDraft>),
     DiscardDraft(i64),
 }
@@ -160,7 +159,6 @@ impl Op {
             }
             Op::MapTerm(id, label) => s.map_term(id, label).map(|_| String::new()),
             Op::Ignore(id, ignored) => s.set_term_ignored(id, ignored).map(|_| String::new()),
-            Op::SaveDraft(id, draft) => s.update_category_draft(id, &draft).map(|_| String::new()),
             Op::ApproveDraft(id, draft) => s.apply_category_draft(id, &draft).map(ai::applied_text),
             Op::DiscardDraft(id) => s.discard_category_draft(id).map(|_| String::new()),
         }
@@ -179,6 +177,8 @@ enum Effect {
     Plan(u64),
     /// Send the consented AI request.
     Suggest,
+    /// Store the edited draft (one save at a time; see [`Draft::saved`]).
+    SaveDraft(i64, Box<CategoryDraft>),
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +214,8 @@ pub enum Msg {
     /// The saved draft's id, the draft and the terms left for later.
     Suggested(Result<(i64, Box<CategoryDraft>, usize), String>),
     Draft(DraftMsg),
+    /// A draft save returned.
+    DraftSaved(Result<(), String>),
 }
 
 pub(crate) const NAME_ID: &str = "organise-name";
@@ -284,6 +286,13 @@ impl State {
             Effect::Plan(generation) => {
                 Cmd::perform(ai::plan(self.db.clone(), self.catalog.clone()), move |r| Msg::Planned(generation, r))
             }
+            Effect::SaveDraft(id, draft) => {
+                let db = self.db.clone();
+                Cmd::perform(
+                    async move { db.call(move |s| s.update_category_draft(id, &draft)).await },
+                    Msg::DraftSaved,
+                )
+            }
             Effect::Suggest => match &self.suggest {
                 Some(Panel::Running(p)) => Cmd::perform(ai::run(self.db.clone(), (**p).clone()), Msg::Suggested),
                 _ => Cmd::none(),
@@ -347,6 +356,12 @@ impl State {
             }
             Msg::Loaded(Err(e)) => self.message = Some(Err(e)),
             Msg::Done(r) => {
+                // A failed Approve or Cancel leaves the draft open for another try.
+                if r.is_err()
+                    && let Some(d) = self.draft.as_mut()
+                {
+                    d.reopen();
+                }
                 self.message = match r {
                     Ok(m) if m.is_empty() => None,
                     r => Some(r),
@@ -454,7 +469,8 @@ impl State {
             | Msg::SendSuggest
             | Msg::CloseSuggest
             | Msg::Suggested(_)
-            | Msg::Draft(_) => return self.handle_ai(msg),
+            | Msg::Draft(_)
+            | Msg::DraftSaved(_) => return self.handle_ai(msg),
         }
         Effect::None
     }
@@ -503,10 +519,23 @@ impl State {
                 return match d.update(m, &self.snap) {
                     Outcome::None => Effect::None,
                     Outcome::Focus => Effect::Focus,
-                    Outcome::Changed => Effect::Run(Op::SaveDraft(d.id, Box::new(d.plan.clone()))),
+                    Outcome::Changed => Effect::SaveDraft(d.id, Box::new(d.plan.clone())),
                     Outcome::Approve => Effect::Run(Op::ApproveDraft(d.id, Box::new(d.plan.clone()))),
                     Outcome::Discard => Effect::Run(Op::DiscardDraft(d.id)),
                 };
+            }
+            Msg::DraftSaved(r) => {
+                // Once the draft is approved or cancelled (or gone), a save
+                // that lost the race to it is expected to find nothing.
+                let Some(d) = self.draft.as_mut() else { return Effect::None };
+                if let Err(e) = r
+                    && !d.closing()
+                {
+                    self.message = Some(Err(e));
+                }
+                if d.saved() {
+                    return Effect::SaveDraft(d.id, Box::new(d.plan.clone()));
+                }
             }
             _ => {}
         }
@@ -1044,6 +1073,10 @@ mod tests {
                 reload(st);
             }
             Effect::Load => reload(st),
+            Effect::SaveDraft(id, draft) => {
+                let r = with(st, |s| s.update_category_draft(id, &draft)).map_err(|e| e.to_string());
+                send(st, Msg::DraftSaved(r));
+            }
             Effect::None | Effect::Focus | Effect::Plan(_) | Effect::Suggest => {}
         }
     }
@@ -1536,6 +1569,89 @@ mod tests {
 
         use juttusihti_core::category_draft::ApplyReport;
         assert_eq!(ai::applied_text(ApplyReport { applied: 3, skipped: 0 }), "Applied 3 changes.");
+    }
+
+    #[test]
+    fn double_approve_applies_once_and_later_edits_are_ignored() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, _, _) = ai_draft(&st);
+        let id = open_draft(&mut st, &draft);
+
+        let first = st.handle(Msg::Draft(DraftMsg::Approve));
+        assert!(matches!(first, Effect::Run(Op::ApproveDraft(i, _)) if i == id));
+        assert_eq!(st.handle(Msg::Draft(DraftMsg::Approve)), Effect::None, "a second press does nothing");
+        assert_eq!(st.handle(Msg::Draft(DraftMsg::Cancel)), Effect::None, "nor does Cancel after it");
+        let before = st.draft.as_ref().unwrap().plan.clone();
+        assert_eq!(st.handle(Msg::Draft(DraftMsg::Tick(Name::Group(1)))), Effect::None);
+        assert_eq!(st.draft.as_ref().unwrap().plan, before, "edits after Approve are ignored");
+        let _ = st.view();
+
+        // A failed Approve reopens the draft for another try.
+        let _ = st.handle(Msg::Done(Err("database is busy".into())));
+        assert!(matches!(st.handle(Msg::Draft(DraftMsg::Approve)), Effect::Run(Op::ApproveDraft(..))));
+    }
+
+    #[test]
+    fn a_save_that_loses_the_race_to_approve_keeps_the_message() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, _, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        // An edit's save is still in flight when Approve runs.
+        let Effect::SaveDraft(id, edited) = st.handle(Msg::Draft(DraftMsg::Tick(Name::Group(1)))) else {
+            panic!("an edit saves")
+        };
+        send(&mut st, Msg::Draft(DraftMsg::Approve));
+        let applied = st.message.clone();
+        assert!(matches!(&applied, Some(Ok(m)) if m.starts_with("Applied")));
+        let late = with(&st, |s| s.update_category_draft(id, &edited)).map_err(|e| e.to_string());
+        assert!(late.is_err(), "the draft is no longer pending");
+        assert_eq!(st.handle(Msg::DraftSaved(late)), Effect::None);
+        assert_eq!(st.message, applied, "the late save does not replace the success message");
+    }
+
+    #[test]
+    fn saves_run_one_at_a_time_and_send_the_latest_draft() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, space, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        let first = st.handle(Msg::Draft(DraftMsg::Tick(Name::Group(1))));
+        assert!(matches!(first, Effect::SaveDraft(..)));
+        let second = st.handle(Msg::Draft(DraftMsg::Tick(Name::Category(CategoryRef::Existing(space)))));
+        assert_eq!(second, Effect::None, "waits for the save in flight");
+        let latest = st.draft.as_ref().unwrap().plan.clone();
+        let Effect::SaveDraft(_, again) = st.handle(Msg::DraftSaved(Ok(()))) else { panic!("saves again") };
+        assert_eq!(*again, latest, "the follow-up save carries the latest draft");
+        assert_eq!(st.handle(Msg::DraftSaved(Ok(()))), Effect::None, "nothing more to save");
+
+        // A real save failure while the draft is open is shown; the draft stays.
+        let _ = st.handle(Msg::Draft(DraftMsg::Tick(Name::Group(1))));
+        let _ = st.handle(Msg::DraftSaved(Err("disk full".into())));
+        assert_eq!(st.message, Some(Err("disk full".to_string())));
+        assert!(st.draft.is_some());
+    }
+
+    #[test]
+    fn own_ungrouped_categories_take_terms_in_the_draft() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        let mine = with(&st, |s| s.create_label("Mine")).unwrap();
+        reload(&mut st);
+        let (draft, _, t) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+        let _ = st.view();
+
+        draft_drag(&mut st, DItem::Term(t), DTarget::Category(CategoryRef::Existing(mine)));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert_eq!(plan.mappings[0].category, CategoryRef::Existing(mine));
+        assert_eq!(pending(&st).unwrap().1, *plan);
     }
 
     #[test]

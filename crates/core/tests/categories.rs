@@ -580,6 +580,30 @@ mod draft {
     }
 
     #[test]
+    fn apply_refuses_a_draft_that_is_not_pending() {
+        let mut s = setup(&["a", "b"]);
+        let (a, b) = (term_named(&s, "a"), term_named(&s, "b"));
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "G")],
+            new_categories: vec![nc(1, "C", GroupRef::New(1))],
+            mappings: vec![mp(a, CategoryRef::New(1))],
+            ..Default::default()
+        };
+        // Applied once: a second Approve changes nothing.
+        let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
+        s.apply_category_draft(id, &d).unwrap();
+        let again = CategoryDraft { mappings: vec![mp(b, CategoryRef::New(1))], ..d.clone() };
+        assert!(matches!(s.apply_category_draft(id, &again), Err(juttusihti_core::Error::NotFound)));
+        assert_eq!((count(&s, "category_groups"), count(&s, "labels")), (1, 1));
+        assert_eq!(label_of(&s, b), None);
+        // Discarded: Approve afterwards changes nothing either.
+        let id = s.save_category_draft(&again, Provider::Openai, "m").unwrap();
+        s.discard_category_draft(id).unwrap();
+        assert!(matches!(s.apply_category_draft(id, &again), Err(juttusihti_core::Error::NotFound)));
+        assert_eq!(label_of(&s, b), None);
+    }
+
+    #[test]
     fn duplicate_new_group_name_reuses_existing_group() {
         let mut s = setup(&["a"]);
         let a = term_ids(&s)[0];

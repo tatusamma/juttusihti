@@ -268,11 +268,49 @@ pub struct Draft {
     edit: Option<Edit>,
     drag: DragState<DItem, DTarget>,
     expanded: Vec<CategoryRef>,
+    /// Approve or Cancel was pressed: the draft takes no more edits.
+    closing: bool,
+    /// A save is in flight; only one runs at a time.
+    saving: bool,
+    /// The draft changed while a save was in flight.
+    dirty: bool,
 }
 
 impl Draft {
     pub fn new(id: i64, plan: CategoryDraft, more_terms: usize) -> Self {
-        Self { id, plan, more_terms, edit: None, drag: DragState::default(), expanded: Vec::new() }
+        Self {
+            id,
+            plan,
+            more_terms,
+            edit: None,
+            drag: DragState::default(),
+            expanded: Vec::new(),
+            closing: false,
+            saving: false,
+            dirty: false,
+        }
+    }
+
+    /// Whether Approve or Cancel is running.
+    pub fn closing(&self) -> bool {
+        self.closing
+    }
+
+    /// Approve or Cancel failed: the draft can be edited again.
+    pub fn reopen(&mut self) {
+        self.closing = false;
+    }
+
+    /// A save returned. True when the draft changed meanwhile and must be
+    /// saved again (the caller sends the current plan).
+    pub fn saved(&mut self) -> bool {
+        self.saving = false;
+        if self.dirty && !self.closing {
+            self.dirty = false;
+            self.saving = true;
+            return true;
+        }
+        false
     }
 
     pub fn dragging(&self) -> bool {
@@ -289,6 +327,29 @@ impl Draft {
     }
 
     pub fn update(&mut self, msg: DraftMsg, snap: &Snapshot) -> Outcome {
+        if self.closing {
+            return Outcome::None;
+        }
+        match self.apply(msg, snap) {
+            Outcome::Changed if self.saving => {
+                self.dirty = true;
+                Outcome::None
+            }
+            Outcome::Changed => {
+                self.saving = true;
+                Outcome::Changed
+            }
+            o @ (Outcome::Approve | Outcome::Discard) => {
+                self.closing = true;
+                self.edit = None;
+                self.drag.update(DragMsg::Cancel);
+                o
+            }
+            o => o,
+        }
+    }
+
+    fn apply(&mut self, msg: DraftMsg, snap: &Snapshot) -> Outcome {
         let changed = |c: bool| if c { Outcome::Changed } else { Outcome::None };
         match msg {
             DraftMsg::Tick(n) => {
@@ -515,16 +576,13 @@ impl Draft {
             body = body.push(self.group_zone(block, r, kind));
         }
         body = body.push(self.view_add_group());
-        // Ungrouped categories that only receive terms in the draft.
-        let mapped: Vec<&CategoryNode> = snap
-            .ungrouped
-            .iter()
-            .filter(|c| !self.plan.placements.iter().any(|p| p.label == c.label.id))
-            .filter(|c| self.plan.mappings.iter().any(|m| m.category == CategoryRef::Existing(c.label.id)))
-            .collect();
-        if !mapped.is_empty() {
-            let mut block = column![style::heading("Ungrouped")].spacing(SPACE[0]);
-            for c in mapped {
+        // The user's ungrouped categories the draft does not place: read-only term targets.
+        let own: Vec<&CategoryNode> =
+            snap.ungrouped.iter().filter(|c| !self.plan.placements.iter().any(|p| p.label == c.label.id)).collect();
+        if !own.is_empty() {
+            let heading = row![style::heading("Ungrouped"), yours()].spacing(SPACE[1]).align_y(Center);
+            let mut block = column![heading].spacing(SPACE[0]);
+            for c in own {
                 block = block.push(self.view_category(CategoryRef::Existing(c.label.id), &c.label.name, snap, kind));
             }
             body = body.push(block);
@@ -545,8 +603,8 @@ impl Draft {
         }
         let footer = row![
             Space::new().width(Fill),
-            style::quiet_button(None, "Cancel", style::quiet, Some(DraftMsg::Cancel)),
-            style::main_button("Approve", Some(DraftMsg::Approve)),
+            style::quiet_button(None, "Cancel", style::quiet, (!self.closing).then_some(DraftMsg::Cancel)),
+            style::main_button("Approve", (!self.closing).then_some(DraftMsg::Approve)),
         ]
         .spacing(SPACE[1])
         .align_y(Center);
