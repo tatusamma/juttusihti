@@ -46,6 +46,15 @@ pub struct NewArticle {
     pub content: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<i64>,
+    /// Publisher category words attached to this entry.
+    pub terms: Vec<NewTerm>,
+}
+
+/// A publisher category word (RSS `category`, Atom `category`, JSON Feed tag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTerm {
+    pub name: String,
+    pub scheme: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

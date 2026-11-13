@@ -11,6 +11,7 @@ fn entry(guid: &str, title: &str, summary: &str, published_at: i64) -> NewArticl
         content: None,
         author: None,
         published_at: Some(published_at),
+        terms: vec![],
     }
 }
 

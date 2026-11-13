@@ -17,6 +17,7 @@ fn seeded() -> (Store, Vec<i64>, i64, i64) {
             content: None,
             author: None,
             published_at: Some(1_790_812_800 + i),
+            terms: vec![],
         })
         .collect();
     s.ingest(f, &entries).unwrap();

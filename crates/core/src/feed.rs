@@ -3,7 +3,7 @@
 //! Feed content is untrusted: sizes are bounded and HTML is only ever
 //! reduced to plain text for display and indexing.
 
-use crate::{Error, NewArticle, Result};
+use crate::{Error, NewArticle, NewTerm, Result};
 
 /// Upper bound for a single feed document.
 pub const MAX_FEED_BYTES: usize = 16 * 1024 * 1024;
@@ -11,6 +11,10 @@ pub const MAX_FEED_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FIELD_CHARS: usize = 512 * 1024;
 /// Upper bound for entries taken from one document.
 pub const MAX_ENTRIES: usize = 2_000;
+/// Upper bound for the characters in one publisher term.
+pub const MAX_TERM_CHARS: usize = 100;
+/// Upper bound for terms kept per entry.
+pub const MAX_TERMS_PER_ENTRY: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFeed {
@@ -57,6 +61,7 @@ pub fn parse(bytes: &[u8], source_url: Option<&str>) -> Result<ParsedFeed> {
             if title.is_empty() && url.is_none() {
                 return None;
             }
+            let terms = extract_terms(&e.categories);
             let author = e.authors.into_iter().filter_map(|p| p.name).next();
             let published_at = e.published.or(e.updated).map(|d| d.timestamp());
             let guid = if e.id.trim().is_empty() {
@@ -64,7 +69,7 @@ pub fn parse(bytes: &[u8], source_url: Option<&str>) -> Result<ParsedFeed> {
             } else {
                 e.id
             };
-            Some(NewArticle { guid, url, title: bounded(title), summary, content, author, published_at })
+            Some(NewArticle { guid, url, title: bounded(title), summary, content, author, published_at, terms })
         })
         .collect();
 
@@ -73,6 +78,29 @@ pub fn parse(bytes: &[u8], source_url: Option<&str>) -> Result<ParsedFeed> {
         site_url,
         entries,
     })
+}
+
+fn extract_terms(categories: &[feed_rs::model::Category]) -> Vec<NewTerm> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for c in categories {
+        let raw = c.label.as_deref().filter(|l| !l.trim().is_empty()).unwrap_or(&c.term);
+        let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let name: String = collapsed.chars().take(MAX_TERM_CHARS).collect();
+        let name = name.trim_end().to_string();
+        let key = crate::normalize::normalize_text(&name);
+        if key.is_empty() {
+            continue;
+        }
+        let scheme = c.scheme.as_deref().map(|s| s.trim().to_lowercase()).unwrap_or_default();
+        if seen.insert((key, scheme.clone())) {
+            out.push(NewTerm { name, scheme });
+            if out.len() == MAX_TERMS_PER_ENTRY {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Only http(s) links are kept; `javascript:`, `file:` and others are dropped.
@@ -146,5 +174,66 @@ mod tests {
         assert!(parse(b"<html>not a feed</html>", None).is_err());
         let big = vec![b' '; MAX_FEED_BYTES + 1];
         assert!(parse(&big, None).is_err());
+    }
+
+    #[test]
+    fn rss_item_categories_become_terms() {
+        let rss = r#"<rss version="2.0"><channel><title>T</title><category>Channel</category>
+      <item><title>A</title><guid>1</guid><category>Politiikka</category>
+      <category domain="http://x/tax">AI</category><category> ai </category><category>  </category></item>
+    </channel></rss>"#;
+        let f = parse(rss.as_bytes(), None).unwrap();
+        assert_eq!(
+            f.entries[0].terms,
+            vec![
+                NewTerm { name: "Politiikka".into(), scheme: "".into() },
+                NewTerm { name: "AI".into(), scheme: "http://x/tax".into() },
+                NewTerm { name: "ai".into(), scheme: "".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn atom_label_wins_over_term() {
+        let atom = r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><id>x</id>
+      <updated>2024-01-01T00:00:00Z</updated>
+      <entry><title>A</title><id>1</id><updated>2024-01-01T00:00:00Z</updated>
+      <category term="tech" scheme="urn:s" label="Technology"/><category term="Space"/></entry></feed>"#;
+        let f = parse(atom.as_bytes(), None).unwrap();
+        assert_eq!(
+            f.entries[0].terms,
+            vec![
+                NewTerm { name: "Technology".into(), scheme: "urn:s".into() },
+                NewTerm { name: "Space".into(), scheme: "".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn json_feed_tags_become_terms() {
+        let json = r#"{"version":"https://jsonfeed.org/version/1.1","title":"T","items":[
+      {"id":"1","title":"A","content_text":"x","tags":["Sää","Sää"]}]}"#;
+        let f = parse(json.as_bytes(), None).unwrap();
+        assert_eq!(f.entries[0].terms, vec![NewTerm { name: "Sää".into(), scheme: "".into() }]);
+    }
+
+    #[test]
+    fn terms_are_bounded() {
+        let mut cats = String::new();
+        for i in 0..29 {
+            cats.push_str(&format!("<category>c{i}</category>"));
+        }
+        cats.push_str(&format!("<category>{}</category>", "ä".repeat(300)));
+        let rss = format!(
+            r#"<rss version="2.0"><channel><title>T</title><item><title>A</title><guid>1</guid>{cats}</item></channel></rss>"#
+        );
+        let f = parse(rss.as_bytes(), None).unwrap();
+        assert_eq!(f.entries[0].terms.len(), MAX_TERMS_PER_ENTRY);
+        let long = format!("<category>{}</category>", "ä".repeat(300));
+        let rss = format!(
+            r#"<rss version="2.0"><channel><title>T</title><item><title>A</title><guid>1</guid>{long}</item></channel></rss>"#
+        );
+        let f = parse(rss.as_bytes(), None).unwrap();
+        assert_eq!(f.entries[0].terms[0].name.chars().count(), MAX_TERM_CHARS);
     }
 }

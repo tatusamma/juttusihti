@@ -190,6 +190,7 @@ fn main() {
                     content: (rng.below(5) == 0).then(|| rng.words(250)),
                     author: None,
                     published_at: (rng.below(50) != 0).then(|| END - (rng.next() % SPAN as u64) as i64),
+                    terms: vec![],
                 }
             })
             .collect();

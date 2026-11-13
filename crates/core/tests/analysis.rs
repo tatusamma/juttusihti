@@ -24,6 +24,7 @@ fn entry(guid: &str, url: &str, title: &str, summary: Option<&str>, at: Option<i
         content: None,
         author: None,
         published_at: at,
+        terms: vec![],
     }
 }
 

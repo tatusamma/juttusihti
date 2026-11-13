@@ -15,6 +15,7 @@ fn store_with_article() -> (Store, ArticleId) {
             content: None,
             author: None,
             published_at: Some(1_790_812_800),
+            terms: vec![],
         }],
     )
     .unwrap();

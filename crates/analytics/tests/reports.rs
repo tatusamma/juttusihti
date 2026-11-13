@@ -16,6 +16,7 @@ fn article(guid: &str, title: &str, at: i64) -> NewArticle {
         content: None,
         author: None,
         published_at: Some(at),
+        terms: vec![],
     }
 }
 

@@ -19,6 +19,7 @@ fn seeded(n: i64) -> (Store, Vec<i64>) {
             content: None,
             author: None,
             published_at: if i == n - 1 { None } else { Some(OCT1 + i * DAY) },
+            terms: vec![],
         })
         .collect();
     s.ingest(f, &entries).unwrap();

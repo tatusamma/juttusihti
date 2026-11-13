@@ -408,6 +408,7 @@ mod tests {
                 content: None,
                 author: None,
                 published_at: Some(1_790_812_800 + i),
+                terms: vec![],
             })
             .collect();
         store.ingest(feed, &entries).unwrap();

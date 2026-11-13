@@ -129,6 +129,7 @@ fn seed(n: usize) -> Arc<Mutex<Store>> {
             content: None,
             author: None,
             published_at: Some(OCT1 + i as i64 * 600),
+            terms: vec![],
         })
         .collect();
     // Two articles that the local candidate generator pairs up.
@@ -140,6 +141,7 @@ fn seed(n: usize) -> Arc<Mutex<Store>> {
         content: None,
         author: None,
         published_at: Some(OCT1),
+        terms: vec![],
     });
     entries.push(NewArticle {
         guid: "p2".into(),
@@ -149,6 +151,7 @@ fn seed(n: usize) -> Arc<Mutex<Store>> {
         content: None,
         author: None,
         published_at: Some(OCT1 + DAY),
+        terms: vec![],
     });
     s.ingest(f, &entries).unwrap();
     Arc::new(Mutex::new(s))
@@ -875,12 +878,14 @@ fn seed_headlines() -> Arc<Mutex<Store>> {
             content: None,
             author: None,
             published_at: Some(OCT1 + i as i64 * 600),
+            terms: vec![],
         })
         .collect();
     entries.push(NewArticle {
         guid: "copy".into(),
         url: Some("https://other.example/copy".into()),
         published_at: Some(OCT1 + DAY),
+        terms: vec![],
         ..entries[0].clone()
     });
     s.ingest(f, &entries).unwrap();
