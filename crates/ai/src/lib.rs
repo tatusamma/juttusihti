@@ -7,6 +7,7 @@
 //! is untrusted: [`prompts`] validates every response before anything is
 //! stored, and nothing in a response is ever executed.
 
+pub mod categorize;
 pub mod chatgpt;
 pub mod decisions;
 pub mod factcheck;
