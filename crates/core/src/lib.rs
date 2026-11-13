@@ -6,6 +6,7 @@
 pub mod ai_defaults;
 pub mod analysis;
 pub mod budget;
+pub mod categories;
 pub mod db;
 pub mod discovery;
 pub mod estimate;

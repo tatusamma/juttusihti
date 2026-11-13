@@ -1,5 +1,5 @@
 use juttusihti_core::search::SearchQuery;
-use juttusihti_core::store::Store;
+use juttusihti_core::store::{ListFilter, Store};
 use juttusihti_core::*;
 
 fn entry(guid: &str, terms: &[&str]) -> NewArticle {
@@ -220,4 +220,153 @@ fn delete_category_returns_terms_to_unsorted() {
         .query_row("SELECT COUNT(*) FROM feed_terms WHERE label_id IS NULL AND ignored = 0", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 1);
+}
+
+// ---- organising API ----------------------------------------------------
+
+use juttusihti_core::categories::*;
+
+fn names(nodes: &[CategoryNode]) -> Vec<String> {
+    nodes.iter().map(|n| n.label.name.clone()).collect()
+}
+
+fn term_id(s: &Store, name: &str) -> TermId {
+    s.conn().query_row("SELECT id FROM feed_terms WHERE name = ?1", [name], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn tree_orders_groups_and_categories_by_position() {
+    let mut s = Store::open_in_memory().unwrap();
+    let g1 = s.create_group("Zeta").unwrap();
+    let g2 = s.create_group("Alpha").unwrap();
+    let b = s.create_label("b").unwrap();
+    let a = s.create_label("a").unwrap();
+    s.move_category(b, Some(g1), 0).unwrap();
+    s.move_category(a, Some(g1), 1).unwrap();
+    let t = s.category_tree().unwrap();
+    assert_eq!(t.groups.iter().map(|g| g.group.id).collect::<Vec<_>>(), vec![g1, g2]);
+    assert_eq!(names(&t.groups[0].categories), vec!["b", "a"]);
+    s.move_group(g2, 0).unwrap();
+    let t = s.category_tree().unwrap();
+    assert_eq!(t.groups[0].group.id, g2);
+    assert!(t.ungrouped.is_empty());
+}
+
+#[test]
+fn group_names_are_unique_ignoring_case_and_spaces() {
+    let s = Store::open_in_memory().unwrap();
+    s.create_group("Tech").unwrap();
+    assert!(matches!(s.create_group(" tech "), Err(Error::Invalid(_))));
+    assert!(matches!(s.create_group("  "), Err(Error::Invalid(_))));
+    let g = s.create_group("Other").unwrap();
+    assert!(matches!(s.rename_group(g, "TECH"), Err(Error::Invalid(_))));
+    s.rename_group(g, "Other 2").unwrap();
+}
+
+#[test]
+fn deleting_group_ungroups_categories_and_drops_favourite() {
+    let mut s = Store::open_in_memory().unwrap();
+    let g = s.create_group("G").unwrap();
+    let l = s.create_label("L").unwrap();
+    s.move_category(l, Some(g), 0).unwrap();
+    s.add_favourite(Favourite::Group(g)).unwrap();
+    s.delete_group(g).unwrap();
+    let t = s.category_tree().unwrap();
+    assert!(t.groups.is_empty());
+    assert_eq!(names(&t.ungrouped), vec!["L"]);
+    assert!(t.favourites.is_empty());
+}
+
+#[test]
+fn move_category_between_groups_renumbers_both() {
+    let mut s = Store::open_in_memory().unwrap();
+    let g1 = s.create_group("G1").unwrap();
+    let g2 = s.create_group("G2").unwrap();
+    let ids: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| s.create_label(n).unwrap()).collect();
+    for (i, l) in ids.iter().take(3).enumerate() {
+        s.move_category(*l, Some(g1), i).unwrap();
+    }
+    s.move_category(ids[3], Some(g2), 0).unwrap();
+    s.move_category(ids[1], Some(g2), 0).unwrap();
+    let t = s.category_tree().unwrap();
+    assert_eq!(names(&t.groups[0].categories), vec!["a", "c"]);
+    assert_eq!(names(&t.groups[1].categories), vec!["b", "d"]);
+    let pos = |l: LabelId| -> i64 {
+        s.conn().query_row("SELECT position FROM labels WHERE id = ?1", [l], |r| r.get(0)).unwrap()
+    };
+    assert_eq!((pos(ids[0]), pos(ids[2])), (0, 1));
+    assert_eq!((pos(ids[1]), pos(ids[3])), (0, 1));
+    s.move_category(ids[1], None, 99).unwrap();
+    assert_eq!(names(&s.category_tree().unwrap().ungrouped), vec!["b"]);
+}
+
+#[test]
+fn mapping_and_ignoring_terms() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["AI", "Sports", "Misc"])]).unwrap();
+    let l = s.create_label("Tech").unwrap();
+    assert_eq!(s.unsorted_terms().unwrap().len(), 3);
+    let ai = term_id(&s, "AI");
+    let sp = term_id(&s, "Sports");
+    s.map_term(ai, Some(l)).unwrap();
+    s.set_term_ignored(sp, true).unwrap();
+    assert_eq!(s.unsorted_terms().unwrap().len(), 1);
+    assert_eq!(s.category_terms(l).unwrap()[0].feed_title, "https://a.example/rss");
+    assert_eq!(s.category_terms(l).unwrap().len(), 1);
+    assert_eq!(s.ignored_terms().unwrap().len(), 1);
+    assert_eq!(s.category_tree().unwrap().ungrouped[0].term_count, 1);
+    // mapping clears ignored; ignoring clears mapping
+    s.map_term(sp, Some(l)).unwrap();
+    assert!(s.ignored_terms().unwrap().is_empty());
+    assert_eq!(s.category_terms(l).unwrap().len(), 2);
+    s.set_term_ignored(ai, true).unwrap();
+    assert_eq!(s.category_terms(l).unwrap().len(), 1);
+    s.set_term_ignored(ai, false).unwrap();
+    assert_eq!(s.unsorted_terms().unwrap().len(), 2);
+    s.map_term(sp, None).unwrap();
+    assert_eq!(s.category_terms(l).unwrap().len(), 0);
+    assert!(matches!(s.map_term(9999, None), Err(Error::NotFound)));
+}
+
+#[test]
+fn favourites_keep_their_order() {
+    let mut s = Store::open_in_memory().unwrap();
+    let g = s.create_group("G").unwrap();
+    let l = s.create_label("L").unwrap();
+    s.add_favourite(Favourite::Category(l)).unwrap();
+    s.add_favourite(Favourite::Group(g)).unwrap();
+    s.add_favourite(Favourite::Category(l)).unwrap();
+    assert_eq!(s.category_tree().unwrap().favourites, vec![Favourite::Category(l), Favourite::Group(g)]);
+    s.move_favourite(Favourite::Group(g), 0).unwrap();
+    assert_eq!(s.category_tree().unwrap().favourites, vec![Favourite::Group(g), Favourite::Category(l)]);
+    s.remove_favourite(Favourite::Group(g)).unwrap();
+    assert_eq!(s.category_tree().unwrap().favourites, vec![Favourite::Category(l)]);
+}
+
+#[test]
+fn counts_are_distinct_and_follow_view_and_feed() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    let f2 = feed(&mut s, "https://b.example/rss");
+    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    let g = s.create_group("G").unwrap();
+    let a = s.create_label("A").unwrap();
+    let b = s.create_label("B").unwrap();
+    s.move_category(a, Some(g), 0).unwrap();
+    s.move_category(b, Some(g), 1).unwrap();
+    let art = article_id(&s, "1");
+    s.tag_article(art, a, Origin::User, None).unwrap();
+    s.map_term(term_id(&s, "AI"), Some(b)).unwrap();
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(c.groups[&g], 1);
+    assert_eq!((c.categories[&a], c.categories[&b]), (1, 1));
+    s.set_read(art, true).unwrap();
+    let unread = ListFilter { view: View::Unread, ..Default::default() };
+    let c = s.category_counts(unread).unwrap();
+    assert_eq!(c.groups.get(&g).copied().unwrap_or(0), 0);
+    let other = ListFilter { feed_id: Some(f2), ..Default::default() };
+    assert!(s.category_counts(other).unwrap().groups.is_empty());
+    let own = ListFilter { feed_id: Some(f), ..Default::default() };
+    assert_eq!(s.category_counts(own).unwrap().groups[&g], 1);
 }
