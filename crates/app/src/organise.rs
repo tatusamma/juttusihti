@@ -67,6 +67,7 @@ pub enum Confirm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Editing {
     NewGroup(String),
+    NewCategory(String),
     Group(GroupId, String),
     Category(LabelId, String),
 }
@@ -106,6 +107,7 @@ fn snapshot(s: &Store, expanded: &BTreeSet<LabelId>) -> juttusihti_core::Result<
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     CreateGroup(String),
+    CreateCategory(String),
     RenameGroup(GroupId, String),
     DeleteGroup(GroupId, String),
     MoveGroup(GroupId, usize),
@@ -123,6 +125,14 @@ impl Op {
     fn apply(self, s: &mut Store) -> juttusihti_core::Result<String> {
         match self {
             Op::CreateGroup(name) => s.create_group(&name).map(|_| String::new()),
+            Op::CreateCategory(name) => {
+                let similar = s.similar_labels(&name)?;
+                s.create_label(&name)?;
+                Ok(match similar.first() {
+                    Some(l) if l.name != name => format!("Created “{name}”. Similar existing category: “{}”.", l.name),
+                    _ => format!("Created “{name}”."),
+                })
+            }
             Op::RenameGroup(id, name) => s.rename_group(id, &name).map(|_| format!("Renamed to “{name}”.")),
             Op::DeleteGroup(id, name) => {
                 s.delete_group(id).map(|_| format!("Deleted group “{name}”. Its categories are now Ungrouped."))
@@ -164,6 +174,7 @@ pub enum Msg {
     ToggleTerms(LabelId),
     ToggleIgnored,
     NewGroup,
+    NewCategory,
     /// Click on a group or category name.
     StartRename(OrgItem),
     EditName(String),
@@ -304,6 +315,10 @@ impl State {
                 self.editing = Some(Editing::NewGroup(String::new()));
                 return Effect::Focus;
             }
+            Msg::NewCategory => {
+                self.editing = Some(Editing::NewCategory(String::new()));
+                return Effect::Focus;
+            }
             Msg::StartRename(item) => {
                 self.editing = match item {
                     OrgItem::Group(id) => self.group(id).map(|g| Editing::Group(id, g.group.name.clone())),
@@ -313,7 +328,10 @@ impl State {
                 return if self.editing.is_some() { Effect::Focus } else { Effect::None };
             }
             Msg::EditName(s) => {
-                if let Some(Editing::NewGroup(n) | Editing::Group(_, n) | Editing::Category(_, n)) = &mut self.editing {
+                if let Some(
+                    Editing::NewGroup(n) | Editing::NewCategory(n) | Editing::Group(_, n) | Editing::Category(_, n),
+                ) = &mut self.editing
+                {
                     *n = s;
                 }
             }
@@ -321,6 +339,7 @@ impl State {
                 let Some(editing) = self.editing.take() else { return Effect::None };
                 let op = match editing {
                     Editing::NewGroup(n) if !n.trim().is_empty() => Op::CreateGroup(n.trim().into()),
+                    Editing::NewCategory(n) if !n.trim().is_empty() => Op::CreateCategory(n.trim().into()),
                     Editing::Group(id, n) if self.group(id).is_some_and(|g| renamed(&g.group.name, &n)) => {
                         Op::RenameGroup(id, n.trim().into())
                     }
@@ -454,6 +473,16 @@ impl State {
                 if current.is_some() {
                     out.push(Dest(OrgTarget::GroupSlot(None, self.snap.ungrouped.len()), "Ungrouped".into()));
                 }
+                // Reordering within its own group, as dropping on a sibling row does.
+                let siblings = self.members(current);
+                let place = current.and_then(|g| self.group(g)).map_or("Ungrouped", |g| g.group.name.as_str());
+                let reorder = siblings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| Dest(OrgTarget::GroupSlot(current, i), format!("Before “{}”", c.label.name)))
+                    .chain([Dest(OrgTarget::GroupSlot(current, siblings.len()), format!("To the end of “{place}”"))])
+                    .filter(|d| self.drop_op(item, d.0).is_some());
+                out.extend(reorder);
                 out
             }
             OrgItem::Term(id) => {
@@ -606,15 +635,25 @@ impl State {
         }
     }
 
+    /// "+ New group" and "+ New category", each opening its inline name field.
     fn view_new_group(&self) -> Element<'_, Msg> {
-        match &self.editing {
-            Some(Editing::NewGroup(n)) => name_input("Group name", n).into(),
-            _ => button(text("+ New group").size(SIZE_SMALL).style(style::accent))
+        let add = |label: &'static str, msg: Msg| -> Element<'_, Msg> {
+            button(text(label).size(SIZE_SMALL).style(style::accent))
                 .padding([0.0, SPACE[0]])
                 .style(style::row)
-                .on_press(Msg::NewGroup)
-                .into(),
-        }
+                .on_press(msg)
+                .into()
+        };
+        let group = match &self.editing {
+            Some(Editing::NewGroup(n)) => name_input("Group name", n).into(),
+            _ => add("+ New group", Msg::NewGroup),
+        };
+        // A new category starts Ungrouped.
+        let category = match &self.editing {
+            Some(Editing::NewCategory(n)) => name_input("Category name", n).into(),
+            _ => add("+ New category", Msg::NewCategory),
+        };
+        row![group, category].spacing(SPACE[3]).align_y(Center).into()
     }
 
     fn view_ungrouped(&self, kind: Option<OrgItem>) -> Element<'_, Msg> {
@@ -1050,9 +1089,58 @@ mod tests {
         assert_eq!(by_drag, Some(Op::MoveGroup(sci, 0)));
         assert!(matches!(by_menu, Effect::Run(op) if Some(&op) == by_drag.as_ref()));
 
+        // Reordering within a group: Space is first in Tech, AI joins after it.
+        let first = st.dests(OrgItem::Category(ai))[0].clone();
+        assert_eq!(first.1, "Tech");
+        send(&mut st, Msg::MoveTo(OrgItem::Category(ai), first));
+        let dests = st.dests(OrgItem::Category(ai));
+        assert!(!dests.iter().any(|d| d.1 == "Before “AI”" || d.1 == "To the end of “Tech”"), "no-op moves");
+        let d = dests.iter().find(|d| d.1 == "Before “Space”").unwrap().clone();
+        let by_menu = st.handle(Msg::MoveTo(OrgItem::Category(ai), d));
+        let by_drag = drag_op(&mut st, OrgItem::Category(ai), OrgTarget::GroupSlot(Some(tech), 0));
+        assert_eq!(by_drag, Some(Op::MoveCategory(ai, Some(tech), 0)));
+        assert!(matches!(by_menu, Effect::Run(op) if Some(&op) == by_drag.as_ref()));
+        let d = st.dests(OrgItem::Category(space)).into_iter().find(|d| d.1 == "To the end of “Tech”").unwrap();
+        assert_eq!(
+            st.handle(Msg::MoveTo(OrgItem::Category(space), d)),
+            Effect::Run(Op::MoveCategory(space, Some(tech), 1))
+        );
+        let d = st.dests(OrgItem::Category(ai)).into_iter().find(|d| d.1 == "Before “Space”").unwrap();
+        send(&mut st, Msg::MoveTo(OrgItem::Category(ai), d));
+        let tree = with(&st, |s| s.category_tree()).unwrap();
+        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.label.name.as_str()).collect();
+        assert_eq!(names, ["AI", "Space"]);
+    }
+
+    #[test]
+    fn new_category_is_created_ungrouped_with_similar_name_warning() {
+        let mut st = state();
+        with(&st, |s| s.create_label("Urheilu")).unwrap();
+        reload(&mut st);
+        send(&mut st, Msg::NewCategory);
+        send(&mut st, Msg::Escape);
+        assert_eq!(st.editing, None, "Esc cancels");
+        send(&mut st, Msg::NewCategory);
+        send(&mut st, Msg::EditName("  Urheilua ".into()));
+        send(&mut st, Msg::SaveName);
+        assert_eq!(st.editing, None);
+        let names: Vec<&str> = st.snap.ungrouped.iter().map(|c| c.label.name.as_str()).collect();
+        assert_eq!(names, ["Urheilu", "Urheilua"]);
+        assert_eq!(st.message, Some(Ok("Created “Urheilua”. Similar existing category: “Urheilu”.".to_string())));
+        send(&mut st, Msg::NewCategory);
+        send(&mut st, Msg::EditName("Talous".into()));
+        send(&mut st, Msg::SaveName);
+        assert_eq!(st.message, Some(Ok("Created “Talous”.".to_string())));
+    }
+
+    #[test]
+    fn move_to_moves() {
+        let mut st = state();
+        let (ai, _tech) = with(&st, |s| (s.create_label("AI").unwrap(), s.create_group("Tech").unwrap()));
+        reload(&mut st);
         // And it really moves.
         let first = st.dests(OrgItem::Category(ai))[0].clone();
         send(&mut st, Msg::MoveTo(OrgItem::Category(ai), first));
-        assert_eq!(with(&st, |s| s.category_tree()).unwrap().groups[0].categories.len(), 2);
+        assert_eq!(with(&st, |s| s.category_tree()).unwrap().groups[0].categories.len(), 1);
     }
 }
