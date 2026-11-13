@@ -370,3 +370,56 @@ fn counts_are_distinct_and_follow_view_and_feed() {
     let own = ListFilter { feed_id: Some(f), ..Default::default() };
     assert_eq!(s.category_counts(own).unwrap().groups[&g], 1);
 }
+
+#[test]
+fn counts_exclude_rejected_mapped_terms() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &["AI"])]).unwrap();
+    let g = s.create_group("G").unwrap();
+    let l = s.create_label("L").unwrap();
+    s.move_category(l, Some(g), 0).unwrap();
+    s.map_term(term_id(&s, "AI"), Some(l)).unwrap();
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!((c.categories[&l], c.groups[&g]), (2, 2));
+    s.untag_article(article_id(&s, "1"), l).unwrap();
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
+    s.untag_article(article_id(&s, "2"), l).unwrap();
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert!(!c.categories.contains_key(&l) && !c.groups.contains_key(&g));
+}
+
+#[test]
+fn counts_follow_folder_and_saved_view() {
+    let mut s = Store::open_in_memory().unwrap();
+    let folder = s.create_folder("F").unwrap();
+    let other = s.create_folder("Other").unwrap();
+    let f1 = s
+        .add_feed(&NewFeed {
+            url: "https://a.example/rss".into(),
+            title: "a".into(),
+            folder_id: Some(folder),
+            ..Default::default()
+        })
+        .unwrap();
+    let f2 = feed(&mut s, "https://b.example/rss");
+    s.ingest(f1, &[entry("1", &["AI"])]).unwrap();
+    s.ingest(f2, &[entry("2", &["AI"])]).unwrap();
+    let g = s.create_group("G").unwrap();
+    let l = s.create_label("L").unwrap();
+    s.move_category(l, Some(g), 0).unwrap();
+    s.conn().execute("UPDATE feed_terms SET label_id = ?1", [l]).unwrap();
+    let all = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!((all.categories[&l], all.groups[&g]), (2, 2));
+    let in_folder = ListFilter { folder_id: Some(folder), ..Default::default() };
+    let c = s.category_counts(in_folder).unwrap();
+    assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
+    let empty = ListFilter { folder_id: Some(other), ..Default::default() };
+    assert!(s.category_counts(empty).unwrap().groups.is_empty());
+    let saved = ListFilter { view: View::Saved, ..Default::default() };
+    assert!(s.category_counts(saved).unwrap().groups.is_empty());
+    s.set_saved(article_id(&s, "2"), true).unwrap();
+    let c = s.category_counts(saved).unwrap();
+    assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
+}
