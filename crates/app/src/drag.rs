@@ -3,7 +3,6 @@
 //! with [`target`], includes [`subscription`] while a drag is armed, and draws
 //! [`ghost`] in an overlay `stack!` at the cursor. Esc maps to [`DragMsg::Cancel`]
 //! in the screen.
-#![allow(dead_code)] // Used by the Organise and sidebar screens in later tasks.
 
 use iced::widget::{Space, container, mouse_area, row, text};
 use iced::{Border, Element, Length, Point, Subscription, Theme, border, event, mouse};

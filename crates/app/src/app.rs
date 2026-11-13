@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, pick_list, responsive, rich_text, row, rule, scrollable, span, stack,
-    text, text_input, tooltip,
+    Space, button, column, container, operation, pick_list, pin, responsive, rich_text, row, rule, scrollable, span,
+    stack, text, text_input, tooltip,
 };
-use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
+use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, Vector, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
 use juttusihti_article::FetchOutcome;
 use juttusihti_core::fulltext::Fulltext;
@@ -77,7 +77,7 @@ pub enum Screen {
     Reader,
     Reports,
     Research,
-    Labels,
+    Organise,
     Review,
     Graph,
     Timeline,
@@ -346,7 +346,7 @@ pub enum Message {
     ToggleTheme,
     ShowScreen(Screen),
     Research(crate::research::Msg),
-    Labels(crate::labels::Msg),
+    Organise(crate::organise::Msg),
     Review(crate::review::Msg),
     Graph(crate::graph_view::Msg),
     Timeline(crate::timeline_view::Msg),
@@ -418,7 +418,7 @@ pub struct App {
     confirm_unsubscribe: Option<FeedId>,
     reports: crate::reports::State,
     research: crate::research::State,
-    labels: crate::labels::State,
+    organise: crate::organise::State,
     review: crate::review::State,
     graph: crate::graph_view::State,
     timeline: crate::timeline_view::State,
@@ -442,7 +442,7 @@ impl App {
         let analytics = AnalyticsWorker::spawn(db_path.clone(), Limits::default()).ok().map(Arc::new);
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
-            labels: crate::labels::State::new(db.clone()),
+            organise: crate::organise::State::new(db.clone()),
             review: crate::review::State::new(db.clone()),
             graph: crate::graph_view::State::new(db.clone()),
             timeline: crate::timeline_view::State::new(db.clone()),
@@ -519,7 +519,12 @@ impl App {
         } else {
             iced::time::every(Duration::from_secs(u64::from(minutes) * 60)).map(|_| Message::AutoRefresh)
         };
-        Subscription::batch([keys, refresh])
+        let organise = if self.screen == Screen::Organise {
+            self.organise.subscription().map(Message::Organise)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([keys, refresh, organise])
     }
 
     fn load_sidebar(&self) -> Task<Message> {
@@ -735,7 +740,7 @@ impl App {
         match message {
             Message::SidebarLoaded(Ok(sidebar)) => {
                 self.sidebar = sidebar;
-                // The label was deleted or merged away on the Labels screen.
+                // The label was deleted or merged away on the Categories screen.
                 if self.label_filter.is_some_and(|id| !self.sidebar.labels.iter().any(|l| l.id == id)) {
                     self.label_filter = None;
                     self.page = Page::first(PAGE_SIZE);
@@ -1093,7 +1098,7 @@ impl App {
                 match screen {
                     Screen::Reports => self.reports.load().map(Message::Reports),
                     Screen::Research => self.research.load().map(Message::Research),
-                    Screen::Labels => self.labels.load().map(Message::Labels),
+                    Screen::Organise => self.organise.load().map(Message::Organise),
                     Screen::Review => self.review.load().map(Message::Review),
                     Screen::Graph => self.graph.load().map(Message::Graph),
                     Screen::Timeline => self.timeline.load().map(Message::Timeline),
@@ -1109,10 +1114,10 @@ impl App {
                 self.review.open(id).map(Message::Review)
             }
             Message::Research(msg) => self.research.update(msg).map(Message::Research),
-            Message::Labels(msg) => {
-                // Creates, renames, merges and deletes change the label filter's choices.
-                let changed = matches!(msg, crate::labels::Msg::Done(_));
-                let task = self.labels.update(msg).map(Message::Labels);
+            Message::Organise(msg) => {
+                // Renames, merges and deletes change the label filter's choices.
+                let changed = matches!(msg, crate::organise::Msg::Done(_));
+                let task = self.organise.update(msg).map(Message::Organise);
                 if changed { Task::batch([task, self.load_sidebar()]) } else { task }
             }
             Message::Review(crate::review::Msg::OpenArticle(id)) => {
@@ -1437,7 +1442,7 @@ impl App {
             .into(),
             Screen::Reports => self.reports.view().map(Message::Reports),
             Screen::Research => self.research.view().map(Message::Research),
-            Screen::Labels => self.labels.view().map(Message::Labels),
+            Screen::Organise => self.organise.view().map(Message::Organise),
             Screen::Review => self.review.view().map(Message::Review),
             Screen::Graph => self.graph.view().map(Message::Graph),
             Screen::Timeline => self.timeline.view().map(Message::Timeline),
@@ -1502,6 +1507,15 @@ impl App {
             let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
             let panel = self.quick.view().map(Message::Quick);
             return style::overlay(layout, panel, Point::new(x, below_header), Message::CloseOverlays);
+        }
+        if self.screen == Screen::Organise {
+            // The dragged row's chip follows the pointer (window coordinates). The stack stays
+            // while no drag runs so the screen's widget state survives the drag starting.
+            let ghost: Element<'_, Message> = match self.organise.ghost() {
+                Some((label, at)) => pin(crate::drag::ghost(label)).position(at + Vector::new(12.0, 8.0)).into(),
+                None => Space::new().into(),
+            };
+            return stack![layout, ghost].into();
         }
         layout.into()
     }
