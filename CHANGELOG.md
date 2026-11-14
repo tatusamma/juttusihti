@@ -11,10 +11,17 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Added
 
+- **Categories**, separate from labels: labels stay as they were (search, analytics, reports, the
+  Labels screen); categories are a short list for quickly filtering the news. They start empty.
 - **Uncategorized**: a row under "All articles" in the categories sidebar lists the articles that
-  are in no category, with a count; its ✨ has AI find categories for the next 100 uncategorized articles whose feed gave no categories
+  are in no category, with a count; its ✨ gives one main category to each of the next 100
+  uncategorized articles whose feed gave no categories (or only ignored ones), newest first
   (headlines and descriptions are sent, after you see an estimate). It may create new, ungrouped
-  categories, and the results are saved directly, without Review.
+  categories and remembers the articles it checked. This is the one exception to "AI results are
+  suggestions": the categories are saved directly, without Review.
+- **Category in the article view**: a Category row shows the article's category and where it
+  came from (from the feed, from AI, or set by you) and lets you change it; Automatic clears
+  your choice.
 - **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
   category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
   reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
@@ -30,15 +37,7 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Changed
 
-- **Labels are now called categories** everywhere you see them: the article preview, the
-  filters, Custom analysis, AI tasks, reports and their CSV files. Your existing labels are your
-  categories; nothing was moved or deleted.
-- Report CSV files are renamed to match: `juttusihti-labels.csv` is now
-  `juttusihti-categories.csv`, `juttusihti-labels-by-source.csv` is now
-  `juttusihti-categories-by-source.csv`, and the `label` column header is now `category`. Update
-  any scripts that read them.
-- The Help screen and README describe the sidebar, the Categories screen and ✨ Suggest
-  categories.
+- The Help screen and README describe labels and categories as separate things.
 
 ## [0.5.0] - 2026-11-08
 

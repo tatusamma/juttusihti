@@ -7,7 +7,7 @@
 **A local-first RSS reader and news research desktop app for Windows and Linux.**
 
 Juttusihti reads RSS, Atom and JSON feeds offline with fast full-text search, and turns your
-news into research: categories, people and places, story threads, timelines, maps and reports.
+news into research: labels, categories, people and places, story threads, timelines, maps and reports.
 AI analysis (OpenAI, Anthropic, Gemini) is optional and only ever starts when you ask for it,
 after showing what it will send and what it will cost. Written in Rust with
 [Iced](https://iced.rs); SQLite is the source of truth and DuckDB runs the reports.
@@ -23,7 +23,7 @@ after showing what it will send and what it will cost. Written in Rust with
   throwaway private browser, blocks known trackers and ads, accepts cookie banners, keeps the
   text and the main picture, and deletes the browser profile. Nothing is fetched until you ask.
 - **Search**: local FTS5 full-text search with phrases, `OR`, `NOT`, prefixes, field filters
-  and `NEAR`, plus a category filter next to the search box.
+  and `NEAR`, plus a label filter next to the search box.
 - **AI on your terms**: one click (✨) for the list you are looking at, or a custom analysis
   for a date range. Every run shows a local estimate of articles, tokens and cost, needs your
   consent and stays within spending limits. Sign in with ChatGPT, or use your own OpenAI,
@@ -41,7 +41,7 @@ after showing what it will send and what it will cost. Written in Rust with
   editable draft; nothing is saved until you press Approve.
 - **Review**: everything AI produces is a suggestion until you confirm it, except the ✨ on
   Uncategorized, which saves the categories it finds directly.
-- **Reports**: volume per source, topics, categories, co-occurring entities, relevance and AI cost,
+- **Reports**: volume per source, topics, labels, co-occurring entities, relevance and AI cost,
   with CSV export.
 - **Timeline, map and relationship map** of stories, places, people and organisations.
   OpenStreetMap tiles are opt-in.
@@ -146,8 +146,9 @@ offline.
 - The **⋯** menu marks the list read, hides articles you have dismissed as irrelevant,
   switches between AI-rewritten and original headlines and, for a single feed, renames it,
   moves it to a folder or unsubscribes.
-- Add categories to an article from its preview. The **Categories** screen renames, merges,
-  deletes and groups them; see [Categories](#categories).
+- Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
+  them. The article's **Category** row shows its category and lets you change it; see
+  [Categories](#categories).
 - **Read full article** (shortcut **a**) fetches the whole article when the feed only has a
   teaser; see [Full articles](#full-articles).
 - **Fact check** has an AI check the article's claims; see [Fact check](#fact-check).
@@ -161,16 +162,22 @@ to Favourites, and drag reorders. **«** hides the sidebar and **»** (or **c**)
 **Organise…** opens the Categories screen.
 
 **Uncategorized** lists the articles in no category. Its ✨ has AI find categories for the next 100
-uncategorized articles whose feed gave no categories: a small panel shows what is sent (their
-headlines and descriptions and your category names), the estimate and the per-run limit before
-anything is sent. The AI may create new categories (they go under Ungrouped), and the results are
-saved directly, without Review. Each press handles the next articles.
+uncategorized articles whose feed gave no categories (or only ones you ignored): a small panel
+shows what is sent (their headlines and descriptions and your category names), the estimate and
+the per-run limit before anything is sent. The AI gives each article one main category and may
+create new ones (they go under Ungrouped); the results are saved directly, without Review.
+Articles it has checked are not sent again, and each press handles the next newest ones.
 
 On the Categories screen, **+ New group** and **+ New category** add them; drag a category onto
 a group (or use **Move to…**) to file it. Publisher categories, the section names a feed gives its
 articles, are collected as terms: file one under a category with **Move to…**, leave it in
 **Unsorted**, or **Ignore** it. Publisher categories are collected from now on; articles fetched
 earlier get them only if they are still in the feed at the next refresh.
+
+Categories are separate from labels: labels serve search and analytics, categories a quick short
+list for filtering. In the article view, the **Category** row shows the article's category and
+where it came from (from the feed, from AI, or set by you); pick another to change it, or
+**Automatic** to clear your choice and return to the feed's or the AI's.
 
 **✨ Suggest categories** asks your AI to group your unsorted terms. It first shows what will be
 sent (the publisher terms with their feed titles, plus your group and category names; no article
@@ -276,7 +283,7 @@ How the check works in detail (prompts, evidence rules, cost limits, storage and
 ### Searching
 
 Type in the search bar at the top (or press `/`). Search is local full-text search.
-The category menu next to it narrows the list to articles with one category (confirmed categories only,
+The label menu next to it narrows the list to articles with one label (confirmed labels only,
 not pending AI suggestions); it works with or without search text, and **Clear** resets both.
 
 | Query | Finds |
@@ -314,7 +321,7 @@ Nothing is sent to an AI provider until you ask.
    provider, Fast/Quality model and per-run spending limits here too.
 2. Press **✨** above the article list. It works on what the list shows: a feed, a folder, a
    view or a search.
-3. Pick tasks (clickbait headlines, categories, related stories, people and places, summary), check the
+3. Pick tasks (clickbait headlines, labels, related stories, people and places, summary), check the
    local estimate of articles, requests, tokens and cost, and press **Send N articles to
    &lt;provider&gt;**. That button is your consent for that run.
 
@@ -352,7 +359,7 @@ credit on
 
 ### Custom analysis
 
-For a larger study, **Custom analysis** chooses a date range, feeds, folders, categories or a
+For a larger study, **Custom analysis** chooses a date range, feeds, folders, labels or a
 search, the model, how much of each article to send, tasks and limits. Its preview is
 computed locally; the analysis is saved and waits for your approval before anything is sent.
 Recent runs are listed there too, including ✨ runs; a paused or stopped run shows why it
@@ -364,15 +371,14 @@ stopped and has a **Resume** button.
 
 Everything AI produces starts as a suggestion. On **Review** you confirm or reject entities,
 relationships, relevance and summaries, one by one or in bulk. AI never overrides a choice you
-have made. The ✨ on Uncategorized is the one exception: it saves the categories it
+have made. The one exception is the ✨ on Uncategorized, which saves the categories it
 finds directly.
 
 ### Reports
 
-Charts of your news: volume per source, topics, categories, entities that appear together,
+Charts of your news: volume per source, topics, labels, entities that appear together,
 relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day,
-week or month buckets, and export any report as CSV. Categories that articles reach only through
-publisher categories are not counted in reports yet.
+week or month buckets, and export any report as CSV.
 
 ![Reports](docs/screenshots/reports.png)
 
@@ -515,21 +521,21 @@ tokenizer, or AI-assisted query expansion.
   with highlighting, ETag/Last-Modified conditional requests, timeouts, bounded retries,
   deduplication, browser hand-off, migrations, retention (Settings; at least 7 days, applied at
   startup), keyboard shortcuts (j/k, s, m, o, `/`, Ctrl+F, Ctrl+R, n/p, F1), and a dark/light
-  theme that is remembered between runs. A category filter next to the search box narrows the list
-  to one confirmed category, with or without search text.
+  theme that is remembered between runs. A label filter next to the search box narrows the list
+  to one confirmed label, with or without search text.
 - **Calm UI**: done. An icon rail replaces the sidebar, with a feeds dropdown above the article
   list; warm paper colours with amber accents and the Lucide icon font; the AI panel is a
   popover that can close mid-run; every screen shares the same buttons, fields and muted
   visualisation palette. An in-app Help screen (? in the rail, or F1) holds the user guide.
-- **M2 Research data model**: store API done, with tests. Covers categories, stored as labels (normalization,
+- **M2 Research data model**: store API done, with tests. Covers labels (normalization,
   similarity checks, merge, bulk decisions), entities with aliases, events, typed relationships,
   locations with coordinate provenance, annotations, AI suggestions with provenance, sessions
-  with an enforced lifecycle, result cache and usage ledger. UI: a Categories screen (rename, merge,
-  delete, accept/reject all pending suggestions) and category chips in the article preview (add,
+  with an enforced lifecycle, result cache and usage ledger. UI: a Labels screen (rename, merge,
+  delete, accept/reject all pending suggestions) and label chips in the article preview (add,
   remove, confirm or reject a suggestion). Entities, Events and Relationships screens are not
   built yet.
 - **M3 Research interface**: done. The New Analysis screen covers: inclusive local-date range
-  (stored as half-open UTC), quick ranges, feeds/folders/categories/query scope, an option to
+  (stored as half-open UTC), quick ranges, feeds/folders/labels/query scope, an option to
   exclude undated articles, provider and model, content depth, tasks, relevance topic, limits
   (articles, tokens, USD), cache reuse, and accepting unknown pricing. Provider batch APIs are
   not supported yet: runs and estimates both use standard prices. It previews
@@ -620,7 +626,7 @@ tokenizer, or AI-assisted query expansion.
   hiding is reversible: the reader's "Hide dismissed" filter acts only on classes you have
   confirmed.
 - **M6 DuckDB**: done.
-  - Reports: volume per source, topic evolution, categories, categories by source, entity
+  - Reports: volume per source, topic evolution, labels, labels by source, entity
     co-occurrence, relevance/clickbait trends, story-link statistics, AI usage by model and
     cost per day (unknown when any call is unpriced).
   - 7/30/90/365-day windows with day/week/month buckets, and a cancel button.

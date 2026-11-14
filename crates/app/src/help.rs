@@ -48,17 +48,19 @@ const SECTIONS: [(&str, &[&str]); 12] = [
         &[
             "The feed menu chooses what the list shows: all news, a folder or one feed. All / Unread filters the list. Click an article to read it on the right; the star saves it to Saved in the rail.",
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
-            "Categories can be added to an article from its preview. The Categories screen renames, merges, deletes and groups them.",
+            "Labels can be added to an article from its preview. The Labels screen renames, merges and deletes them. The article's Category row shows its category and lets you change it; see Categories below.",
             "When a feed only gives a teaser, \"Read full article\" (or press a) loads the whole article; see Full articles below.",
-            "The categories sidebar between the rail and the list picks a group or a category: All articles, Uncategorized, your ★ Favourites, then the groups (click the arrow to fold one) and Ungrouped. Uncategorized lists the articles in no category; its ✨ has AI find categories for the next 100 uncategorized articles whose feed gave no categories (the others are sorted by mapping their feed's terms). You see what is sent and an estimate first; the AI may create new categories, which go under Ungrouped, and the results are saved directly, without Review. Each press handles the next articles. The numbers count articles and follow All / Unread and the feed menu. \"Find category…\" finds a name; Esc or ✕ shows the whole list again. Right-click a row, or press the star that appears on hover, to add it to or remove it from Favourites; drag rows to reorder them. « hides the sidebar and » (or c) shows it again; the pick stays applied. Organise…, at the top of the sidebar, opens the Categories screen. Clear removes the search but keeps the category.",
+            "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
+            "The categories sidebar between the rail and the list picks a group or a category: All articles, Uncategorized, your ★ Favourites, then the groups (click the arrow to fold one) and Ungrouped. Uncategorized lists the articles in no category; its ✨ has AI find categories for the next 100 uncategorized articles whose feed gave no categories (articles with unsorted publisher categories wait until you map them; feeds that only give ignored ones count as giving none). You see what is sent and an estimate first; the AI gives each article one main category, may create new ones, which go under Ungrouped, and saves the result directly, without Review; articles it has checked are not sent again. Each press handles the next articles. The numbers count articles and follow All / Unread and the feed menu. \"Find category…\" finds a name; Esc or ✕ shows the whole list again. Right-click a row, or press the star that appears on hover, to add it to or remove it from Favourites; drag rows to reorder them. « hides the sidebar and » (or c) shows it again; the pick stays applied. Organise…, at the top of the sidebar, opens the Categories screen. Clear removes the search but keeps the category.",
         ],
     ),
     (
         "Categories",
         &[
-            "Categories are the topics you filter by; groups gather them (for example Politics and Sport under News). The Categories screen in the left rail lists them. + New group and + New category add them; drag a category onto a group, or use Move to…, to file it, and drag to reorder. Rename, merge and delete work as before.",
+            "Categories are a short list for quickly filtering the news; they are separate from labels, which serve search and analytics. Groups gather categories (for example Politics and Sport under News). The Categories screen in the left rail (also opened by Organise…) lists them. + New group and + New category add them; drag a category onto a group, or use Move to…, to file it, and drag to reorder. Rename, merge and delete are on the same screen. Deleting a category returns its terms to Unsorted.",
             "Publisher categories are the section names a feed gives its articles. Juttusihti collects them as terms, and the screen shows them under their category, with the rest in Unsorted terms. Move a term into a category with Move to… and it files that publisher's articles there; Ignore sets a term aside under Ignored so it is skipped. Publisher categories are collected from now on; articles fetched earlier get them only if they are still in the feed at the next refresh.",
             "✨ Suggest categories asks your AI to propose groups and categories for your unsorted terms. Before anything is sent you see what will be sent (the publisher terms with their feed titles, plus your group and category names; no article text) with an estimate, and you press the button to consent. The result is an editable draft: rename, move or drop items as you like. Nothing is saved until you press Approve.",
+            "In the article view, the Category row shows the article's category and where it came from: from the feed, from AI, or set by you. Pick another category to change it; the article then has exactly that one category. Choose Automatic to clear your choice and return to the feed's or the AI's.",
         ],
     ),
     (
@@ -76,7 +78,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
         "AI for a list (✨)",
         &[
             "Nothing is sent to an AI provider until you ask. Connect a provider first on AI setup: sign in with ChatGPT, or add an OpenAI, Anthropic (Claude) or Gemini API key. Keys are kept in the system's secret store.",
-            "The ✨ button above the article list works on what the list shows. Pick tasks (clickbait headlines, categories, related stories, people and places, summary), check the local estimate of requests, tokens and cost, then press \"Send N articles\". That button is your consent for that run; the Setup button opens AI setup.",
+            "The ✨ button above the article list works on what the list shows. Pick tasks (clickbait headlines, labels, related stories, people and places, summary), check the local estimate of requests, tokens and cost, then press \"Send N articles\". That button is your consent for that run; the Setup button opens AI setup.",
             "Results arrive while the run goes on. Rewritten headlines show an AI tag with the original underneath. Runs can be paused, resumed and cancelled, and the spending limits from AI setup are never exceeded.",
             "With an OpenAI API key, clickbait headlines are checked first: a fast, cheap classifier (OpenAI's Decisions API) rates how likely each headline is clickbait, and only those at or above the threshold (70% by default) are sent for a rewrite. Ratings are remembered, so a new threshold costs nothing. Turn the check off or change the threshold on AI setup. The check needs API credit, so on a ChatGPT plan you can choose: \"Pay with\" on AI setup offers the plan alone (headlines are rewritten in one step without the check), or the plan with API credit for the check only, which needs both the sign-in and a key. With Claude or Gemini, headlines are rewritten in one step without the check.",
             "An API key is billed to the provider account behind it, which needs credit; a ChatGPT plan is not. If the account runs out of credit, the run pauses and says so. Add credit on the provider's billing page, then press Resume under Custom analysis: finished work is kept and never paid for twice.",
@@ -96,7 +98,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
     (
         "Custom analysis",
         &[
-            "For a larger study, Custom analysis sets the date range, feeds, folders, categories or a search, the model, content depth and limits. The preview is computed locally; the analysis is saved and waits for your approval before anything is sent.",
+            "For a larger study, Custom analysis sets the date range, feeds, folders, labels or a search, the model, content depth and limits. The preview is computed locally; the analysis is saved and waits for your approval before anything is sent.",
             "Recent runs are listed here, including ✨ runs. A paused or stopped run shows why it stopped and has a Resume button.",
         ],
     ),
@@ -109,7 +111,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
     (
         "Reports",
         &[
-            "Charts of what you read: volume per source, topics, categories, entities that appear together, relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day, week or month buckets, and export any report as CSV. Categories that articles reach only through publisher categories are not counted in reports yet.",
+            "Charts of what you read: volume per source, topics, labels, entities that appear together, relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day, week or month buckets, and export any report as CSV.",
         ],
     ),
     (
