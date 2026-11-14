@@ -9,8 +9,11 @@ use std::collections::HashSet;
 use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, stack, text, text_input, tooltip};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event, mouse};
+use juttusihti_core::FeedId;
 use juttusihti_core::categories::CategoryId;
-use juttusihti_core::categories::{CategoryCounts, CategoryNode, CategoryTree, Favourite, GroupId, GroupNode};
+use juttusihti_core::categories::{
+    CategoryCounts, CategoryNode, CategoryTree, Favourite, GroupFeed, GroupId, GroupNode,
+};
 use juttusihti_core::normalize::normalize_text;
 use juttusihti_core::pricing::Catalog;
 use juttusihti_core::store::{ListFilter, Store};
@@ -39,6 +42,8 @@ pub enum Selection {
     Uncategorized,
     Group(GroupId),
     Category(CategoryId),
+    /// A feed listed under its group.
+    Feed(FeedId),
 }
 
 impl From<Favourite> for Selection {
@@ -323,9 +328,12 @@ impl State {
             Msg::Select(s) => {
                 self.menu = None;
                 // Unfold the group of a picked category so the selection shows in the tree.
-                if let Selection::Category(id) = s
-                    && let Some(g) = self.node(id).and_then(|c| c.group_id)
-                {
+                let group = match s {
+                    Selection::Category(id) => self.node(id).and_then(|c| c.group_id),
+                    Selection::Feed(f) => self.feed_group(f),
+                    _ => None,
+                };
+                if let Some(g) = group {
                     self.expanded.insert(g);
                 }
                 return Effect::Select(s);
@@ -468,12 +476,22 @@ impl State {
         self.tree.groups.iter().flat_map(|g| &g.categories).chain(&self.tree.ungrouped).find(|c| c.category.id == id)
     }
 
+    /// The group a feed is listed in.
+    fn feed_group(&self, feed: FeedId) -> Option<GroupId> {
+        self.tree.groups.iter().find(|g| g.feeds.iter().any(|f| f.id == feed)).map(|g| g.group.id)
+    }
+
+    fn group_feed(&self, feed: FeedId) -> Option<&GroupFeed> {
+        self.tree.groups.iter().flat_map(|g| &g.feeds).find(|f| f.id == feed)
+    }
+
     /// Whether the selection still exists.
     pub fn contains(&self, s: Selection) -> bool {
         match s {
             Selection::All | Selection::Uncategorized => true,
             Selection::Group(g) => self.group(g).is_some(),
             Selection::Category(c) => self.node(c).is_some(),
+            Selection::Feed(f) => self.group_feed(f).is_some(),
         }
     }
 
@@ -484,6 +502,7 @@ impl State {
             Selection::Uncategorized => Some("Uncategorized"),
             Selection::Group(g) => self.group(g).map(|g| g.group.name.as_str()),
             Selection::Category(c) => self.node(c).map(|c| c.category.name.as_str()),
+            Selection::Feed(f) => self.group_feed(f).map(|f| f.title.as_str()),
         }
     }
 
@@ -502,6 +521,7 @@ impl State {
             Selection::Uncategorized => Some(self.counts.uncategorized),
             Selection::Group(g) => Some(self.counts.groups.get(&g).copied().unwrap_or(0)),
             Selection::Category(c) => Some(self.counts.categories.get(&c).copied().unwrap_or(0)),
+            Selection::Feed(f) => Some(self.counts.feeds.get(&f).copied().unwrap_or(0)),
         }
     }
 
@@ -524,6 +544,9 @@ impl State {
                     name: &c.category.name,
                     group: Some(&g.group.name),
                 });
+            }
+            for f in g.feeds.iter().filter(|f| hit(&f.title)) {
+                out.push(Match { selection: Selection::Feed(f.id), name: &f.title, group: Some(&g.group.name) });
             }
         }
         for c in self.tree.ungrouped.iter().filter(|c| hit(&c.category.name)) {
@@ -698,6 +721,9 @@ impl State {
         let mut block = column![self.item_row(Item::Group(id), &g.group.name, selected, 0.0)].spacing(1);
         if open {
             block = block.push(self.view_members(Some(id), &g.categories, selected, dragged, INDENT));
+            for f in &g.feeds {
+                block = block.push(feed_row(f, self.count(Selection::Feed(f.id)), selected == Selection::Feed(f.id)));
+            }
         }
         match dragged {
             Some(Item::Group(_)) => self.slot(block, Target::GroupSlot(Some(id), 0)),
@@ -815,6 +841,18 @@ fn plain_row(label: Element<'_, Msg>, count: Option<u64>, selected: bool, s: Sel
         .style(if selected { style::row_selected } else { style::row })
         .on_press(Msg::Select(s));
     if selected { with_edge(b.into()) } else { b.into() }
+}
+
+/// A feed under its group: clicking selects; it cannot be dragged, dropped on or favourited.
+fn feed_row(f: &GroupFeed, count: Option<u64>, selected: bool) -> Element<'_, Msg> {
+    let label = row![
+        Space::new().width(INDENT),
+        icon(Icon::Rss).size(SIZE_SMALL).style(style::faint),
+        text(&f.title).size(SIZE_BODY)
+    ]
+    .spacing(SPACE[0])
+    .align_y(Center);
+    plain_row(label.into(), count, selected, Selection::Feed(f.id))
 }
 
 /// The thin accent edge of the selected row, as in the article list.

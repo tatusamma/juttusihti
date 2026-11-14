@@ -730,6 +730,10 @@ impl App {
                 _ => vec![],
             },
             uncategorized: self.category == Selection::Uncategorized,
+            category_feed_id: match self.category {
+                Selection::Feed(f) => Some(f),
+                _ => None,
+            },
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
         }
@@ -2851,6 +2855,81 @@ mod tests {
         let _ = app.update(Message::Categories(SidebarMsg::Find("x".into())));
         let _ = app.update(Message::Categories(SidebarMsg::Escape));
         assert!(app.categories.find.is_empty(), "Esc clears");
+    }
+
+    /// Two feeds, "Ars" in group Tekno and "Other" in no group, with one article each.
+    fn app_with_group_feeds() -> (App, FeedId, FeedId, ArticleId, ArticleId) {
+        let (mut app, _) = app_with_feed();
+        let (ars, other, a, b) = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let add = |s: &Store, title: &str| {
+                s.add_feed(&NewFeed {
+                    url: format!("https://{title}.test/f"),
+                    title: title.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+            };
+            let ars = add(&s, "Ars");
+            let other = add(&s, "Other");
+            let tekno = s.create_group("Teknologia").unwrap();
+            s.set_feed_group(ars, Some(tekno)).unwrap();
+            let entry = |g: &str| juttusihti_core::NewArticle {
+                guid: g.into(),
+                url: Some(format!("https://x.test/{g}")),
+                title: g.into(),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800),
+                terms: vec![],
+            };
+            s.ingest(ars, &[entry("ars1")]).unwrap();
+            s.ingest(other, &[entry("other1")]).unwrap();
+            let id = |g: &str| {
+                s.conn().query_row("SELECT id FROM articles WHERE guid = ?", [g], |r| r.get::<_, i64>(0)).unwrap()
+            };
+            (ars, other, id("ars1"), id("other1"))
+        };
+        reload_categories(&mut app);
+        (app, ars, other, a, b)
+    }
+
+    #[test]
+    fn selecting_a_group_feed_lists_its_articles() {
+        let (mut app, ars, _other, a, _b) = app_with_group_feeds();
+        select(&mut app, Selection::Feed(ars));
+        assert_eq!(app.list_query().category_feed_id, Some(ars));
+        assert_eq!(listed(&app), vec![a]);
+        assert_eq!(app.categories.name(Selection::Feed(ars)), Some("Ars"));
+    }
+
+    #[test]
+    fn a_group_feed_under_another_feed_scope_lists_nothing() {
+        let (mut app, ars, other, _a, _b) = app_with_group_feeds();
+        let _ = app.update(Message::SetScope(Scope::Feed(other)));
+        select(&mut app, Selection::Feed(ars));
+        assert!(listed(&app).is_empty());
+    }
+
+    #[test]
+    fn group_feed_selection_falls_back_when_it_leaves_its_group() {
+        let (mut app, ars, _other, _a, _b) = app_with_group_feeds();
+        select(&mut app, Selection::Feed(ars));
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::Feed(ars));
+        app.db.shared().lock().unwrap().set_feed_group(ars, None).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+    }
+
+    #[test]
+    fn find_matches_group_feeds_by_title() {
+        let (mut app, ars, _other, _a, _b) = app_with_group_feeds();
+        let _ = app.update(Message::Categories(SidebarMsg::Find("ARS".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| (m.selection, m.name, m.group)).collect();
+        assert_eq!(found, vec![(Selection::Feed(ars), "Ars", Some("Teknologia"))]);
     }
 
     #[test]
