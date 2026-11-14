@@ -114,6 +114,56 @@ mod tests {
     }
 
     #[test]
+    fn categories_migration_keeps_labels_ungrouped_with_their_articles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            configure(&conn).unwrap();
+            for (i, sql) in MIGRATIONS[..7].iter().enumerate() {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO feeds(id, url, title, created_at) VALUES (1, 'https://a.example/rss', 'A', 0);
+                 INSERT INTO articles(id, feed_id, guid, title, summary_text, fetched_at, effective_at, dedup_key, content_hash)
+                 VALUES (7, 1, 'g', 'Kuntavaalit', 'Ehdokkaita.', 0, 0, 'k', 'h');
+                 INSERT INTO labels(id, name, normalized, created_at)
+                 VALUES (3, 'Politiikka', 'politiikka', 0), (4, 'Sää', 'saa', 0);
+                 INSERT INTO article_labels(article_id, label_id, origin, status, created_at)
+                 VALUES (7, 3, 'user', 'confirmed', 0), (7, 4, 'ai', 'suggested', 0);",
+            )
+            .unwrap();
+        }
+        // The current code opens and upgrades it.
+        let store = crate::store::Store::open(&path).unwrap();
+        let conn = store.conn();
+        let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let labels: Vec<(i64, String, Option<i64>)> = conn
+            .prepare("SELECT id, name, group_id FROM labels ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(labels, vec![(3, "Politiikka".into(), None), (4, "Sää".into(), None)]);
+        let links: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT article_id, label_id, status FROM article_labels ORDER BY label_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(links, vec![(7, 3, "confirmed".into()), (7, 4, "suggested".into())]);
+        let tree = store.category_tree().unwrap();
+        assert!(tree.groups.is_empty());
+        let ungrouped: Vec<i64> = tree.ungrouped.iter().map(|c| c.label.id).collect();
+        assert_eq!(ungrouped, vec![3, 4], "existing labels are Ungrouped categories");
+        assert!(store.unsorted_terms().unwrap().is_empty());
+    }
+
+    #[test]
     fn rejects_newer_schema() {
         let conn = open_in_memory().unwrap();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();

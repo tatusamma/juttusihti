@@ -278,6 +278,29 @@ fn deleting_group_ungroups_categories_and_drops_favourite() {
 }
 
 #[test]
+fn new_categories_go_last_and_a_deleted_group_appends_its_own() {
+    let mut s = Store::open_in_memory().unwrap();
+    let b = s.create_label("b").unwrap();
+    s.create_label("a").unwrap();
+    assert_eq!(names(&s.category_tree().unwrap().ungrouped), vec!["b", "a"], "in the order made");
+    let g = s.create_group("G").unwrap();
+    let d = s.create_label("d").unwrap();
+    let c = s.create_label("c").unwrap();
+    s.move_category(d, Some(g), 0).unwrap();
+    s.move_category(c, Some(g), 1).unwrap();
+    s.delete_group(g).unwrap();
+    let t = s.category_tree().unwrap();
+    assert_eq!(names(&t.ungrouped), vec!["b", "a", "d", "c"], "after the Ungrouped ones, in group order");
+    let positions: Vec<i64> = {
+        let mut st = s.conn().prepare("SELECT position FROM labels ORDER BY position").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(positions, vec![0, 1, 2, 3], "no ties");
+    assert_eq!(s.create_label(" B ").unwrap(), b, "an existing name keeps its place");
+    assert!(matches!(s.delete_group(g), Err(Error::NotFound)));
+}
+
+#[test]
 fn move_category_between_groups_renumbers_both() {
     let mut s = Store::open_in_memory().unwrap();
     let g1 = s.create_group("G1").unwrap();
@@ -641,6 +664,44 @@ mod draft {
         s.discard_category_draft(id).unwrap();
         assert!(matches!(s.apply_category_draft(id, &again), Err(juttusihti_core::Error::NotFound)));
         assert_eq!(label_of(&s, b), None);
+    }
+
+    #[test]
+    fn a_new_group_whose_contents_are_all_stale_is_not_created() {
+        let mut s = setup(&["a"]);
+        let loose = s.create_label("Loose").unwrap();
+        let other = s.create_group("Other").unwrap();
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "Uusi")],
+            placements: vec![Placement { label: loose, rename: None, group: GroupRef::New(1), ticked: true }],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
+        s.move_category(loose, Some(other), 0).unwrap(); // grouped by hand meanwhile
+        let r = s.apply_category_draft(id, &d).unwrap();
+        assert_eq!((r.applied, r.skipped), (0, 1));
+        assert_eq!(count(&s, "category_groups"), 1, "no empty group is left behind");
+    }
+
+    #[test]
+    fn an_unreadable_stored_draft_counts_as_none() {
+        let s = setup(&["a"]);
+        let id = s
+            .record_suggestion(&juttusihti_core::research::NewSuggestion {
+                session_id: None,
+                kind: DRAFT_KIND.into(),
+                payload: serde_json::json!({"from": "an older version"}),
+                provider: "openai".into(),
+                model: "m".into(),
+                prompt_version: DRAFT_PROMPT_VERSION.into(),
+                confidence: None,
+                evidence: None,
+            })
+            .unwrap();
+        assert_eq!(s.pending_category_draft().unwrap(), None);
+        let status: String =
+            s.conn().query_row("SELECT status FROM ai_suggestions WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(status, "rejected", "set aside so it is not read again");
     }
 
     #[test]

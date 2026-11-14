@@ -348,6 +348,7 @@ impl State {
     }
 
     /// Whether a row is pressed or being dragged (the pointer is tracked).
+    #[cfg(test)]
     pub(crate) fn armed(&self) -> bool {
         self.drag.dragging().is_some()
     }

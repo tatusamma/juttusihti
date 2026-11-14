@@ -361,6 +361,7 @@ impl State {
     }
 
     /// Whether a row is pressed or being dragged (the pointer is tracked).
+    #[cfg(test)]
     pub(crate) fn armed(&self) -> bool {
         self.drag.dragging().is_some() || self.draft.as_ref().is_some_and(Draft::dragging)
     }
@@ -725,8 +726,9 @@ impl State {
         let kind = self.drag.dragging().map(|d| d.item);
         let mut body = column![].spacing(SPACE[4]);
         if self.loaded && self.categories().next().is_none() {
-            body =
-                body.push(style::note("No categories yet. Publisher categories appear here after the next refresh."));
+            body = body.push(style::note(
+                "No categories yet. Publisher categories appear under Unsorted terms after the next refresh.",
+            ));
         }
         for g in &self.snap.groups {
             body = body.push(self.view_group(g, kind));
@@ -1672,6 +1674,21 @@ mod tests {
         draft_msg(&mut st, DraftMsg::EditName("Space".into()));
         draft_msg(&mut st, DraftMsg::SaveName);
         assert_eq!(st.draft.as_ref().unwrap().plan.placements[0].rename, None);
+    }
+
+    #[test]
+    fn approve_keeps_a_rename_still_being_typed() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, _, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+        draft_msg(&mut st, DraftMsg::StartRename(Name::Group(1)));
+        draft_msg(&mut st, DraftMsg::EditName("Teknologia".into()));
+        let Effect::Run(Op::ApproveDraft(_, plan)) = st.handle(Msg::Draft(DraftMsg::Approve)) else {
+            panic!("Approve applies the draft")
+        };
+        assert_eq!(plan.new_groups[0].name, "Teknologia", "the open rename is part of what is approved");
     }
 
     #[test]

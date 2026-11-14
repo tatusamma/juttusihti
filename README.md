@@ -521,7 +521,7 @@ tokenizer, or AI-assisted query expansion.
   remove, confirm or reject a suggestion). Entities, Events and Relationships screens are not
   built yet.
 - **M3 Research interface**: done. The New Analysis screen covers: inclusive local-date range
-  (stored as half-open UTC), quick ranges, feeds/folders/labels/query scope, an option to
+  (stored as half-open UTC), quick ranges, feeds/folders/categories/query scope, an option to
   exclude undated articles, provider and model, content depth, tasks, relevance topic, limits
   (articles, tokens, USD), cache reuse, and accepting unknown pricing. Provider batch APIs are
   not supported yet: runs and estimates both use standard prices. It previews

@@ -114,6 +114,28 @@ fn exists(tx: &Transaction, sql: &str, id: i64) -> Result<bool> {
     Ok(tx.query_row(sql, [id], |_| Ok(())).optional()?.is_some())
 }
 
+/// Makes a new group of the draft, or finds the existing one of that name;
+/// `None` for a name without letters or digits.
+fn make_group(tx: &Transaction, g: Option<&NewGroupDraft>) -> Result<Option<GroupId>> {
+    let Some(g) = g else { return Ok(None) };
+    let name = g.name.trim();
+    let normalized = normalize_text(name);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let found: Option<GroupId> =
+        tx.query_row("SELECT id FROM category_groups WHERE normalized = ?1", [&normalized], |r| r.get(0)).optional()?;
+    if found.is_some() {
+        return Ok(found);
+    }
+    tx.execute(
+        "INSERT INTO category_groups(name, normalized, position, created_at)
+         VALUES (?1, ?2, (SELECT COALESCE(MAX(position) + 1, 0) FROM category_groups), ?3)",
+        params![name, normalized, now()],
+    )?;
+    Ok(Some(tx.last_insert_rowid()))
+}
+
 fn place(tx: &Transaction, label: LabelId, group: GroupId) -> Result<()> {
     let pos: i64 =
         tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id = ?1", [group], |r| r.get(0))?;
@@ -171,7 +193,16 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        row.map(|(id, json)| Ok((id, serde_json::from_str(&json)?))).transpose()
+        let Some((id, json)) = row else { return Ok(None) };
+        match serde_json::from_str(&json) {
+            Ok(draft) => Ok(Some((id, draft))),
+            // Unreadable (e.g. from another version): set it aside rather than break the screen.
+            Err(e) => {
+                tracing::warn!(id, error = %e, "unreadable category draft, setting it aside");
+                self.discard_category_draft(id)?;
+                Ok(None)
+            }
+        }
     }
 
     pub fn update_category_draft(&self, id: i64, draft: &CategoryDraft) -> Result<()> {
@@ -206,47 +237,40 @@ impl Store {
             return Err(Error::NotFound);
         }
         let (mut applied, mut skipped) = (0, 0);
-        let mut groups: HashMap<u32, GroupId> = HashMap::new();
+        // New groups are made when their first category lands, so a group whose
+        // contents all changed meanwhile is not left behind empty. `None`: unusable.
+        let mut groups: HashMap<u32, Option<GroupId>> = HashMap::new();
         let mut cats: HashMap<u32, LabelId> = HashMap::new();
 
-        for g in draft.new_groups.iter().filter(|g| draft.group_counts(g.temp)) {
-            let name = g.name.trim();
+        // Resolves a group reference, making a new group on first use; None means it is stale.
+        let mut resolve_group =
+            |tx: &Transaction, r: GroupRef, applied: &mut usize, skipped: &mut usize| -> Result<Option<GroupId>> {
+                let t = match r {
+                    GroupRef::Existing(g) => {
+                        return Ok(exists(tx, "SELECT 1 FROM category_groups WHERE id = ?1", g)?.then_some(g));
+                    }
+                    GroupRef::New(t) => t,
+                };
+                if let Some(known) = groups.get(&t) {
+                    return Ok(*known);
+                }
+                let made = make_group(tx, draft.new_groups.iter().find(|g| g.temp == t))?;
+                match made {
+                    Some(_) => *applied += 1,
+                    None => *skipped += 1,
+                }
+                groups.insert(t, made);
+                Ok(made)
+            };
+
+        for c in draft.new_categories.iter().filter(|c| c.ticked && draft.group_ref_counts(c.group)) {
+            let name = c.name.trim();
             let normalized = normalize_text(name);
             if normalized.is_empty() {
                 skipped += 1;
                 continue;
             }
-            let found: Option<GroupId> = tx
-                .query_row("SELECT id FROM category_groups WHERE normalized = ?1", [&normalized], |r| r.get(0))
-                .optional()?;
-            let gid = match found {
-                Some(gid) => gid,
-                None => {
-                    tx.execute(
-                        "INSERT INTO category_groups(name, normalized, position, created_at)
-                         VALUES (?1, ?2, (SELECT COALESCE(MAX(position) + 1, 0) FROM category_groups), ?3)",
-                        params![name, normalized, now()],
-                    )?;
-                    tx.last_insert_rowid()
-                }
-            };
-            groups.insert(g.temp, gid);
-            applied += 1;
-        }
-
-        // Resolves a group reference; None means it is stale.
-        let resolve_group = |tx: &Transaction, r: GroupRef| -> Result<Option<GroupId>> {
-            Ok(match r {
-                GroupRef::Existing(g) => exists(tx, "SELECT 1 FROM category_groups WHERE id = ?1", g)?.then_some(g),
-                GroupRef::New(t) => groups.get(&t).copied(),
-            })
-        };
-
-        for c in draft.new_categories.iter().filter(|c| c.ticked && draft.group_ref_counts(c.group)) {
-            let name = c.name.trim();
-            let normalized = normalize_text(name);
-            let group = resolve_group(&tx, c.group)?;
-            let (Some(group), false) = (group, normalized.is_empty()) else {
+            let Some(group) = resolve_group(&tx, c.group, &mut applied, &mut skipped)? else {
                 skipped += 1;
                 continue;
             };
@@ -267,10 +291,14 @@ impl Store {
         }
 
         for p in draft.placements.iter().filter(|p| p.ticked && draft.group_ref_counts(p.group)) {
-            let group = resolve_group(&tx, p.group)?;
+            // Only a category that is still ungrouped is placed.
             let current: Option<Option<GroupId>> =
                 tx.query_row("SELECT group_id FROM labels WHERE id = ?1", [p.label], |r| r.get(0)).optional()?;
-            let (Some(group), Some(None)) = (group, current) else {
+            if current != Some(None) {
+                skipped += 1;
+                continue;
+            }
+            let Some(group) = resolve_group(&tx, p.group, &mut applied, &mut skipped)? else {
                 skipped += 1;
                 continue;
             };

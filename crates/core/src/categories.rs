@@ -170,9 +170,25 @@ impl Store {
         }
     }
 
-    pub fn delete_group(&self, id: GroupId) -> Result<()> {
-        let n = self.conn().execute("DELETE FROM category_groups WHERE id = ?1", [id])?;
-        if n == 0 { Err(Error::NotFound) } else { Ok(()) }
+    /// Deletes a group; its categories go after the Ungrouped ones, in their order.
+    pub fn delete_group(&mut self, id: GroupId) -> Result<()> {
+        let tx = self.conn_mut().transaction()?;
+        let next: i64 =
+            tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL", [], |r| r.get(0))?;
+        let freed =
+            column(&tx, "SELECT id FROM labels WHERE group_id = ?1 ORDER BY position, name COLLATE NOCASE, id", [id])?;
+        for (i, label) in freed.iter().enumerate() {
+            tx.execute(
+                "UPDATE labels SET group_id = NULL, position = ?1 WHERE id = ?2",
+                params![next + i as i64, label],
+            )?;
+        }
+        let n = tx.execute("DELETE FROM category_groups WHERE id = ?1", [id])?;
+        if n == 0 {
+            return Err(Error::NotFound);
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn move_group(&mut self, id: GroupId, index: usize) -> Result<()> {

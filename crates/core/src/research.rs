@@ -103,6 +103,7 @@ impl Store {
     // ---- labels --------------------------------------------------------
 
     /// Creates a label or returns the existing one with the same normalized name.
+    /// A new one goes last in Ungrouped.
     pub fn create_label(&self, name: &str) -> Result<LabelId> {
         let name = name.trim();
         let normalized = normalize_text(name);
@@ -110,7 +111,9 @@ impl Store {
             return Err(Error::Invalid("label name must contain letters or digits".into()));
         }
         self.conn().execute(
-            "INSERT INTO labels(name, normalized, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(normalized) DO NOTHING",
+            "INSERT INTO labels(name, normalized, created_at, position)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL))
+             ON CONFLICT(normalized) DO NOTHING",
             params![name, normalized, now()],
         )?;
         Ok(self.conn().query_row("SELECT id FROM labels WHERE normalized = ?1", [normalized], |r| r.get(0))?)

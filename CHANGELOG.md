@@ -29,6 +29,10 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - **Labels are now called categories** everywhere you see them: the article preview, the
   filters, Custom analysis, AI tasks, reports and their CSV files. Your existing labels are your
   categories; nothing was moved or deleted.
+- Report CSV files are renamed to match: `juttusihti-labels.csv` is now
+  `juttusihti-categories.csv`, `juttusihti-labels-by-source.csv` is now
+  `juttusihti-categories-by-source.csv`, and the `label` column header is now `category`. Update
+  any scripts that read them.
 - The Help screen and README describe the sidebar, the Categories screen and ✨ Suggest
   categories.
 

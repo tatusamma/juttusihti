@@ -405,7 +405,13 @@ impl Draft {
                 }
                 Outcome::None
             }
-            DraftMsg::Approve => Outcome::Approve,
+            DraftMsg::Approve => {
+                // A name still being typed is part of what is approved.
+                if self.edit.is_some() {
+                    let _ = self.apply(DraftMsg::SaveName, snap);
+                }
+                Outcome::Approve
+            }
             DraftMsg::Cancel => Outcome::Discard,
         }
     }
