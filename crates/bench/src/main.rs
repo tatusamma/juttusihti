@@ -3,7 +3,8 @@
 //! Usage: juttusihti-bench <articles> <work-dir> [--keep]
 //!
 //! Builds a database with <articles> synthetic Finnish/English articles in
-//! 50 feeds over two years (10% labelled, 5% with entities, 2% linked),
+//! 50 feeds over two years (10% labelled, 5% with entities, 2% linked,
+//! five publisher terms each, a third of the terms mapped to categories),
 //! then times reader, research and analytics operations. Each query is run
 //! several times; the median is reported. Prints a Markdown table and
 //! writes `bench-<articles>.json` into the work dir.
@@ -18,7 +19,7 @@ use juttusihti_core::graph::{GraphQuery, NodeRef};
 use juttusihti_core::pricing::{Catalog, Provider};
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::{ListFilter, Store};
-use juttusihti_core::{EntityKind, NewArticle, NewFeed, Origin, Page, RelationshipKind, View};
+use juttusihti_core::{EntityKind, NewArticle, NewFeed, NewTerm, Origin, Page, RelationshipKind, View};
 
 const FEEDS: usize = 50;
 const RUNS: usize = 7;
@@ -182,6 +183,7 @@ fn main() {
                 let i = made + j;
                 let title_len = 5 + rng.below(6);
                 let summary_len = 25 + rng.below(30);
+                let first_term = rng.below(FI.len());
                 NewArticle {
                     guid: format!("g{i}"),
                     url: Some(format!("https://news.example/{i}")),
@@ -190,6 +192,9 @@ fn main() {
                     content: (rng.below(5) == 0).then(|| rng.words(250)),
                     author: None,
                     published_at: (rng.below(50) != 0).then(|| END - (rng.next() % SPAN as u64) as i64),
+                    terms: (0..5)
+                        .map(|k| NewTerm { name: FI[(first_term + k) % FI.len()].into(), scheme: String::new() })
+                        .collect(),
                 }
             })
             .collect();
@@ -232,6 +237,21 @@ fn main() {
         if k % 50 == 2 && k + 7 < ids.len() {
             let _ = store.relate(*id, ids[k + 7], RelationshipKind::Related, Origin::Ai, None, Some(0.7), None);
         }
+    }
+    // Categories: eight, half of them in one group, a third of the publisher terms mapped.
+    let group = store.create_group("Aiheet").unwrap();
+    let categories: Vec<i64> = ["Politiikka", "Talous", "Sää", "Energia", "Terveys", "Liikenne", "Ilmasto", "Rikos"]
+        .iter()
+        .map(|n| store.create_category(n).unwrap())
+        .collect();
+    for (i, c) in categories.iter().take(categories.len() / 2).enumerate() {
+        store
+            .conn()
+            .execute("UPDATE categories SET group_id = ?1, position = ?2 WHERE id = ?3", (group, i as i64, c))
+            .unwrap();
+    }
+    for (i, c) in categories.iter().enumerate() {
+        store.conn().execute("UPDATE feed_terms SET category_id = ?1 WHERE id % 24 = ?2", (c, i as i64)).unwrap();
     }
     store.conn().execute_batch("COMMIT").unwrap();
     res.add("Research data (labels/entities/links)", fmt(started.elapsed()));
@@ -283,6 +303,15 @@ fn main() {
             store.search(&query, page).unwrap();
         });
     }
+    res.time("Category counts: All", || {
+        store.category_counts(ListFilter::default()).unwrap();
+    });
+    res.time("Category counts: Unread", || {
+        store.category_counts(ListFilter { view: View::Unread, ..Default::default() }).unwrap();
+    });
+    res.time("Filter: category group", || {
+        store.search(&SearchQuery { group_ids: vec![group], ..Default::default() }, page).unwrap();
+    });
     let some_article = ids[ids.len() / 2 + 2];
     res.time("Article relationships", || {
         store.relationships(some_article).unwrap();

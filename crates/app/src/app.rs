@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, pick_list, responsive, rich_text, row, rule, scrollable, span, stack,
-    text, text_input, tooltip,
+    Space, button, column, container, operation, pick_list, pin, responsive, rich_text, row, rule, scrollable, span,
+    stack, text, text_input, tooltip,
 };
-use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, font};
+use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, Vector, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
 use juttusihti_article::FetchOutcome;
 use juttusihti_core::fulltext::Fulltext;
@@ -22,6 +22,7 @@ use juttusihti_core::{
 use juttusihti_fetch::{Fetcher, Policy};
 use tokio::sync::Semaphore;
 
+use crate::category_sidebar::{self, Selection};
 use crate::db::Db;
 use crate::icons::{Icon, icon};
 use crate::style::{self, READ_WIDTH, SEMIBOLD, SIZE_ARTICLE_TITLE, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
@@ -78,6 +79,7 @@ pub enum Screen {
     Reports,
     Research,
     Labels,
+    Organise,
     Review,
     Graph,
     Timeline,
@@ -141,6 +143,11 @@ pub struct FeedEdit {
     pub(crate) title: String,
     pub(crate) folder: Option<FolderId>,
     pub(crate) new_folder: String,
+    /// Category given to the feed's articles that no term maps.
+    pub(crate) default_category: Option<juttusihti_core::categories::CategoryId>,
+    /// Category group the feed belongs to.
+    pub(crate) group: Option<juttusihti_core::categories::GroupId>,
+    pub(crate) new_group: String,
 }
 
 /// Pick-list entry for a feed's folder.
@@ -151,6 +158,54 @@ impl std::fmt::Display for FolderChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.1)
     }
+}
+
+/// Pick-list entry for a feed's default category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryChoice(pub(crate) Option<juttusihti_core::categories::CategoryId>, pub(crate) String);
+
+impl std::fmt::Display for CategoryChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+/// Pick-list entry for a feed's category group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupChoice(pub(crate) Option<juttusihti_core::categories::GroupId>, pub(crate) String);
+
+impl std::fmt::Display for GroupChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+/// Saves an edited feed: folder, title, default category and group, in that order.
+/// A typed new folder or group wins over the picked one. All steps succeed or none
+/// is kept.
+fn save_feed_edit(s: &Store, edit: FeedEdit) -> juttusihti_core::Result<()> {
+    s.conn().execute_batch("SAVEPOINT feed_edit")?;
+    match save_feed_steps(s, edit) {
+        Ok(()) => Ok(s.conn().execute_batch("RELEASE feed_edit")?),
+        Err(e) => {
+            let _ = s.conn().execute_batch("ROLLBACK TO feed_edit; RELEASE feed_edit");
+            Err(e)
+        }
+    }
+}
+
+fn save_feed_steps(s: &Store, edit: FeedEdit) -> juttusihti_core::Result<()> {
+    let folder = match edit.new_folder.trim() {
+        "" => edit.folder,
+        name => Some(s.create_folder(name)?),
+    };
+    s.update_feed(edit.id, &edit.title, folder)?;
+    s.set_feed_default_category(edit.id, edit.default_category)?;
+    let group = match edit.new_group.trim() {
+        "" => edit.group,
+        name => Some(s.find_or_create_group(name)?),
+    };
+    s.set_feed_group(edit.id, group)
 }
 
 /// The "Read full article" action of the article being read.
@@ -170,6 +225,8 @@ pub struct Preview {
     feed_title: String,
     body: String,
     labels: Vec<ArticleLabel>,
+    category: juttusihti_core::categories::ArticleCategory,
+    all_categories: Vec<juttusihti_core::categories::Category>,
     headline: Option<juttusihti_core::headlines::Headline>,
     /// Text fetched from the article's page, if any.
     fulltext: Option<Fulltext>,
@@ -188,6 +245,15 @@ impl Preview {
         let text = if paywalled { self.body.strip_suffix(PAYWALL_NOTE).unwrap_or(&self.body) } else { &self.body };
         crate::fact_check::can_check(self.fulltext.is_some(), self.article.content.as_deref(), text.trim_end())
     }
+}
+
+/// Sets (or with `None` clears) an article's manual category.
+fn set_category(
+    s: &Store,
+    id: ArticleId,
+    choice: Option<juttusihti_core::categories::CategoryId>,
+) -> juttusihti_core::Result<ArticleId> {
+    s.set_article_category(id, choice).map(|_| id)
 }
 
 /// Reads an article for the reading pane. The fetched picture is decoded
@@ -210,6 +276,8 @@ fn read_preview(s: &Store, id: ArticleId) -> juttusihti_core::Result<Preview> {
     Ok(Preview {
         body,
         labels: s.article_labels(id)?,
+        category: s.article_category(id)?,
+        all_categories: s.categories()?,
         headline: s.headline(id)?,
         full: if fulltext.is_some() { FullState::Fetched } else { FullState::Idle },
         fact_check: s.fact_check(id)?,
@@ -318,6 +386,8 @@ pub enum Message {
     FocusSearch,
     /// Shows only articles with this confirmed label, or any label.
     FilterLabel(LabelChoice),
+    /// The categories sidebar.
+    Categories(category_sidebar::Msg),
     PrevPage,
     NextPage,
     AddFeedInput(String),
@@ -347,6 +417,7 @@ pub enum Message {
     ShowScreen(Screen),
     Research(crate::research::Msg),
     Labels(crate::labels::Msg),
+    Organise(crate::organise::Msg),
     Review(crate::review::Msg),
     Graph(crate::graph_view::Msg),
     Timeline(crate::timeline_view::Msg),
@@ -368,10 +439,15 @@ pub enum Message {
     RemoveLabel(juttusihti_core::LabelId),
     DecideLabel(juttusihti_core::LabelId, juttusihti_core::Status),
     LabelsChanged(Result<Vec<ArticleLabel>, String>),
+    SetCategory(Option<juttusihti_core::categories::CategoryId>),
+    CategoryChanged(Result<ArticleId, String>),
     EditFeed(FeedId),
     FeedTitle(String),
     FeedFolder(FolderChoice),
     NewFolder(String),
+    FeedDefaultCategory(CategoryChoice),
+    FeedGroup(GroupChoice),
+    NewGroup(String),
     SaveFeed,
     CancelEditFeed,
     FeedSaved(Result<(), String>),
@@ -397,6 +473,9 @@ pub struct App {
     active_search: String,
     /// The label the list is filtered by.
     label_filter: Option<LabelId>,
+    /// The group or category the list is narrowed to (the categories sidebar).
+    category: Selection,
+    categories: category_sidebar::State,
     page: Page,
     /// Incremented for every list request, so stale responses are dropped.
     list_generation: u64,
@@ -419,6 +498,7 @@ pub struct App {
     reports: crate::reports::State,
     research: crate::research::State,
     labels: crate::labels::State,
+    organise: crate::organise::State,
     review: crate::review::State,
     graph: crate::graph_view::State,
     timeline: crate::timeline_view::State,
@@ -443,6 +523,8 @@ impl App {
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
             labels: crate::labels::State::new(db.clone()),
+            organise: crate::organise::State::new(db.clone()),
+            categories: category_sidebar::State::new(db.clone()),
             review: crate::review::State::new(db.clone()),
             graph: crate::graph_view::State::new(db.clone()),
             timeline: crate::timeline_view::State::new(db.clone()),
@@ -469,6 +551,7 @@ impl App {
             search: String::new(),
             active_search: String::new(),
             label_filter: None,
+            category: Selection::All,
             page: Page::first(PAGE_SIZE),
             list_generation: 0,
             listing: Listing {
@@ -493,7 +576,12 @@ impl App {
             confirm_unsubscribe: None,
             reports: crate::reports::State::new(analytics.clone()),
         };
-        let task = Task::batch([app.load_sidebar(), app.load_list(), app.settings.load().map(Message::Settings)]);
+        let task = Task::batch([
+            app.categories.load_open().map(Message::Categories),
+            app.load_sidebar(),
+            app.load_list(),
+            app.settings.load().map(Message::Settings),
+        ]);
         (app, task)
     }
 
@@ -519,10 +607,21 @@ impl App {
         } else {
             iced::time::every(Duration::from_secs(u64::from(minutes) * 60)).map(|_| Message::AutoRefresh)
         };
-        Subscription::batch([keys, refresh])
+        let organise = match self.screen {
+            Screen::Organise => self.organise.subscription().map(Message::Organise),
+            Screen::Reader => self.categories.subscription().map(Message::Categories),
+            _ => Subscription::none(),
+        };
+        Subscription::batch([keys, refresh, organise])
     }
 
-    fn load_sidebar(&self) -> Task<Message> {
+    /// Reloads the feeds, unread counts and labels, and the categories with their counts.
+    fn load_sidebar(&mut self) -> Task<Message> {
+        Task::batch([self.load_feeds(), self.load_categories()])
+    }
+
+    /// Reloads the feeds, their unread counts and the labels.
+    fn load_feeds(&self) -> Task<Message> {
         let db = self.db.clone();
         Task::perform(
             async move {
@@ -538,6 +637,21 @@ impl App {
             },
             Message::SidebarLoaded,
         )
+    }
+
+    /// After articles were marked read or unread: the unread counts, and the
+    /// category counts only while they count unread articles (they are costly).
+    fn after_read_change(&mut self) -> Task<Message> {
+        if self.list_filter().view == View::Unread {
+            Task::batch([self.load_feeds(), self.load_categories()])
+        } else {
+            self.load_feeds()
+        }
+    }
+
+    /// Reloads the categories sidebar with counts for the list's All/Unread and feed picker.
+    fn load_categories(&mut self) -> Task<Message> {
+        self.categories.load(self.list_filter()).map(Message::Categories)
     }
 
     /// What the article list shows: Saved is one fixed list, News combines
@@ -572,11 +686,14 @@ impl App {
         }
     }
 
-    /// The AI popover title: the scope, plus the label and search when active.
+    /// The AI popover title: the scope, plus the category, label and search when active.
     fn quick_label(&self) -> String {
         let mut scope = self.scope_label();
         if self.unread_only && self.place == Place::News {
             scope = format!("Unread in {scope}");
+        }
+        if let Some(name) = self.categories.name(self.category) {
+            scope = format!("{scope} in “{name}”");
         }
         if let Some(name) = self.label_filter_name() {
             scope = format!("{scope} labelled “{name}”");
@@ -589,9 +706,9 @@ impl App {
         self.sidebar.labels.iter().find(|l| l.id == id).map(|l| l.name.as_str())
     }
 
-    /// Whether search text or a label narrows the list.
+    /// Whether search text, a label or a category narrows the list.
     fn is_filtered(&self) -> bool {
-        !self.active_search.is_empty() || self.label_filter.is_some()
+        !self.active_search.is_empty() || self.label_filter.is_some() || self.category != Selection::All
     }
 
     /// Replaces the status bar line.
@@ -616,6 +733,19 @@ impl App {
             feed_ids: filter.feed_id.into_iter().collect(),
             folder_ids: filter.folder_id.into_iter().collect(),
             label_ids: self.label_filter.into_iter().collect(),
+            group_ids: match self.category {
+                Selection::Group(g) => vec![g],
+                _ => vec![],
+            },
+            category_ids: match self.category {
+                Selection::Category(c) => vec![c],
+                _ => vec![],
+            },
+            uncategorized: self.category == Selection::Uncategorized,
+            category_feed_id: match self.category {
+                Selection::Feed(f) => Some(f),
+                _ => None,
+            },
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
         }
@@ -712,6 +842,15 @@ impl App {
         let _ = self.quick.update(crate::quick::Msg::Close);
     }
 
+    /// What "Mark all read" marks.
+    fn read_scope(&self) -> ReadScope {
+        if self.is_filtered() {
+            ReadScope::Query(Box::new(self.list_query()))
+        } else {
+            ReadScope::List(self.list_filter())
+        }
+    }
+
     /// Unread articles in the current News scope.
     fn scope_unread(&self) -> u64 {
         let feeds = &self.sidebar.feeds;
@@ -723,12 +862,47 @@ impl App {
         self.sidebar.unread.iter().filter(|(f, _)| in_scope(*f)).map(|(_, n)| n).sum()
     }
 
-    /// Back to the first page of the reader list after a place/scope change.
+    /// Back to the first page of the reader list after a place/scope change;
+    /// the category counts follow the new All/Unread and feed choice.
     fn show_list(&mut self) -> Task<Message> {
         self.screen = Screen::Reader;
         self.page = Page::first(PAGE_SIZE);
         self.preview = None;
-        self.load_list()
+        Task::batch([self.load_list(), self.load_categories()])
+    }
+
+    /// Handles the categories sidebar and what it asks of the app.
+    fn on_categories(&mut self, msg: category_sidebar::Msg) -> Task<Message> {
+        let (task, event) = self.categories.update(msg);
+        let task = task.map(Message::Categories);
+        let follow = match event {
+            None => Task::none(),
+            Some(category_sidebar::Event::Select(s)) => {
+                self.category = s;
+                self.page = Page::first(PAGE_SIZE);
+                self.screen = Screen::Reader;
+                self.load_list()
+            }
+            // The open article's categories and the list's members may have changed.
+            Some(category_sidebar::Event::Categorized) => self.load_list(),
+            Some(category_sidebar::Event::Organise) => self.update(Message::ShowScreen(Screen::Organise)),
+            // A group's articles change when categories move in or out of it.
+            Some(category_sidebar::Event::Changed) if matches!(self.category, Selection::Group(_)) => self.load_list(),
+            Some(category_sidebar::Event::Changed) => Task::none(),
+            // The selection was deleted or merged away (e.g. on the Organise screen).
+            Some(category_sidebar::Event::Loaded) if !self.categories.contains(self.category) => {
+                self.category = Selection::All;
+                self.page = Page::first(PAGE_SIZE);
+                self.load_list()
+            }
+            Some(category_sidebar::Event::Loaded) => Task::none(),
+            Some(category_sidebar::Event::Failed(e)) => {
+                tracing::warn!(error = %e, "categories sidebar failed");
+                self.show_error(e);
+                Task::none()
+            }
+        };
+        Task::batch([task, follow])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -743,6 +917,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Categories(msg) => self.on_categories(msg),
             Message::GoPlace(place) => {
                 self.close_overlays();
                 self.place = place;
@@ -773,7 +948,7 @@ impl App {
                     item.is_read = true;
                 }
                 let load = self.load_preview(id, true);
-                if was_unread { Task::batch([load, self.load_sidebar()]) } else { load }
+                if was_unread { Task::batch([load, self.after_read_change()]) } else { load }
             }
             Message::PreviewLoaded(Ok(mut preview)) => {
                 // Reopened while its fetch still runs.
@@ -855,7 +1030,7 @@ impl App {
                 if let Some(item) = self.listing.items.iter_mut().find(|a| a.id == id) {
                     item.is_read = read;
                 }
-                Task::batch([self.set_state(id, Some(read), None), self.load_sidebar()])
+                Task::batch([self.set_state(id, Some(read), None), self.after_read_change()])
             }
             Message::OpenInBrowser => {
                 if let Some(url) = self.preview.as_ref().and_then(|p| p.article.url.clone()) {
@@ -944,6 +1119,8 @@ impl App {
                     last_modified: None,
                     last_fetched_at: None,
                     last_error: None,
+                    default_category_id: None,
+                    category_group_id: None,
                 };
                 let fetch = self.refresh_feed(&feed).unwrap_or_else(Task::none);
                 self.refreshing += 1;
@@ -1005,15 +1182,12 @@ impl App {
             }
             Message::MarkAllRead => {
                 let db = self.db.clone();
-                let filter = self.list_filter();
+                let scope = self.read_scope();
                 for item in &mut self.listing.items {
                     item.is_read = true;
                 }
-                Task::perform(
-                    async move { db.call(move |s| s.mark_all_read(filter).map(|_| ())).await },
-                    Message::StateChanged,
-                )
-                .chain(self.load_sidebar())
+                Task::perform(async move { db.call(move |s| scope.apply(s).map(|_| ())).await }, Message::StateChanged)
+                    .chain(self.after_read_change())
             }
             Message::RefreshAll | Message::AutoRefresh => {
                 if self.refreshing > 0 {
@@ -1089,11 +1263,17 @@ impl App {
             }
             Message::ShowScreen(screen) => {
                 self.close_overlays();
+                // A row pressed on the screen being left would start a drag on return.
+                if screen != self.screen {
+                    self.categories.cancel_drag();
+                    self.organise.cancel_drag();
+                }
                 self.screen = screen;
                 match screen {
                     Screen::Reports => self.reports.load().map(Message::Reports),
                     Screen::Research => self.research.load().map(Message::Research),
                     Screen::Labels => self.labels.load().map(Message::Labels),
+                    Screen::Organise => self.organise.load().map(Message::Organise),
                     Screen::Review => self.review.load().map(Message::Review),
                     Screen::Graph => self.graph.load().map(Message::Graph),
                     Screen::Timeline => self.timeline.load().map(Message::Timeline),
@@ -1113,6 +1293,12 @@ impl App {
                 // Creates, renames, merges and deletes change the label filter's choices.
                 let changed = matches!(msg, crate::labels::Msg::Done(_));
                 let task = self.labels.update(msg).map(Message::Labels);
+                if changed { Task::batch([task, self.load_feeds()]) } else { task }
+            }
+            Message::Organise(msg) => {
+                // Renames, merges, deletes and moves change the categories sidebar.
+                let changed = matches!(msg, crate::organise::Msg::Done(_));
+                let task = self.organise.update(msg).map(Message::Organise);
                 if changed { Task::batch([task, self.load_sidebar()]) } else { task }
             }
             Message::Review(crate::review::Msg::OpenArticle(id)) => {
@@ -1202,7 +1388,8 @@ impl App {
                     }
                     self.status_review = session;
                 }
-                if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
+                // AI runs add categories but leave the feeds' unread counts alone.
+                if refresh { Task::batch([task, self.load_list(), self.load_categories()]) } else { task }
             }
             Message::FactCheck(crate::fact_check::Msg::ToggleCard) => {
                 if let Some(id) = self.preview.as_ref().map(|p| p.article.id) {
@@ -1294,14 +1481,34 @@ impl App {
                     p.labels = labels;
                 }
                 // Adding a label may have created a new one for the label filter.
-                self.load_sidebar()
+                self.load_feeds()
+            }
+            Message::SetCategory(choice) => {
+                let Some(id) = self.preview.as_ref().map(|p| p.article.id) else { return Task::none() };
+                let db = self.db.clone();
+                Task::perform(
+                    async move { db.call(move |s| set_category(s, id, choice)).await },
+                    Message::CategoryChanged,
+                )
+            }
+            Message::CategoryChanged(Ok(id)) => {
+                let current = self.preview.as_ref().is_some_and(|p| p.article.id == id);
+                let reload = if current { self.load_preview(id, false) } else { Task::none() };
+                Task::batch([reload, self.load_categories(), self.load_list()])
             }
             Message::EditFeed(id) => {
                 self.feeds_open = true;
                 self.confirm_unsubscribe = None;
                 if let Some(f) = self.sidebar.feeds.iter().find(|f| f.id == id) {
-                    self.feed_edit =
-                        Some(FeedEdit { id, title: f.title.clone(), folder: f.folder_id, new_folder: String::new() });
+                    self.feed_edit = Some(FeedEdit {
+                        id,
+                        title: f.title.clone(),
+                        folder: f.folder_id,
+                        new_folder: String::new(),
+                        default_category: f.default_category_id,
+                        group: f.category_group_id,
+                        new_group: String::new(),
+                    });
                 }
                 Task::none()
             }
@@ -1324,6 +1531,25 @@ impl App {
                 }
                 Task::none()
             }
+            Message::FeedDefaultCategory(CategoryChoice(category, _)) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.default_category = category;
+                }
+                Task::none()
+            }
+            Message::FeedGroup(GroupChoice(group, _)) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.group = group;
+                    e.new_group.clear();
+                }
+                Task::none()
+            }
+            Message::NewGroup(s) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.new_group = s;
+                }
+                Task::none()
+            }
             Message::CancelEditFeed => {
                 self.feed_edit = None;
                 Task::none()
@@ -1331,21 +1557,17 @@ impl App {
             Message::SaveFeed => {
                 let Some(edit) = self.feed_edit.take() else { return Task::none() };
                 let db = self.db.clone();
-                Task::perform(
-                    async move {
-                        db.call(move |s| -> juttusihti_core::Result<()> {
-                            let folder = match edit.new_folder.trim() {
-                                "" => edit.folder,
-                                name => Some(s.create_folder(name)?),
-                            };
-                            s.update_feed(edit.id, &edit.title, folder)
-                        })
-                        .await
-                    },
-                    Message::FeedSaved,
-                )
+                Task::perform(async move { db.call(move |s| save_feed_edit(s, edit)).await }, Message::FeedSaved)
             }
-            Message::FeedSaved(Ok(())) => self.load_sidebar(),
+            Message::FeedSaved(Ok(())) => {
+                // The feed's default or group can change any list row and the open
+                // article's category.
+                let reload = match self.preview.as_ref().map(|p| p.article.id) {
+                    Some(id) => self.load_preview(id, false),
+                    None => Task::none(),
+                };
+                Task::batch([self.load_sidebar(), self.load_list(), reload])
+            }
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
             Message::DismissStatus => {
                 self.status = None;
@@ -1362,6 +1584,7 @@ impl App {
             | Message::Exported(Err(e))
             | Message::RetentionApplied(Err(e))
             | Message::LabelsChanged(Err(e))
+            | Message::CategoryChanged(Err(e))
             | Message::FeedSaved(Err(e)) => {
                 tracing::warn!(error = %e, "operation failed");
                 self.show_error(e);
@@ -1410,6 +1633,9 @@ impl App {
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
             Key::Character("p") => self.update(Message::PrevPage),
+            Key::Character("c") if self.screen == Screen::Reader => {
+                self.update(Message::Categories(category_sidebar::Msg::Toggle))
+            }
             Key::Named(keyboard::key::Named::Escape) => self.update(Message::CloseOverlays),
             Key::Named(keyboard::key::Named::F1) => self.update(Message::ShowScreen(Screen::Help)),
             _ => Task::none(),
@@ -1424,20 +1650,30 @@ impl App {
 
     /// The whole window; `size` places the ⋯ menu at the right edge of the article list.
     fn view_sized(&self, size: Size) -> Element<'_, Message> {
+        // The categories sidebar (and its 1px rule) sits between the rail and the list in the reader.
+        let sidebar = self.screen == Screen::Reader && self.categories.open;
+        let side = if sidebar { category_sidebar::WIDTH + 1.0 } else { 0.0 };
         // The list takes 2 of 5 parts (a 2:3 split with the reading pane) of what is left
-        // after the rail (`rail::WIDTH`) and the two 1px vertical rules (rail | list | pane).
-        let list_width = ((size.width - rail::WIDTH - 2.0) * 2.0 / 5.0).floor().max(0.0);
+        // after the rail (`rail::WIDTH`), the sidebar and the two 1px vertical rules (rail | list | pane).
+        let list_width = ((size.width - rail::WIDTH - side - 2.0) * 2.0 / 5.0).floor().max(0.0);
         let main: Element<'_, Message> = match self.screen {
-            Screen::Reader => row![
-                container(self.view_list()).width(list_width),
-                rule::vertical(1),
-                container(self.view_preview()).width(Fill),
-            ]
-            .height(Fill)
-            .into(),
+            Screen::Reader => {
+                let mut reader = row![].height(Fill);
+                if sidebar {
+                    reader = reader
+                        .push(self.categories.view(self.category).map(Message::Categories))
+                        .push(rule::vertical(1));
+                }
+                reader
+                    .push(container(self.view_list()).width(list_width))
+                    .push(rule::vertical(1))
+                    .push(container(self.view_preview()).width(Fill))
+                    .into()
+            }
             Screen::Reports => self.reports.view().map(Message::Reports),
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Labels => self.labels.view().map(Message::Labels),
+            Screen::Organise => self.organise.view().map(Message::Organise),
             Screen::Review => self.review.view().map(Message::Review),
             Screen::Graph => self.graph.view().map(Message::Graph),
             Screen::Timeline => self.timeline.view().map(Message::Timeline),
@@ -1474,9 +1710,10 @@ impl App {
         let below_header = TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT;
         if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
             // Under the dropdown button at the left of the list header.
-            let anchor = Point::new(rail::WIDTH + 1.0 + LIST_HEADER_PAD, below_header);
+            let anchor = Point::new(rail::WIDTH + 1.0 + side + LIST_HEADER_PAD, below_header);
             let panel = feeds_menu::panel(
                 &self.sidebar,
+                self.categories.tree(),
                 self.scope,
                 &self.add_feed,
                 self.feed_edit.as_ref(),
@@ -1492,16 +1729,26 @@ impl App {
         }
         if self.list_menu_open && self.screen == Screen::Reader {
             // Right-aligned under the ⋯ button at the right of the list header.
-            let left = rail::WIDTH + 1.0;
+            let left = rail::WIDTH + 1.0 + side;
             let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
             return style::overlay(layout, self.view_list_menu(), Point::new(x, below_header), Message::CloseOverlays);
         }
         if self.quick.open && self.screen == Screen::Reader {
             // Right-aligned under the ✨ button, like the ⋯ menu.
-            let left = rail::WIDTH + 1.0;
+            let left = rail::WIDTH + 1.0 + side;
             let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
             let panel = self.quick.view().map(Message::Quick);
             return style::overlay(layout, panel, Point::new(x, below_header), Message::CloseOverlays);
+        }
+        if matches!(self.screen, Screen::Organise | Screen::Reader) {
+            // The dragged row's chip follows the pointer (window coordinates). The stack stays
+            // while no drag runs so the screen's widget state survives the drag starting.
+            let dragged = if self.screen == Screen::Organise { self.organise.ghost() } else { self.categories.ghost() };
+            let ghost: Element<'_, Message> = match dragged {
+                Some((label, at)) => pin(crate::drag::ghost(label)).position(at + Vector::new(12.0, 8.0)).into(),
+                None => Space::new().into(),
+            };
+            return stack![layout, ghost].into();
         }
         layout.into()
     }
@@ -1533,8 +1780,9 @@ impl App {
                 .padding(SPACE[1])
                 .width(LABEL_FILTER_WIDTH)
         });
-        let clear =
-            self.is_filtered().then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
+        // Clear clears the search and the label; the category stays picked in the sidebar.
+        let clear = (!self.active_search.is_empty() || self.label_filter.is_some())
+            .then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
         let refresh_tip =
             if self.refreshing > 0 { format!("Refreshing {}", self.refreshing) } else { "Refresh all feeds".into() };
         let refresh = tooltip(
@@ -1590,6 +1838,20 @@ impl App {
         }
 
         let mut header = row![].spacing(SPACE[1]).align_y(Center);
+        // Hidden sidebar: » brings it back, and the picked category is named here.
+        if !self.categories.open {
+            header = header.push(tooltip(
+                button(text("»").size(SIZE_BODY))
+                    .padding([0.0, SPACE[1]])
+                    .style(style::icon)
+                    .on_press(Message::Categories(category_sidebar::Msg::Toggle)),
+                style::tip("Show categories (c)"),
+                tooltip::Position::Bottom,
+            ));
+            if let Some(name) = self.categories.name(self.category) {
+                header = header.push(text(name).size(SIZE_BODY).font(SEMIBOLD));
+            }
+        }
         header = match self.place {
             Place::News => header
                 .push(feeds_menu::button(self.scope_label(), self.scope_unread(), self.feeds_open))
@@ -1942,6 +2204,7 @@ impl App {
         let rest = rest
             .push(text(body).size(SIZE_BODY).line_height(1.6).style(style::body))
             .push(rule::horizontal(1))
+            .push(crate::article_category::view(&p.all_categories, &p.category, Message::SetCategory))
             .push(column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
         let width = READ_WIDTH + 2.0 * SPACE[4];
         let picture = p.picture.as_ref().filter(|_| self.settings.values.fulltext_pictures);
@@ -1993,11 +2256,34 @@ fn header_icon<'a>(i: Icon, tip: &'a str, open: bool, target: Message) -> Elemen
     .into()
 }
 
+/// The articles "Mark all read" marks.
+#[derive(Debug, Clone)]
+enum ReadScope {
+    /// Everything in the place and feed scope.
+    List(ListFilter),
+    /// Exactly the matches of a category or search query.
+    Query(Box<SearchQuery>),
+}
+
+impl ReadScope {
+    fn apply(self, s: &Store) -> juttusihti_core::Result<usize> {
+        match self {
+            ReadScope::List(filter) => s.mark_all_read(filter),
+            ReadScope::Query(q) => s.mark_query_read(&q),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use juttusihti_core::categories::{CategoryId, Favourite, GroupId};
     use juttusihti_core::store::Store;
 
     use super::*;
+    use crate::category_sidebar::{
+        self, Effect as SidebarEffect, Item as SidebarItem, Msg as SidebarMsg, Op as SidebarOp, Target as SidebarTarget,
+    };
+    use crate::drag::DragMsg;
 
     fn app_with_feed() -> (App, FeedId) {
         let store = Store::open_in_memory().unwrap();
@@ -2026,6 +2312,140 @@ mod tests {
         assert!(app.db_has_feed(feed));
         let _ = app.update(Message::CancelUnsubscribe);
         assert_eq!(app.confirm_unsubscribe, None);
+    }
+
+    /// Loads the store's feeds into the sidebar, as a reload would.
+    fn reload_feeds(app: &mut App) {
+        let feeds = app.db.shared().lock().unwrap().feeds().unwrap();
+        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { feeds, ..app.sidebar.clone() })));
+    }
+
+    /// Runs the save of a feed edit against the app's store, as the save task does.
+    fn save_edit(app: &App, edit: FeedEdit) {
+        save_feed_edit(&app.db.shared().lock().unwrap(), edit).unwrap();
+    }
+
+    #[test]
+    fn saving_a_feed_sets_its_default_category_and_a_new_group() {
+        let (mut app, feed) = app_with_feed();
+        let sport = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::NewGroup("Urheilu".into()));
+        let edit = app.feed_edit.clone().unwrap();
+        save_edit(&app, edit);
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        let f = s.feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_eq!(f.default_category_id, Some(sport));
+        let g = f.category_group_id.unwrap();
+        let tree = s.category_tree().unwrap();
+        assert_eq!(tree.groups.iter().find(|x| x.group.id == g).unwrap().group.name, "Urheilu");
+    }
+
+    #[test]
+    fn a_failing_group_step_saves_nothing() {
+        let (mut app, feed) = app_with_feed();
+        let sport = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::NewGroup("!!!".into()));
+        let mut edit = app.feed_edit.clone().unwrap();
+        edit.title = "Renamed".into();
+        edit.new_folder = "Newfolder".into();
+        assert!(save_feed_edit(&app.db.shared().lock().unwrap(), edit).is_err());
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        let f = s.feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_eq!((f.title.as_str(), f.default_category_id, f.category_group_id), ("Example", None, None));
+        assert!(s.folders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn saving_a_feed_reloads_the_list() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, a) = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let entry = juttusihti_core::NewArticle {
+                guid: "g1".into(),
+                url: Some("https://x.test/g1".into()),
+                title: "g1".into(),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800),
+                terms: vec![],
+            };
+            s.ingest(feed, &[entry]).unwrap();
+            let a = s.conn().query_row("SELECT id FROM articles", [], |r| r.get::<_, i64>(0)).unwrap();
+            (s.create_category("Sport").unwrap(), a)
+        };
+        reload_feeds(&mut app);
+        reload_categories(&mut app);
+        select(&mut app, Selection::Uncategorized);
+        assert_eq!(listed(&app), vec![a]);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        assert!(listed(&app).is_empty());
+        // The save's follow-up reloads sidebar and list, and the open article when there is one.
+        let expected = app.load_sidebar().units() + app.load_list().units();
+        assert_eq!(app.update(Message::FeedSaved(Ok(()))).units(), expected);
+        app.show_preview(a);
+        assert_eq!(app.update(Message::FeedSaved(Ok(()))).units(), expected + app.load_preview(a, false).units());
+    }
+
+    #[test]
+    fn a_new_group_wins_over_the_picked_one_and_none_clears_them() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, picked) = {
+            let s = app.db.shared();
+            let s = s.lock().unwrap();
+            (s.create_category("Sport").unwrap(), s.create_group("Picked").unwrap())
+        };
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::FeedGroup(GroupChoice(Some(picked), "Picked".into())));
+        let _ = app.update(Message::NewGroup("Typed".into()));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        let f =
+            |app: &App| app.db.shared().lock().unwrap().feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_ne!(f(&app).category_group_id, Some(picked));
+        assert!(f(&app).category_group_id.is_some());
+        // Picking a group clears the typed name; "No ..." clears both settings.
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedGroup(GroupChoice(Some(picked), "Picked".into())));
+        assert!(app.feed_edit.as_ref().unwrap().new_group.is_empty());
+        let _ = app.update(Message::FeedGroup(GroupChoice(None, "No group".into())));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(None, "No default category".into())));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        assert_eq!((f(&app).default_category_id, f(&app).category_group_id), (None, None));
+    }
+
+    #[test]
+    fn opening_the_edit_form_preselects_default_category_and_group() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, g) = {
+            let s = app.db.shared();
+            let s = s.lock().unwrap();
+            let sport = s.create_category("Sport").unwrap();
+            let g = s.create_group("Urheilu").unwrap();
+            s.set_feed_default_category(feed, Some(sport)).unwrap();
+            s.set_feed_group(feed, Some(g)).unwrap();
+            (sport, g)
+        };
+        reload_feeds(&mut app);
+        reload_categories(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let e = app.feed_edit.as_ref().unwrap();
+        assert_eq!((e.default_category, e.group), (Some(sport), Some(g)));
+        app.feeds_open = true;
+        let _ = app.view();
     }
 
     #[test]
@@ -2143,6 +2563,461 @@ mod tests {
         assert_eq!(app.label_filter, None);
     }
 
+    /// Loads the labels into the sidebar, as a reload would.
+    fn reload_labels(app: &mut App) {
+        let labels = app.db.shared().lock().unwrap().labels().unwrap();
+        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { labels, ..app.sidebar.clone() })));
+    }
+
+    fn listed(app: &App) -> Vec<ArticleId> {
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        read_listing(&s, &app.list_query(), app.page).unwrap().items.into_iter().map(|a| a.id).collect()
+    }
+
+    #[test]
+    fn label_filter_uses_only_confirmed_labels() {
+        use juttusihti_core::Origin;
+        let (mut app, a, b) = app_with_articles();
+        let label = {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_label("Sää").unwrap();
+            s.tag_article(a, l, Origin::User, None).unwrap();
+            // An AI suggestion nobody has accepted yet.
+            s.tag_article(b, l, Origin::Ai, None).unwrap();
+            l
+        };
+        reload_labels(&mut app);
+        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
+        assert_eq!(listed(&app), vec![a]);
+        app.db.shared().lock().unwrap().decide_label(b, label, juttusihti_core::Status::Confirmed).unwrap();
+        let mut both = listed(&app);
+        both.sort_unstable();
+        assert_eq!(both, vec![a, b], "an accepted suggestion counts");
+    }
+
+    #[test]
+    fn label_filter_and_category_combine() {
+        use juttusihti_core::Origin;
+        let (mut app, a, b) = app_with_articles();
+        let (label, tech) = {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_label("Sää").unwrap();
+            s.tag_article(a, l, Origin::User, None).unwrap();
+            s.tag_article(b, l, Origin::User, None).unwrap();
+            let tech = s.create_category("Tech").unwrap();
+            s.set_article_category(a, Some(tech)).unwrap();
+            (l, tech)
+        };
+        reload_labels(&mut app);
+        reload_categories(&mut app);
+        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
+        select(&mut app, Selection::Category(tech));
+        let q = app.list_query();
+        assert_eq!(q.label_ids, vec![label]);
+        assert_eq!(q.category_ids, vec![tech]);
+        assert_eq!(listed(&app), vec![a], "only articles with both");
+        assert_eq!(app.quick_label(), "All feeds in “Tech” labelled “Sää”");
+        // Clear clears the search and the label, not the category.
+        let _ = app.update(Message::ClearSearch);
+        assert_eq!(app.label_filter, None);
+        assert_eq!(app.category, Selection::Category(tech));
+        assert!(app.is_filtered());
+        assert_eq!(listed(&app), vec![a]);
+    }
+
+    #[test]
+    fn sidebar_never_lists_labels() {
+        let (mut app, _) = app_with_categories();
+        app.db.shared().lock().unwrap().create_label("Sää").unwrap();
+        reload_labels(&mut app);
+        reload_categories(&mut app);
+        let _ = app.update(Message::Categories(SidebarMsg::Find("Sää".into())));
+        assert!(app.categories.matches().is_empty(), "a label is not a category");
+        let _ = app.update(Message::Categories(SidebarMsg::Find("Politics".into())));
+        assert_eq!(app.categories.matches().len(), 2);
+    }
+
+    /// Ids of the categories set up by [`app_with_categories`].
+    struct Cats {
+        tech: GroupId,
+        local: GroupId,
+        ai: CategoryId,
+        local_politics: CategoryId,
+        politics: CategoryId,
+    }
+
+    /// Reloads the categories sidebar from the store, as a reload would.
+    fn reload_categories(app: &mut App) {
+        let filter = app.list_filter();
+        let tree = app.db.shared().lock().unwrap().category_tree().unwrap();
+        let counts = app.db.shared().lock().unwrap().category_counts(filter).unwrap();
+        let _ = app.update(Message::Categories(SidebarMsg::Loaded(filter, Ok(Box::new((tree, counts))))));
+    }
+
+    /// Groups "Tech" (Artificial Intelligence, Space) and "Local" (Local politics),
+    /// and the ungrouped "Politics", loaded into the sidebar.
+    fn app_with_categories() -> (App, Cats) {
+        let (mut app, _) = app_with_feed();
+        let cats = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let tech = s.create_group("Tech").unwrap();
+            let local = s.create_group("Local").unwrap();
+            let ai = s.create_category("Artificial Intelligence").unwrap();
+            let space = s.create_category("Space").unwrap();
+            let local_politics = s.create_category("Local politics").unwrap();
+            let politics = s.create_category("Politics").unwrap();
+            s.move_category(ai, Some(tech), 0).unwrap();
+            s.move_category(space, Some(tech), 1).unwrap();
+            s.move_category(local_politics, Some(local), 0).unwrap();
+            Cats { tech, local, ai, local_politics, politics }
+        };
+        reload_categories(&mut app);
+        (app, cats)
+    }
+
+    fn select(app: &mut App, s: Selection) {
+        let _ = app.update(Message::Categories(SidebarMsg::Select(s)));
+    }
+
+    #[test]
+    fn selecting_group_filters_by_group() {
+        let (mut app, c) = app_with_categories();
+        assert_eq!(app.category, Selection::All);
+        assert!(app.list_query().group_ids.is_empty());
+        select(&mut app, Selection::Group(c.tech));
+        assert_eq!(app.list_query().group_ids, vec![c.tech]);
+        assert!(app.list_query().category_ids.is_empty());
+        assert_eq!(app.quick_label(), "All feeds in “Tech”");
+        select(&mut app, Selection::All);
+        assert!(app.list_query().group_ids.is_empty());
+    }
+
+    #[test]
+    fn selecting_uncategorized_filters_to_uncategorized() {
+        let (mut app, _) = app_with_categories();
+        select(&mut app, Selection::Uncategorized);
+        let q = app.list_query();
+        assert!(q.uncategorized && q.group_ids.is_empty() && q.category_ids.is_empty());
+        assert_eq!(app.quick_label(), "All feeds in “Uncategorized”");
+        assert!(app.is_filtered());
+        select(&mut app, Selection::All);
+        assert!(!app.list_query().uncategorized);
+    }
+
+    #[test]
+    fn organise_link_in_the_sidebar_header_opens_the_categories_screen() {
+        let (mut app, _) = app_with_categories();
+        assert_eq!(app.categories.handle(SidebarMsg::Organise), SidebarEffect::Organise);
+        let _ = app.update(Message::Categories(SidebarMsg::Organise));
+        assert_eq!(app.screen, Screen::Organise);
+    }
+
+    /// A ready plan on a ChatGPT plan for what the store would send now.
+    fn categorize_plan(app: &App) -> Box<crate::categorize_ai::Plan> {
+        use juttusihti_core::ai_defaults::AiDefaults;
+        use juttusihti_core::pricing::{Billing, Price};
+        let d = AiDefaults { billing: Billing::ChatGptPlan, ..Default::default() };
+        let (articles, eligible) =
+            app.db.shared().lock().unwrap().articles_to_categorize(app.list_filter(), 100).unwrap();
+        let price = Some(Price::chatgpt_plan(&d.model()));
+        Box::new(crate::categorize_ai::Plan::build(&d, articles, eligible, Default::default(), price, Ok(())))
+    }
+
+    #[test]
+    fn uncategorized_sparkles_opens_the_sidebar_panel_not_the_quick_popover() {
+        use crate::categorize_ai::Panel;
+        let (mut app, _) = app_with_categories();
+        let category = app.category;
+        assert_eq!(app.categories.handle(SidebarMsg::FindWithAi), SidebarEffect::PlanAi(1));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Planning)));
+        let _ = app.update(Message::Categories(SidebarMsg::CloseAi));
+        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
+        assert!(!app.quick.open, "the quick AI popover stays closed");
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Planning)));
+        assert_eq!(app.category, category, "the list is not changed");
+        let _ = app.update(Message::Categories(SidebarMsg::CloseAi));
+        assert!(app.categories.ai_panel().is_none());
+    }
+
+    #[test]
+    fn sending_finds_categories_once_and_reloads_when_done() {
+        use crate::categorize_ai::Panel;
+        let (mut app, _, _) = app_with_articles();
+        let plan = categorize_plan(&app);
+        assert_eq!(plan.articles.len(), 2);
+        assert_eq!(plan.blocker(), None);
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.update(Message::Categories(SidebarMsg::AiPlanned(g, Ok(plan))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Ready(_))));
+        assert_eq!(app.categories.handle(SidebarMsg::SendAi), SidebarEffect::RunAi);
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Running(_))));
+        assert_eq!(app.categories.handle(SidebarMsg::FindWithAi), SidebarEffect::None, "no second run");
+        assert_eq!(app.categories.handle(SidebarMsg::CloseAi), SidebarEffect::None);
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Running(_))), "a run cannot be closed");
+
+        let generation = app.list_generation;
+        let line = "Categorized 2 of 2 articles; 1 new category.".to_string();
+        let _ = app.update(Message::Categories(SidebarMsg::AiDone(Ok(line.clone()))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Done(l)) if *l == line));
+        assert!(app.list_generation > generation, "the list reloads");
+    }
+
+    #[test]
+    fn a_failed_run_shows_the_error() {
+        use crate::categorize_ai::Panel;
+        let (mut app, _, _) = app_with_articles();
+        let plan = categorize_plan(&app);
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.categories.handle(SidebarMsg::AiPlanned(g, Ok(plan)));
+        let _ = app.categories.handle(SidebarMsg::SendAi);
+        let generation = app.list_generation;
+        let _ = app.update(Message::Categories(SidebarMsg::AiDone(Err("the provider declined".into()))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Failed(e)) if e == "the provider declined"));
+        assert_eq!(app.list_generation, generation);
+    }
+
+    #[test]
+    fn no_articles_to_categorize_disables_send() {
+        let (mut app, _) = app_with_categories();
+        let plan = categorize_plan(&app);
+        assert!(plan.articles.is_empty());
+        assert_eq!(plan.blocker().as_deref(), Some("No uncategorized articles without publisher categories."));
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.categories.handle(SidebarMsg::AiPlanned(g, Ok(plan)));
+        assert_eq!(app.categories.handle(SidebarMsg::SendAi), SidebarEffect::None);
+    }
+
+    #[test]
+    fn mark_all_read_with_uncategorized_marks_only_the_matches() {
+        let (mut app, a, b) = app_with_articles();
+        {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_category("Tech").unwrap();
+            s.set_article_category(a, Some(l)).unwrap();
+        }
+        reload_categories(&mut app);
+        select(&mut app, Selection::Uncategorized);
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        let read = |app: &App, id| app.db.shared().lock().unwrap().article(id).unwrap().is_read;
+        assert!(!read(&app, a), "a categorized article stays unread");
+        assert!(read(&app, b));
+    }
+
+    #[test]
+    fn selecting_category_filters_by_category() {
+        let (mut app, c) = app_with_categories();
+        select(&mut app, Selection::Category(c.ai));
+        assert_eq!(app.list_query().category_ids, vec![c.ai]);
+        assert!(app.list_query().group_ids.is_empty());
+        assert!(app.list_query().label_ids.is_empty(), "categories are not labels");
+        assert!(app.is_filtered());
+        // Clear clears the search, not the category.
+        app.active_search = "vaalit".into();
+        let _ = app.update(Message::ClearSearch);
+        assert!(app.active_search.is_empty());
+        assert_eq!(app.category, Selection::Category(c.ai));
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_and_dragging_moves_it() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        // A press and release without movement is a click.
+        for m in [DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan), DragMsg::Release] {
+            let _ = app.update(Message::Categories(SidebarMsg::Drag(m)));
+        }
+        assert_eq!(app.category, Selection::Group(c.local));
+        // Dragging Local before Tech moves it to the top.
+        let drag = [
+            DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan),
+            DragMsg::Move(Point::new(0.0, 0.0)),
+            DragMsg::Move(Point::new(0.0, 40.0)),
+            DragMsg::Enter(SidebarTarget::GroupSlot(Some(c.tech), 0)),
+        ];
+        for m in drag {
+            let _ = app.categories.handle(SidebarMsg::Drag(m));
+        }
+        let effect = app.categories.handle(SidebarMsg::Drag(DragMsg::Release));
+        assert_eq!(effect, SidebarEffect::Run(SidebarOp::MoveGroup(c.local, 0)));
+        assert_eq!(app.category, Selection::Group(c.local), "a drag does not select");
+    }
+
+    #[test]
+    fn drop_zones_appear_only_once_a_drag_starts() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Press(SidebarItem::Group(c.tech), "Tech".into(), nan)));
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 0.0))));
+        assert_eq!(app.categories.dragged(), None, "a press (a click) keeps the calm layout");
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 40.0))));
+        assert_eq!(app.categories.dragged(), Some(SidebarItem::Group(c.tech)));
+        let _ = app.categories.handle(SidebarMsg::Escape);
+        assert_eq!(app.categories.dragged(), None);
+    }
+
+    #[test]
+    fn favourites_toggle_from_the_menu() {
+        let (mut app, c) = app_with_categories();
+        let fav = Favourite::Category(c.politics);
+        let effect = app.categories.handle(SidebarMsg::SetFavourite(fav, true));
+        assert_eq!(effect, SidebarEffect::Run(SidebarOp::Favourite(fav, true)));
+        let SidebarEffect::Run(op) = effect else { unreachable!() };
+        op.apply(&mut app.db.shared().lock().unwrap()).unwrap();
+        reload_categories(&mut app);
+        assert!(app.categories.is_favourite(fav));
+        assert_eq!(app.categories.menu_label(fav), "Remove from favourites");
+        assert_eq!(app.categories.menu_label(Favourite::Group(c.tech)), "Add to favourites");
+    }
+
+    #[test]
+    fn deleted_selection_falls_back_to_all() {
+        let (mut app, c) = app_with_categories();
+        select(&mut app, Selection::Category(c.ai));
+        app.db.shared().lock().unwrap().delete_category(c.ai).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+        select(&mut app, Selection::Group(c.local));
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::Group(c.local), "still there");
+        app.db.shared().lock().unwrap().delete_group(c.local).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+    }
+
+    #[test]
+    fn sidebar_open_state_is_remembered() {
+        let (mut app, _) = app_with_feed();
+        assert!(category_sidebar::read_open(&app.db.shared().lock().unwrap()).unwrap(), "open by default");
+        assert!(app.categories.open);
+        let effect = app.categories.handle(SidebarMsg::Toggle);
+        assert!(!app.categories.open);
+        let SidebarEffect::Run(op) = effect else { panic!("toggling saves the setting") };
+        op.apply(&mut app.db.shared().lock().unwrap()).unwrap();
+        let shared = app.db.shared();
+        let store = shared.lock().unwrap();
+        assert_eq!(store.setting(category_sidebar::OPEN_KEY).unwrap().as_deref(), Some("0"));
+        assert!(!category_sidebar::read_open(&store).unwrap());
+        drop(store);
+        // The next start reads it back.
+        let mut fresh = category_sidebar::State::new(app.db.clone());
+        let _ = fresh.handle(SidebarMsg::OpenLoaded(Ok(false)));
+        assert!(!fresh.open);
+    }
+
+    #[test]
+    fn find_shows_flat_matches() {
+        let (mut app, c) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::Find("POL".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| (m.selection, m.name, m.group)).collect();
+        assert_eq!(
+            found,
+            vec![
+                (Selection::Category(c.local_politics), "Local politics", Some("Local")),
+                (Selection::Category(c.politics), "Politics", None),
+            ]
+        );
+        let _ = app.update(Message::Categories(SidebarMsg::Find("tech".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| m.selection).collect();
+        assert_eq!(found, vec![Selection::Group(c.tech)]);
+        let _ = app.update(Message::Categories(SidebarMsg::ClearFind));
+        assert!(app.categories.find.is_empty());
+        let _ = app.update(Message::Categories(SidebarMsg::Find("x".into())));
+        let _ = app.update(Message::Categories(SidebarMsg::Escape));
+        assert!(app.categories.find.is_empty(), "Esc clears");
+    }
+
+    /// Two feeds, "Ars" in group Tekno and "Other" in no group, with one article each.
+    fn app_with_group_feeds() -> (App, FeedId, FeedId, ArticleId, ArticleId) {
+        let (mut app, _) = app_with_feed();
+        let (ars, other, a, b) = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let add = |s: &Store, title: &str| {
+                s.add_feed(&NewFeed {
+                    url: format!("https://{title}.test/f"),
+                    title: title.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+            };
+            let ars = add(&s, "Ars");
+            let other = add(&s, "Other");
+            let tekno = s.create_group("Teknologia").unwrap();
+            s.set_feed_group(ars, Some(tekno)).unwrap();
+            let entry = |g: &str| juttusihti_core::NewArticle {
+                guid: g.into(),
+                url: Some(format!("https://x.test/{g}")),
+                title: g.into(),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800),
+                terms: vec![],
+            };
+            s.ingest(ars, &[entry("ars1")]).unwrap();
+            s.ingest(other, &[entry("other1")]).unwrap();
+            let id = |g: &str| {
+                s.conn().query_row("SELECT id FROM articles WHERE guid = ?", [g], |r| r.get::<_, i64>(0)).unwrap()
+            };
+            (ars, other, id("ars1"), id("other1"))
+        };
+        reload_categories(&mut app);
+        (app, ars, other, a, b)
+    }
+
+    #[test]
+    fn selecting_a_group_feed_lists_its_articles() {
+        let (mut app, ars, _other, a, _b) = app_with_group_feeds();
+        select(&mut app, Selection::Feed(ars));
+        assert_eq!(app.list_query().category_feed_id, Some(ars));
+        assert_eq!(listed(&app), vec![a]);
+        assert_eq!(app.categories.name(Selection::Feed(ars)), Some("Ars"));
+    }
+
+    #[test]
+    fn a_group_feed_under_another_feed_scope_lists_nothing() {
+        let (mut app, ars, other, _a, _b) = app_with_group_feeds();
+        let _ = app.update(Message::SetScope(Scope::Feed(other)));
+        select(&mut app, Selection::Feed(ars));
+        assert!(listed(&app).is_empty());
+    }
+
+    #[test]
+    fn group_feed_selection_falls_back_when_it_leaves_its_group() {
+        let (mut app, ars, _other, _a, _b) = app_with_group_feeds();
+        select(&mut app, Selection::Feed(ars));
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::Feed(ars));
+        app.db.shared().lock().unwrap().set_feed_group(ars, None).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+    }
+
+    #[test]
+    fn find_matches_group_feeds_by_title() {
+        let (mut app, ars, _other, _a, _b) = app_with_group_feeds();
+        let _ = app.update(Message::Categories(SidebarMsg::Find("ARS".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| (m.selection, m.name, m.group)).collect();
+        assert_eq!(found, vec![(Selection::Feed(ars), "Ars", Some("Teknologia"))]);
+    }
+
+    #[test]
+    fn c_toggles_sidebar() {
+        let (mut app, _) = app_with_feed();
+        assert!(app.categories.open);
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(!app.categories.open);
+        let _ = app.view();
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(app.categories.open);
+        let _ = app.view();
+    }
+
     #[test]
     fn ai_popover_title_names_the_search() {
         let (mut app, _) = app_with_feed();
@@ -2223,6 +3098,7 @@ mod tests {
                     content: None,
                     author: None,
                     published_at: Some(1_790_812_800 + i),
+                    terms: vec![],
                 })
                 .collect();
             s.ingest(feed, &entries).unwrap();
@@ -2241,6 +3117,31 @@ mod tests {
 
     fn fetched(text: &str, paywalled: bool) -> FetchOutcome {
         FetchOutcome::Fetched { text: text.into(), paywalled, picture: None }
+    }
+
+    #[test]
+    fn choosing_a_category_sets_the_manual_one() {
+        let (mut app, a, _) = app_with_articles();
+        let cat = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        app.show_preview(a);
+        set_category(&app.db.shared().lock().unwrap(), a, Some(cat)).unwrap();
+        app.show_preview(a);
+        assert_eq!(app.preview.as_ref().unwrap().category.manual.as_ref().map(|c| c.id), Some(cat));
+        let got = app.db.shared().lock().unwrap().article_category(a).unwrap();
+        assert_eq!(got.manual.map(|c| c.id), Some(cat));
+    }
+
+    #[test]
+    fn automatic_clears_the_manual_choice() {
+        let (mut app, a, _) = app_with_articles();
+        let cat = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        app.db.shared().lock().unwrap().set_article_category(a, Some(cat)).unwrap();
+        app.show_preview(a);
+        assert!(app.preview.as_ref().unwrap().category.manual.is_some());
+        set_category(&app.db.shared().lock().unwrap(), a, None).unwrap();
+        app.show_preview(a);
+        assert!(app.preview.as_ref().unwrap().category.manual.is_none());
+        assert!(app.db.shared().lock().unwrap().article_category(a).unwrap().manual.is_none());
     }
 
     #[test]
@@ -2474,6 +3375,94 @@ mod tests {
         let _ = app.view();
         app.db.shared().lock().unwrap().save_fact_check(&check(Verdict::Supported)).unwrap();
         assert!(list(&app).flagged.is_empty());
+    }
+
+    #[test]
+    fn read_changes_reload_category_counts_only_when_they_count_unread() {
+        let (mut app, a, b) = app_with_articles();
+        let relist = |app: &mut App| {
+            let items = read_listing(&app.db.shared().lock().unwrap(), &app.list_query(), app.page).unwrap().items;
+            app.listing.items = items;
+        };
+        app.show_preview(a);
+        relist(&mut app);
+        // All: the read state, and the feeds' unread counts; the category counts stay.
+        let all = app.update(Message::ToggleRead).units();
+        let open_all = app.update(Message::Open(b)).units();
+        let _ = app.update(Message::SetUnreadOnly(true));
+        app.show_preview(a);
+        let unread = app.update(Message::ToggleRead).units();
+        app.db.shared().lock().unwrap().set_read(b, false).unwrap();
+        relist(&mut app);
+        let open_unread = app.update(Message::Open(b)).units();
+        assert_eq!(unread, all + 1, "Unread also reloads the category counts");
+        assert_eq!(open_unread, open_all + 1);
+    }
+
+    #[test]
+    fn mark_all_read_keeps_to_the_selected_category() {
+        let (mut app, a, b) = app_with_articles();
+        let l = {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_category("Tech").unwrap();
+            s.set_article_category(a, Some(l)).unwrap();
+            l
+        };
+        reload_categories(&mut app);
+        select(&mut app, Selection::Category(l));
+        let read = |app: &App, id| app.db.shared().lock().unwrap().article(id).unwrap().is_read;
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(read(&app, a));
+        assert!(!read(&app, b), "an article outside the category stays unread");
+        // A search narrows it the same way; with neither, the whole scope is marked.
+        select(&mut app, Selection::All);
+        app.active_search = "nothing-matches-this".into();
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(!read(&app, b));
+        app.active_search.clear();
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(read(&app, b));
+    }
+
+    #[test]
+    fn c_toggles_the_sidebar_only_in_the_reader() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::ShowScreen(Screen::Settings));
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(app.categories.open, "c is not a shortcut on other screens");
+    }
+
+    #[test]
+    fn a_tap_selects_once_and_leaves_no_drag_armed() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        // The row's own release and the window's release both arrive.
+        for m in [DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan), DragMsg::Release, DragMsg::Release]
+        {
+            let _ = app.update(Message::Categories(SidebarMsg::Drag(m)));
+        }
+        assert_eq!(app.category, Selection::Group(c.local));
+        assert!(!app.categories.armed());
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 0.0))));
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 40.0))));
+        assert_eq!(app.categories.ghost(), None, "no drag without a held button");
+    }
+
+    #[test]
+    fn leaving_the_reader_or_hiding_the_sidebar_drops_a_pressed_row() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        let press =
+            || Message::Categories(SidebarMsg::Drag(DragMsg::Press(SidebarItem::Group(c.tech), "Tech".into(), nan)));
+        let _ = app.update(press());
+        assert!(app.categories.armed());
+        let _ = app.update(Message::ShowScreen(Screen::Settings));
+        assert!(!app.categories.armed(), "another screen");
+        let _ = app.update(Message::ShowScreen(Screen::Reader));
+        let _ = app.update(press());
+        let _ = app.update(Message::Categories(SidebarMsg::Toggle));
+        assert!(!app.categories.armed(), "the sidebar was hidden");
     }
 
     #[test]

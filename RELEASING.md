@@ -39,7 +39,7 @@ On a `tero-k/release-X.Y.Z` branch:
    becomes the release notes; the release workflow fails without it. Use absolute links there,
    because relative links break on the release page.
 4. Run `cargo audit` and update the dependency audit in `SECURITY.md` if anything changed.
-5. Update the milestones in `README.md` if needed.
+5. Update the milestones in `docs/development.md` if needed.
 6. Commit, merge into `master`, and wait for CI to pass.
 
 ## 2. Tag and push

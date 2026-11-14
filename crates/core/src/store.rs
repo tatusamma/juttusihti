@@ -3,7 +3,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::normalize::{content_hash, dedup_key, html_to_text};
+use crate::normalize::{content_hash, dedup_key, html_to_text, normalize_text};
 use crate::search::{self, SearchQuery, SearchResults};
 use crate::{
     Article, ArticleId, ArticleSummary, Error, Feed, FeedId, Folder, FolderId, IngestStats, NewArticle, NewFeed, Page,
@@ -179,6 +179,14 @@ impl Store {
                                      effective_at = COALESCE(?9, effective_at), dedup_key = ?10, content_hash = ?11
                  WHERE id = ?1",
             )?;
+            let mut insert_term = tx.prepare_cached(
+                "INSERT INTO feed_terms(feed_id, name, normalized, scheme, first_seen_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(feed_id, normalized, scheme) DO NOTHING",
+            )?;
+            let mut term_id =
+                tx.prepare_cached("SELECT id FROM feed_terms WHERE feed_id = ?1 AND normalized = ?2 AND scheme = ?3")?;
+            let mut link_term =
+                tx.prepare_cached("INSERT OR IGNORE INTO article_terms(article_id, term_id) VALUES (?1, ?2)")?;
             for e in entries {
                 let hash = content_hash(&e.title, e.summary.as_deref(), e.content.as_deref());
                 let key = dedup_key(e.url.as_deref(), &e.title);
@@ -186,8 +194,11 @@ impl Store {
                 let content_text = e.content.as_deref().map(html_to_text);
                 let found: Option<(i64, String)> =
                     existing.query_row(params![feed_id, e.guid], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                match found {
-                    Some((_, old)) if old == hash => stats.unchanged += 1,
+                let article_id = match found {
+                    Some((id, old)) if old == hash => {
+                        stats.unchanged += 1;
+                        Some(id)
+                    }
                     Some((id, _)) => {
                         update.execute(params![
                             id,
@@ -203,11 +214,13 @@ impl Store {
                             hash
                         ])?;
                         stats.updated += 1;
+                        Some(id)
                     }
                     // Same URL re-published by the same feed under a new guid.
                     // Title-only keys are not trusted for this ("Päivän sää" recurs daily).
                     None if key.starts_with("url:") && same_story.exists(params![feed_id, key])? => {
-                        stats.unchanged += 1
+                        stats.unchanged += 1;
+                        None
                     }
                     None => {
                         insert.execute(params![
@@ -227,6 +240,15 @@ impl Store {
                             hash
                         ])?;
                         stats.inserted += 1;
+                        Some(tx.last_insert_rowid())
+                    }
+                };
+                if let Some(article_id) = article_id {
+                    for t in &e.terms {
+                        let normalized = normalize_text(&t.name);
+                        insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])?;
+                        let tid: i64 = term_id.query_row(params![feed_id, normalized, t.scheme], |r| r.get(0))?;
+                        link_term.execute(params![article_id, tid])?;
                     }
                 }
             }
@@ -315,6 +337,16 @@ impl Store {
         )?)
     }
 
+    /// Marks exactly the matches of `q` as read (a category or search list).
+    /// Returns the number changed.
+    pub fn mark_query_read(&self, q: &SearchQuery) -> Result<usize> {
+        let (from_where, params, _) = search::build_where(q)?;
+        Ok(self.conn.execute(
+            &format!("UPDATE articles SET is_read = 1 WHERE is_read = 0 AND id IN (SELECT a.id{from_where})"),
+            rusqlite::params_from_iter(params.iter()),
+        )?)
+    }
+
     /// Deletes articles whose effective date is older than `days`, keeping
     /// bookmarked articles and anything the user annotated or confirmed in
     /// research. Returns the number deleted.
@@ -384,7 +416,8 @@ impl Store {
     }
 }
 
-const FEED_COLS: &str = "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error";
+const FEED_COLS: &str = "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error,
+                         default_category_id, category_group_id";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
@@ -397,6 +430,8 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         last_modified: r.get(6)?,
         last_fetched_at: r.get(7)?,
         last_error: r.get(8)?,
+        default_category_id: r.get(9)?,
+        category_group_id: r.get(10)?,
     })
 }
 

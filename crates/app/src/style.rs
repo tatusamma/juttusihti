@@ -229,6 +229,17 @@ pub fn row_selected(theme: &Theme, status: button::Status) -> button::Style {
     base(if disabled { t.faint } else { t.text }, fill(t.selection), border::rounded(RADIUS))
 }
 
+/// A list row drawn without a button (it also drags): the selection colour
+/// while `lit` (hovered or selected), otherwise nothing.
+pub fn row_surface(lit: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| container::Style {
+        text_color: Some(tokens(theme).text),
+        background: if lit { fill(tokens(theme).selection) } else { None },
+        border: border::rounded(RADIUS),
+        ..container::Style::default()
+    }
+}
+
 /// Plain pane surface.
 pub fn pane(theme: &Theme) -> container::Style {
     container::Style { background: fill(tokens(theme).pane), ..container::Style::default() }
@@ -616,6 +627,8 @@ mod tests {
             ("research.rs", include_str!("research.rs")),
             ("review.rs", include_str!("review.rs")),
             ("labels.rs", include_str!("labels.rs")),
+            ("organise.rs", include_str!("organise.rs")),
+            ("organise_draft.rs", include_str!("organise_draft.rs")),
             ("providers.rs", include_str!("providers.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("timeline_view.rs", include_str!("timeline_view.rs")),

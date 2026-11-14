@@ -22,6 +22,7 @@ pub enum Icon {
     Analysis,
     AiSetup,
     Labels,
+    Categories,
     Settings,
     Refresh,
     More,
@@ -35,6 +36,7 @@ pub enum Icon {
     External,
     Help,
     Check,
+    Rss,
 }
 
 /// Codepoints from lucide-static 1.55.0 `font/lucide.css`.
@@ -50,6 +52,7 @@ fn codepoint(i: Icon) -> char {
         Icon::Analysis => '\u{e2a3}',     // chart-column
         Icon::AiSetup => '\u{e1bb}',      // bot
         Icon::Labels => '\u{e17f}',       // tag
+        Icon::Categories => '\u{e33c}',   // folder-tree
         Icon::Settings => '\u{e154}',     // settings
         Icon::Refresh => '\u{e145}',      // refresh-cw
         Icon::More => '\u{e0b6}',         // ellipsis
@@ -63,6 +66,7 @@ fn codepoint(i: Icon) -> char {
         Icon::External => '\u{e0b9}',     // external-link
         Icon::Help => '\u{e082}',         // circle-question-mark
         Icon::Check => '\u{e06c}',        // check
+        Icon::Rss => '\u{e14a}',          // rss
     }
 }
 
@@ -74,7 +78,7 @@ pub fn icon<'a>(i: Icon) -> Text<'a> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 25] = [
         Icon::News,
         Icon::Saved,
         Icon::Reports,
@@ -85,6 +89,7 @@ mod tests {
         Icon::Analysis,
         Icon::AiSetup,
         Icon::Labels,
+        Icon::Categories,
         Icon::Settings,
         Icon::Refresh,
         Icon::More,
@@ -98,6 +103,7 @@ mod tests {
         Icon::External,
         Icon::Help,
         Icon::Check,
+        Icon::Rss,
     ];
 
     #[test]

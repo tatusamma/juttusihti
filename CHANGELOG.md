@@ -9,6 +9,47 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Categories**, separate from labels: labels stay as they were (search, analytics, reports, the
+  Labels screen); categories are a short list for quickly filtering the news. They start empty.
+- **Uncategorized**: a row under "All articles" in the categories sidebar lists the articles that
+  are in no category, with a count; its ✨ gives one main category to each of the next 100
+  uncategorized articles whose feed gave no categories (or only ignored ones), newest first
+  (headlines and descriptions are sent, after you see an estimate). It may create new categories,
+  filed under one of your groups (Ungrouped when none fits; it never creates groups), and
+  remembers the articles it checked. This is the one exception to "AI results are
+  suggestions": the categories are saved directly, without Review.
+- **Category in the article view**: a Category row shows the article's category and where it
+  came from (from the feed, from AI, or set by you) and lets you change it; Automatic clears
+  your choice.
+- **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
+  category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
+  reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
+  (at the top of the sidebar) opens the Categories screen.
+- **Groups and publisher categories**: the Categories screen has groups, **+ New group** and
+  **+ New category**, drag or **Move to…** to file a category, and the section names publishers
+  give their articles, collected as terms you can file, leave in Unsorted or Ignore. Publisher
+  categories are collected from now on; articles fetched earlier get them only if they are
+  still in the feed at the next refresh.
+- **✨ Suggest categories**: your AI can propose a grouping for your unsorted terms. You see what
+  is sent (publisher terms, feed titles, your group and category names; no article text) and an
+  estimate first, and the result is an editable draft: nothing is saved until you press Approve.
+  Suggestions file categories under your own groups first and propose a new group only when
+  nothing fits; terms and articles in any language go to the matching category.
+- **Feed default category and feeds in groups**: a feed can have a default category (set in its edit
+  form) that files its articles when its terms give none, before AI; a feed can also sit in a
+  category group, so all its articles show under that group. The default is set in the feed edit
+  form (Organise shows it read-only); the group is set in the feed edit form or in Organise.
+
+### Changed
+
+- The Help screen and README describe labels and categories as separate things.
+- New app icon: a news page going through a funnel, with a feed symbol.
+- An article whose publisher categories are filed under a category no longer also counts in the
+  category AI gave it: your choice wins, then publisher categories, then the feed's default
+  category, then AI.
+
 ## [0.5.0] - 2026-11-08
 
 ### Added

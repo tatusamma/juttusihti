@@ -6,8 +6,12 @@
 
 mod ai_setup;
 mod app;
+mod article_category;
+mod categorize_ai;
+mod category_sidebar;
 mod crash_log;
 mod db;
+mod drag;
 mod fact_check;
 mod feeds_menu;
 mod format;
@@ -17,6 +21,8 @@ mod help;
 mod icons;
 mod labels;
 mod map_view;
+mod organise;
+mod organise_draft;
 mod plan;
 mod providers;
 mod quick;

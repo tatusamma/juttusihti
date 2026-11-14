@@ -90,7 +90,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Whether two normalized labels are likely the same concept: equal, a
 /// small edit apart, or one an inflected/compound form of the other
 /// (common in Finnish: "vaali" / "vaalit" / "eduskuntavaalit").
-fn similar_labels(a: &str, b: &str) -> bool {
+pub(crate) fn similar_labels(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

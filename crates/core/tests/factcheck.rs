@@ -12,6 +12,7 @@ fn entry(guid: &str) -> NewArticle {
         content: None,
         author: None,
         published_at: Some(1_790_812_800),
+        terms: vec![],
     }
 }
 
