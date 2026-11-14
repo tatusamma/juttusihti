@@ -45,6 +45,7 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 ### Changed
 
 - The Help screen and README describe labels and categories as separate things.
+- New app icon: a news page going through a funnel, with a feed symbol.
 - An article whose publisher categories are filed under a category no longer also counts in the
   category AI gave it: your choice wins, then publisher categories, then the feed's default
   category, then AI.
