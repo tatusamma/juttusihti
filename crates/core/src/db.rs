@@ -202,12 +202,16 @@ mod tests {
              INSERT INTO category_groups(id, name, normalized, position, created_at) VALUES (1, 'Sports', 'sports', 0, 0);
              INSERT INTO categories(id, name, normalized, group_id, position, created_at)
              VALUES (1, 'Urheilu', 'urheilu', 1, 0, 0), (2, 'Economy', 'economy', NULL, 0, 0);
+             INSERT INTO feeds(id, url, title, created_at, default_category_id) VALUES (3, 'https://c/rss', 'C', 0, 2);
+             INSERT INTO articles(id, feed_id, guid, title, fetched_at, effective_at, dedup_key, content_hash)
+             VALUES (4, 3, 'c1', 'T', 0, 0, 'k4', 'h'), (5, 3, 'c2', 'T', 0, 0, 'k5', 'h');
              INSERT INTO feed_terms(id, feed_id, name, normalized, scheme, category_id, ignored, first_seen_at) VALUES
                (1, 1, 'Kotimaa', 'kotimaa', '', NULL, 0, 0), (2, 2, 'KOTIMAA', 'kotimaa', '', NULL, 0, 0),
                (3, 1, 'Ulkomaat', 'ulkomaat', '', NULL, 0, 0), (4, 1, 'urheilu', 'urheilu', '', NULL, 0, 0),
                (5, 1, 'Talous', 'talous', '', 2, 0, 0), (6, 1, 'Tilaajille', 'tilaajille', '', NULL, 1, 0),
-               (7, 1, '—', '', '', NULL, 0, 0);
-             INSERT INTO article_terms(article_id, term_id) VALUES (1, 1), (2, 1), (3, 2), (1, 3);",
+               (7, 1, '—', '', '', NULL, 0, 0),
+               (8, 3, 'Uutiset', 'uutiset', '', NULL, 0, 0), (9, 3, 'Urheilu', 'urheilu', '', NULL, 0, 0);
+             INSERT INTO article_terms(article_id, term_id) VALUES (1, 1), (2, 1), (3, 2), (1, 3), (4, 8), (5, 8), (4, 9);",
         )
         .unwrap();
         migrate(&conn).unwrap();
@@ -226,6 +230,7 @@ mod tests {
         assert_eq!(filed(3), None, "Ulkomaat is on one article: it waits in Unsorted");
         assert_eq!(filed(4), Some(1), "joins the existing category in its group, whatever its count");
         assert_eq!((filed(5), filed(6), filed(7)), (Some(2), None, None), "filed, ignored and nameless stay");
+        assert_eq!((filed(8), filed(9)), (None, None), "feed 3 has a default category: its terms wait");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
         // Filed and ignored terms are settled; the waiting and nameless ones are not.

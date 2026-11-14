@@ -65,8 +65,9 @@ them only if they are still in the feed at the next refresh.
 **Feed defaults and feeds in groups.** Some feeds send no publisher categories but stay on one
 theme. Give such a feed a **default category** in its edit form (**Edit feed**, in the feed menu
 or the **⋯** menu): it files the feed's articles whose publisher categories give no category,
-old articles too, and those articles are never sent to the ✨. Clearing the default brings back
-any category AI had given them. A feed can also sit in one **group**, so all of its articles show
+old articles too, and those articles are never sent to the ✨. Its publisher categories are not
+filed automatically while it has a default (file one by hand if you want it); clearing the default
+lets them be filed at the next refresh and brings back any category AI had given its articles. A feed can also sit in one **group**, so all of its articles show
 under that group whatever their categories. Pick the group in the edit form, or type a name in
 "or new group" to create the group and file the feed in one step. On the Categories screen,
 **Add feed…** in a group files a feed there; drag a feed row to another group or to Ungrouped,

@@ -171,6 +171,29 @@ fn a_term_whose_category_was_deleted_stays_unsorted_on_refresh() {
 }
 
 #[test]
+fn a_feed_with_a_default_category_keeps_its_terms_waiting() {
+    let mut s = Store::open_in_memory().unwrap();
+    let tech = s.create_category("Teknologia").unwrap();
+    let urheilu = s.create_category("Urheilu").unwrap();
+    let (f, other) = (feed(&mut s, "https://tech.example/rss"), feed(&mut s, "https://news.example/rss"));
+    s.set_feed_default_category(f, Some(tech)).unwrap();
+    s.ingest(f, &[entry("1", &["Uutiset", "Urheilu"]), entry("2", &["Uutiset", "Urheilu"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 2, "no new category from a feed with a default");
+    assert_eq!(filed_under(&s, f, "Urheilu"), None, "not even into an existing one");
+    assert_eq!(in_category(&s, tech), ["1", "2"], "its articles stay in the feed's default");
+    // Its articles do not count towards another feed's second article.
+    s.ingest(other, &[entry("3", &["Uutiset"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 2);
+    assert!(in_category(&s, urheilu).is_empty());
+    // Clearing the default lets its terms be filed at the next refresh.
+    s.set_feed_default_category(f, None).unwrap();
+    s.ingest(f, &[entry("1", &["Uutiset", "Urheilu"]), entry("2", &["Uutiset", "Urheilu"])]).unwrap();
+    assert_eq!(filed_under(&s, f, "Urheilu"), Some(urheilu));
+    assert!(filed_under(&s, f, "Uutiset").is_some());
+    assert_eq!(filed_under(&s, other, "Uutiset"), filed_under(&s, f, "Uutiset"));
+}
+
+#[test]
 fn a_term_without_letters_or_digits_stays_unsorted() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");

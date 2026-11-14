@@ -444,14 +444,17 @@ pub const AUTO_CATEGORY_MIN_ARTICLES: i64 = 2;
 /// name: at once when it exists, otherwise by creating it in Ungrouped once the name is on
 /// [`AUTO_CATEGORY_MIN_ARTICLES`] articles. Filing settles a term, as does anything the user
 /// does with it, so a term they moved, ignored or whose category they deleted stays as they
-/// left it. A name that cannot be a category (no letters or digits) stays unsorted.
+/// left it. A name that cannot be a category (no letters or digits) stays unsorted. Terms of a
+/// feed with a default category are left waiting (its articles go to that category) and do
+/// not count towards the articles; clearing the default lets them be filed at the next refresh.
 fn file_waiting_terms(conn: &Connection, normalized: &str, name: &str) -> Result<()> {
     if normalized.is_empty() {
         return Ok(());
     }
     let waiting: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM feed_terms
-                       WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0)",
+                       WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0
+                         AND feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL))",
         [normalized],
         |r| r.get(0),
     )?;
@@ -465,7 +468,8 @@ fn file_waiting_terms(conn: &Connection, normalized: &str, name: &str) -> Result
         None => {
             let articles: i64 = conn.query_row(
                 "SELECT COUNT(DISTINCT a.article_id) FROM article_terms a JOIN feed_terms t ON t.id = a.term_id
-                 WHERE t.normalized = ?1 AND t.settled = 0 AND t.category_id IS NULL AND t.ignored = 0",
+                 WHERE t.normalized = ?1 AND t.settled = 0 AND t.category_id IS NULL AND t.ignored = 0
+                   AND t.feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL)",
                 [normalized],
                 |r| r.get(0),
             )?;
@@ -481,7 +485,8 @@ fn file_waiting_terms(conn: &Connection, normalized: &str, name: &str) -> Result
     };
     conn.execute(
         "UPDATE feed_terms SET category_id = ?2, settled = 1
-         WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0",
+         WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0
+           AND feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL)",
         params![normalized, category],
     )?;
     Ok(())

@@ -43,7 +43,8 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   Ilta-Sanomat land in one category and one-off names (a player, a place) wait under Unsorted
   terms instead of each becoming a category. Terms already waiting in Unsorted are filed the same
   way once, when you update. A term you move to another category, back to Unsorted, or Ignore
-  stays that way at later refreshes.
+  stays that way at later refreshes. A feed with a default category keeps its articles there:
+  its publisher categories are not filed automatically while it has one.
 - The full-article browser engine is Servo 0.8. Iltalehti, Ilta-Sanomat, Helsingin Sanomat and
   Yle articles were checked against 0.6.0's engine: the text is the same or more complete, and
   Yle articles now get their picture.
