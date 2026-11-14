@@ -697,7 +697,11 @@ mod draft {
         NewGroupDraft { temp, name: name.into(), by_user: false, ticked: true }
     }
     fn nc(temp: u32, name: &str, group: GroupRef) -> NewCategoryDraft {
-        NewCategoryDraft { temp, name: name.into(), group, ticked: true }
+        NewCategoryDraft { temp, name: name.into(), group: Some(group), ticked: true }
+    }
+    /// A new category with no group: it goes to Ungrouped.
+    fn ncu(temp: u32, name: &str) -> NewCategoryDraft {
+        NewCategoryDraft { temp, name: name.into(), group: None, ticked: true }
     }
     fn mp(term: TermId, category: CategoryRef) -> Mapping {
         Mapping { term, category, ticked: true }
@@ -750,6 +754,41 @@ mod draft {
         d.new_groups[0].ticked = false;
         s.update_category_draft(id, &d).unwrap();
         assert_eq!(s.pending_category_draft().unwrap(), Some((id, d)));
+    }
+
+    #[test]
+    fn apply_files_a_new_category_without_a_group_in_ungrouped() {
+        let mut s = setup(&["a"]);
+        let a = term_named(&s, "a");
+        let d = CategoryDraft {
+            new_categories: vec![ncu(1, "Viihde")],
+            mappings: vec![mp(a, CategoryRef::New(1))],
+            ..Default::default()
+        };
+        assert!(!d.is_empty() && d.category_counts(1));
+        let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
+        let r = s.apply_category_draft(id, &d).unwrap();
+        assert_eq!((r.applied, r.skipped), (2, 0));
+        let tree = s.category_tree().unwrap();
+        assert!(tree.groups.is_empty());
+        assert_eq!(names(&tree.ungrouped), ["Viihde"]);
+        assert_eq!(category_of(&s, a), Some(tree.ungrouped[0].category.id));
+    }
+
+    #[test]
+    fn a_grouped_new_category_is_stored_as_before() {
+        let s = setup(&["a"]);
+        let d = CategoryDraft {
+            new_groups: vec![ng(1, "Politiikka")],
+            new_categories: vec![nc(1, "Vaalit", GroupRef::New(1)), ncu(2, "Viihde")],
+            ..Default::default()
+        };
+        let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
+        let json: String =
+            s.conn().query_row("SELECT payload_json FROM ai_suggestions WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        // Drafts saved before the group was optional read back unchanged.
+        assert!(json.contains(r#""group":{"New":1}"#), "{json}");
+        assert!(json.contains(r#""group":null"#), "{json}");
     }
 
     #[test]

@@ -47,8 +47,9 @@ const TERMS_SYSTEM: &str = "You sort a news reader's publisher terms into its ca
 the existing category with the same meaning, using map_terms. Terms and names can be in any language: map a term to \
 the category with the same meaning whatever its language (for example \"Urheilu\", \"Sport\" and \"Sports\" all \
 belong in one category). Map each term at most once. Only when no category fits a term that names a clear topic, \
-create a new category in new_categories inside one of the listed groups, named in the language of the existing \
-category names and never a translation or near-duplicate of an existing one. Leave vague terms unsorted, in \
+create a new category in new_categories inside one of the listed groups, or with group \"\" (Ungrouped) when no \
+listed group fits or none is listed. Name it in the language of the existing category names, never as a translation \
+or near-duplicate of an existing one. Leave vague terms unsorted, in \
 leave_unsorted. Refer to a listed group or category by its \"ref\", and to a category you create as \"new:<n>\" \
 with a number of your choosing. Only map terms that are listed.";
 
@@ -313,12 +314,12 @@ pub fn parse(v: &Value, input: &PlanInput) -> Result<CategoryDraft, AiError> {
 
     let mut cat_refs: HashSet<u32> = HashSet::new();
     for c in new_cats {
-        let (Some(Ref::New(n)), Some(name), Some(g)) = (parse_ref(&c["ref"]), name_of(&c["name"]), group(&c["group"]))
-        else {
+        let (Some(Ref::New(n)), Some(name)) = (parse_ref(&c["ref"]), name_of(&c["name"])) else {
             continue;
         };
+        // No usable group (none listed, none fits, or an unknown one): Ungrouped.
         if cat_refs.insert(n) {
-            draft.new_categories.push(NewCategoryDraft { temp: n, name, group: g, ticked: true });
+            draft.new_categories.push(NewCategoryDraft { temp: n, name, group: group(&c["group"]), ticked: true });
         }
     }
 

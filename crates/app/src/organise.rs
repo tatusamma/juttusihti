@@ -1832,7 +1832,7 @@ mod tests {
             new_categories: vec![NewCategoryDraft {
                 temp: 1,
                 name: "AI".into(),
-                group: GroupRef::New(1),
+                group: Some(GroupRef::New(1)),
                 ticked: true,
             }],
             placements: vec![Placement { category: space, rename: None, group: GroupRef::New(1), ticked: true }],
@@ -1911,6 +1911,41 @@ mod tests {
     }
 
     #[test]
+    fn a_new_category_without_a_group_can_be_ticked_filed_and_approved() {
+        let mut st = state();
+        add_terms(&st, &["Viihde"]);
+        let work = with(&st, |s| s.create_group("Work")).unwrap();
+        reload(&mut st);
+        let t = term_id(&st, "Viihde");
+        let draft = CategoryDraft {
+            new_categories: vec![NewCategoryDraft { temp: 1, name: "Viihde".into(), group: None, ticked: true }],
+            mappings: vec![Mapping { term: t, category: CategoryRef::New(1), ticked: true }],
+            ..Default::default()
+        };
+        open_draft(&mut st, &draft);
+
+        // Unticking and ticking it again leaves it ungrouped.
+        draft_msg(&mut st, DraftMsg::Tick(Name::Category(CategoryRef::New(1))));
+        assert!(!st.draft.as_ref().unwrap().plan.new_categories[0].ticked);
+        draft_msg(&mut st, DraftMsg::Tick(Name::Category(CategoryRef::New(1))));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert!(plan.new_categories[0].ticked && plan.new_categories[0].group.is_none());
+
+        // Dropped on a group, it is filed there.
+        draft_drag(&mut st, DItem::Category(CategoryRef::New(1)), DTarget::Group(GroupRef::Existing(work)));
+        assert_eq!(st.draft.as_ref().unwrap().plan.new_categories[0].group, Some(GroupRef::Existing(work)));
+
+        // Back to ungrouped and approved: it is created in Ungrouped and takes its term.
+        st.draft.as_mut().unwrap().plan.new_categories[0].group = None;
+        let plan = st.draft.as_ref().unwrap().plan.clone();
+        let id = pending(&st).unwrap().0;
+        with(&st, |s| s.apply_category_draft(id, &plan)).unwrap();
+        reload(&mut st);
+        assert_eq!(st.snap.ungrouped.iter().map(|c| c.category.name.as_str()).collect::<Vec<_>>(), ["Viihde"]);
+        assert!(st.snap.unsorted.is_empty());
+    }
+
+    #[test]
     fn dragging_category_into_user_group_updates_draft() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
@@ -1932,7 +1967,7 @@ mod tests {
         draft_drag(&mut st, DItem::Category(CategoryRef::New(1)), DTarget::Group(GroupRef::New(mine)));
         draft_drag(&mut st, DItem::Category(CategoryRef::Existing(space)), DTarget::Group(GroupRef::Existing(work)));
         let plan = &st.draft.as_ref().unwrap().plan;
-        assert_eq!(plan.new_categories[0].group, GroupRef::New(mine));
+        assert_eq!(plan.new_categories[0].group, Some(GroupRef::New(mine)));
         assert_eq!(plan.placements[0].group, GroupRef::Existing(work));
 
         // Terms move between categories; placements are renamed by clicking.

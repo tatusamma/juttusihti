@@ -166,7 +166,7 @@ fn parse_builds_ticked_draft() {
     assert_eq!(d.new_groups.len(), 1);
     assert!(d.new_groups[0].ticked && !d.new_groups[0].by_user);
     assert_eq!(d.new_groups[0].name, "Tech & Science");
-    assert_eq!(d.new_categories[0].group, GroupRef::New(1));
+    assert_eq!(d.new_categories[0].group, Some(GroupRef::New(1)));
     assert!(d.new_categories[0].ticked);
     assert_eq!(d.placements[0].category, 12);
     assert_eq!(d.placements[0].group, GroupRef::New(1));
@@ -208,11 +208,13 @@ fn parse_drops_unknown_and_grouped() {
     });
     let d = parse(&v, &input()).unwrap();
     assert_eq!(d.new_groups.iter().map(|g| g.temp).collect::<Vec<_>>(), vec![4]);
-    assert_eq!(d.new_categories.iter().map(|c| c.temp).collect::<Vec<_>>(), vec![6]);
+    // A new category whose group is unusable goes to Ungrouped; one without a name is dropped.
+    let new: Vec<_> = d.new_categories.iter().map(|c| (c.temp, c.group)).collect();
+    assert_eq!(new, vec![(2, None), (3, None), (6, Some(GroupRef::New(4)))]);
     assert_eq!(d.placements.len(), 1);
     assert_eq!((d.placements[0].category, d.placements[0].group), (13, GroupRef::Existing(3)));
     assert_eq!(d.mappings.len(), 1);
-    assert_eq!((d.mappings[0].term, d.mappings[0].category), (5, CategoryRef::New(6)));
+    assert_eq!((d.mappings[0].term, d.mappings[0].category), (5, CategoryRef::New(2)), "the first usable one");
     assert_eq!(d.vague, vec![6, 9]);
 }
 
@@ -226,7 +228,7 @@ fn parse_reuses_existing_group_by_name() {
     });
     let d = parse(&v, &input()).unwrap();
     assert!(d.new_groups.is_empty());
-    assert_eq!(d.new_categories[0].group, GroupRef::Existing(3));
+    assert_eq!(d.new_categories[0].group, Some(GroupRef::Existing(3)));
     assert_eq!(d.placements[0].group, GroupRef::Existing(3));
 }
 
@@ -350,4 +352,25 @@ async fn suggest_without_ungrouped_categories_sends_only_the_terms_request() {
     assert_eq!(reqs.len(), 1);
     assert!(user_data(&reqs[0]).get("terms").is_some());
     assert_eq!(d.mappings.len(), 1);
+}
+
+#[tokio::test]
+async fn a_first_run_with_no_groups_keeps_new_categories_in_ungrouped() {
+    let fresh = PlanInput {
+        groups: vec![],
+        categories: vec![],
+        terms: vec![term(5, "Urheilu"), term(6, "Kotimaa")],
+        more_terms: 0,
+    };
+    let answer = json!({
+        "new_categories": [{"ref": "new:1", "name": "Urheilu", "group": ""}],
+        "map_terms": [{"term_id": 5, "category": "new:1"}],
+        "leave_unsorted": [6]
+    });
+    let (d, reqs) = run_suggest(&fresh, vec![answer]).await;
+    assert_eq!(reqs.len(), 1, "nothing to group, so only the terms step");
+    assert_eq!(d.new_categories.len(), 1);
+    assert_eq!(d.new_categories[0].group, None);
+    assert_eq!(d.mappings[0].category, CategoryRef::New(1));
+    assert!(!d.is_empty());
 }

@@ -12,7 +12,9 @@ use juttusihti_core::ai_defaults::AiDefaults;
 use juttusihti_core::budget::Limits;
 use juttusihti_core::categories::CategoryId;
 use juttusihti_core::categories::{CategoryNode, TermId, TermRow};
-use juttusihti_core::category_draft::{ApplyReport, CategoryDraft, CategoryRef, GroupRef, NewGroupDraft, PlanInput};
+use juttusihti_core::category_draft::{
+    ApplyReport, CategoryDraft, CategoryRef, GroupRef, NewCategoryDraft, NewGroupDraft, PlanInput,
+};
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Provider, Usage, format_usd};
 
 use crate::db::Db;
@@ -439,23 +441,22 @@ impl Draft {
     /// Applies dropping `item` on `target`; false when nothing changes.
     pub fn drop(&mut self, item: DItem, target: DTarget) -> bool {
         match (item, target) {
-            (DItem::Category(c), DTarget::Group(g)) => {
-                let slot = match c {
-                    CategoryRef::New(t) => {
-                        self.plan.new_categories.iter_mut().find(|x| x.temp == t).map(|x| &mut x.group)
-                    }
-                    CategoryRef::Existing(l) => {
-                        self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| &mut p.group)
-                    }
-                };
-                match slot {
-                    Some(slot) if *slot != g => {
-                        *slot = g;
+            (DItem::Category(c), DTarget::Group(g)) => match c {
+                CategoryRef::New(t) => match self.plan.new_categories.iter_mut().find(|x| x.temp == t) {
+                    Some(x) if x.group != Some(g) => {
+                        x.group = Some(g);
                         true
                     }
                     _ => false,
-                }
-            }
+                },
+                CategoryRef::Existing(l) => match self.plan.placements.iter_mut().find(|p| p.category == l) {
+                    Some(p) if p.group != g => {
+                        p.group = g;
+                        true
+                    }
+                    _ => false,
+                },
+            },
             (DItem::Term(t), DTarget::Category(c)) => match self.plan.mappings.iter_mut().find(|m| m.term == t) {
                 Some(m) if m.category != c => {
                     m.category = c;
@@ -477,7 +478,7 @@ impl Draft {
                 for g in self.plan.new_groups.iter_mut().filter(|g| g.temp == t) {
                     g.ticked = on;
                 }
-                for c in self.plan.new_categories.iter_mut().filter(|c| c.group == GroupRef::New(t)) {
+                for c in self.plan.new_categories.iter_mut().filter(|c| c.group == Some(GroupRef::New(t))) {
                     c.ticked = on;
                 }
                 for p in self.plan.placements.iter_mut().filter(|p| p.group == GroupRef::New(t)) {
@@ -485,10 +486,12 @@ impl Draft {
                 }
                 return;
             }
-            Name::Category(CategoryRef::New(t)) => self.plan.new_categories.iter_mut().find(|c| c.temp == t).map(|c| {
-                c.ticked = on;
-                c.group
-            }),
+            Name::Category(CategoryRef::New(t)) => {
+                self.plan.new_categories.iter_mut().find(|c| c.temp == t).and_then(|c| {
+                    c.ticked = on;
+                    c.group
+                })
+            }
             Name::Category(CategoryRef::Existing(l)) => {
                 self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| {
                     p.ticked = on;
@@ -573,7 +576,7 @@ impl Draft {
             .plan
             .new_categories
             .iter()
-            .filter(|c| c.group == g)
+            .filter(|c| c.group == Some(g))
             .map(|c| (CategoryRef::New(c.temp), c.name.as_str()));
         let placed = self.plan.placements.iter().filter(|p| p.group == g).filter_map(|p| {
             let name = p.rename.as_deref().or_else(|| category_name(snap, p.category))?;
@@ -618,18 +621,26 @@ impl Draft {
             body = body.push(self.group_zone(block, r, kind));
         }
         body = body.push(self.view_add_group());
-        // The user's ungrouped categories the draft does not place: read-only term targets.
+        // The user's ungrouped categories the draft does not place (read-only term targets),
+        // and the new categories the draft leaves without a group (drag one onto a group to file it).
         let own: Vec<&CategoryNode> = snap
             .ungrouped
             .iter()
             .filter(|c| !self.plan.placements.iter().any(|p| p.category == c.category.id))
             .collect();
-        if !own.is_empty() {
-            let heading = row![style::heading("Ungrouped"), yours()].spacing(SPACE[1]).align_y(Center);
+        let new: Vec<&NewCategoryDraft> = self.plan.new_categories.iter().filter(|c| c.group.is_none()).collect();
+        if !own.is_empty() || !new.is_empty() {
+            let mut heading = row![style::heading("Ungrouped")].spacing(SPACE[1]).align_y(Center);
+            if new.is_empty() {
+                heading = heading.push(yours());
+            }
             let mut block = column![heading].spacing(SPACE[0]);
             for c in own {
                 block =
                     block.push(self.view_category(CategoryRef::Existing(c.category.id), &c.category.name, snap, kind));
+            }
+            for c in new {
+                block = block.push(self.view_category(CategoryRef::New(c.temp), &c.name, snap, kind));
             }
             body = body.push(block);
         }

@@ -80,10 +80,12 @@ list for filtering. In the article view, the **Category** row shows the article'
 where it came from (from the feed, the default of its feed, from AI, or set by you); pick another to change it, or
 **Automatic** to clear your choice and return to the feed's or the AI's.
 
-**✨ Suggest categories** asks your AI to group your unsorted terms. It first shows what will be
-sent (the publisher terms with their feed titles, plus your group and category names; no article
-text) and an estimate, and sends only when you consent. The answer is an editable draft; nothing
-is saved until you press **Approve**.
+**✨ Suggest categories** asks your AI to sort your ungrouped categories into groups, and to file
+the publisher terms still in Unsorted. Your groups stay as they are and keep what is in them; the
+AI proposes new groups for the sections they do not cover, and a new category that fits no group
+goes to Ungrouped. It first shows what will be sent (the publisher terms with their feed titles,
+plus your group and category names; no article text) and an estimate, and sends only when you
+consent. The answer is an editable draft; nothing is saved until you press **Approve**.
 
 ## Full articles
 
