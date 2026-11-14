@@ -33,12 +33,23 @@ pub struct CategoryNode {
     pub category: Category,
     pub group_id: Option<GroupId>,
     pub term_count: u64,
+    /// Titles of the feeds that use this category as their default, by title.
+    pub default_for: Vec<String>,
+}
+
+/// A feed listed in a group (or among the feeds in no group).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupFeed {
+    pub id: FeedId,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupNode {
     pub group: Group,
     pub categories: Vec<CategoryNode>,
+    /// Feeds whose articles all belong to the group, by title.
+    pub feeds: Vec<GroupFeed>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -52,6 +63,8 @@ pub struct CategoryTree {
     pub groups: Vec<GroupNode>,
     pub ungrouped: Vec<CategoryNode>,
     pub favourites: Vec<Favourite>,
+    /// Feeds in no group, by title.
+    pub ungrouped_feeds: Vec<GroupFeed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +78,8 @@ pub struct TermRow {
 pub struct CategoryCounts {
     pub groups: HashMap<GroupId, u64>,
     pub categories: HashMap<CategoryId, u64>,
+    /// Articles per feed that is in a group.
+    pub feeds: HashMap<FeedId, u64>,
     /// Articles in no category.
     pub uncategorized: u64,
 }
@@ -185,7 +200,12 @@ fn category_from_row(r: &rusqlite::Row) -> rusqlite::Result<Category> {
 }
 
 fn node_from_row(r: &rusqlite::Row) -> rusqlite::Result<CategoryNode> {
-    Ok(CategoryNode { category: category_from_row(r)?, group_id: r.get(2)?, term_count: r.get::<_, i64>(3)? as u64 })
+    Ok(CategoryNode {
+        category: category_from_row(r)?,
+        group_id: r.get(2)?,
+        term_count: r.get::<_, i64>(3)? as u64,
+        default_for: vec![],
+    })
 }
 
 /// Orders terms by name, then feed.
@@ -214,6 +234,11 @@ fn column(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Vec<
     Ok(stmt.query_map(p, |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
+fn column_text(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    Ok(stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
 fn exists(conn: &Connection, sql: &str, id: i64) -> Result<bool> {
     Ok(conn.query_row(sql, [id], |_| Ok(())).optional()?.is_some())
 }
@@ -230,10 +255,17 @@ impl Store {
         let mut stmt =
             conn.prepare("SELECT id, name FROM category_groups ORDER BY position, name COLLATE NOCASE, id")?;
         let mut groups: Vec<GroupNode> = stmt
-            .query_map([], |r| Ok(GroupNode { group: Group { id: r.get(0)?, name: r.get(1)? }, categories: vec![] }))?
+            .query_map([], |r| {
+                Ok(GroupNode { group: Group { id: r.get(0)?, name: r.get(1)? }, categories: vec![], feeds: vec![] })
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let mut ungrouped = Vec::new();
-        for n in nodes {
+        for mut n in nodes {
+            n.default_for = column_text(
+                conn,
+                "SELECT title FROM feeds WHERE default_category_id = ?1 ORDER BY title COLLATE NOCASE, id",
+                n.category.id,
+            )?;
             match n.group_id.and_then(|g| groups.iter_mut().find(|x| x.group.id == g)) {
                 Some(g) => g.categories.push(n),
                 None => ungrouped.push(n),
@@ -248,7 +280,19 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(CategoryTree { groups, ungrouped, favourites })
+        let mut stmt =
+            conn.prepare("SELECT id, title, category_group_id FROM feeds ORDER BY title COLLATE NOCASE, id")?;
+        let feeds = stmt
+            .query_map([], |r| Ok((GroupFeed { id: r.get(0)?, title: r.get(1)? }, r.get::<_, Option<GroupId>>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut ungrouped_feeds = Vec::new();
+        for (feed, group) in feeds {
+            match group.and_then(|g| groups.iter_mut().find(|x| x.group.id == g)) {
+                Some(g) => g.feeds.push(feed),
+                None => ungrouped_feeds.push(feed),
+            }
+        }
+        Ok(CategoryTree { groups, ungrouped, favourites, ungrouped_feeds })
     }
 
     /// All groups and categories, in tree order (groups first, then Ungrouped).
@@ -396,6 +440,20 @@ impl Store {
         }
     }
 
+    /// Puts a feed in a group (or with `None` takes it out): every article of
+    /// the feed then counts as in that group.
+    pub fn set_feed_group(&self, feed: FeedId, group: Option<GroupId>) -> Result<()> {
+        if let Some(g) = group
+            && !exists(self.conn(), "SELECT 1 FROM category_groups WHERE id = ?1", g)?
+        {
+            return Err(Error::NotFound);
+        }
+        match self.conn().execute("UPDATE feeds SET category_group_id = ?1 WHERE id = ?2", params![group, feed])? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
+        }
+    }
+
     /// An article's categories, only the sources in effect.
     pub fn article_category(&self, article: ArticleId) -> Result<ArticleCategory> {
         let conn = self.conn();
@@ -446,6 +504,19 @@ impl Store {
             Ok(_) => Ok(self.conn().last_insert_rowid()),
             Err(e) if is_unique_violation(&e) => Err(Error::Invalid("a group with that name already exists".into())),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The group with the same normalized name, else a new one, last.
+    pub fn find_or_create_group(&self, name: &str) -> Result<GroupId> {
+        let (_, normalized) = clean_group_name(name)?;
+        match self
+            .conn()
+            .query_row("SELECT id FROM category_groups WHERE normalized = ?1", [normalized], |r| r.get(0))
+            .optional()?
+        {
+            Some(id) => Ok(id),
+            None => self.create_group(name),
         }
     }
 
@@ -645,15 +716,27 @@ impl Store {
                SELECT m.article_id, m.category_id FROM m
                JOIN articles a ON a.id = m.article_id JOIN feeds f ON f.id = a.feed_id
                WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
+             ),
+             in_group(article_id, group_id) AS (
+               SELECT s.article_id, c.group_id FROM scoped s
+               JOIN categories c ON c.id = s.category_id WHERE c.group_id IS NOT NULL
+               UNION
+               SELECT a.id, f.category_group_id FROM articles a JOIN feeds f ON f.id = a.feed_id
+               WHERE f.category_group_id IS NOT NULL
+                 AND (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
              )
              SELECT 0, category_id, COUNT(*) FROM scoped GROUP BY category_id
              UNION ALL
-             SELECT 1, c.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
-             JOIN categories c ON c.id = s.category_id WHERE c.group_id IS NOT NULL GROUP BY c.group_id
+             SELECT 1, group_id, COUNT(*) FROM in_group GROUP BY group_id
              UNION ALL
              SELECT 2, 0, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
              WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
-               AND a.id NOT IN (SELECT article_id FROM scoped)"
+               AND a.id NOT IN (SELECT article_id FROM scoped)
+             UNION ALL
+             SELECT 3, a.feed_id, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
+             WHERE f.category_group_id IS NOT NULL
+               AND (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
+             GROUP BY a.feed_id"
         );
         let mut out = CategoryCounts::default();
         let mut stmt = self.conn().prepare(&sql)?;
@@ -664,6 +747,7 @@ impl Store {
             match r? {
                 (0, id, n) => out.categories.insert(id, n),
                 (1, id, n) => out.groups.insert(id, n),
+                (3, id, n) => out.feeds.insert(id, n),
                 (_, _, n) => {
                     out.uncategorized = n;
                     None

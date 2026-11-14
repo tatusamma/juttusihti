@@ -20,6 +20,11 @@ fn feed(s: &mut Store, url: &str) -> FeedId {
     s.add_feed(&NewFeed { url: url.into(), title: url.into(), ..Default::default() }).unwrap()
 }
 
+/// A feed whose title is `title`.
+fn titled(s: &mut Store, title: &str) -> FeedId {
+    s.add_feed(&NewFeed { url: format!("https://{title}/rss"), title: title.into(), ..Default::default() }).unwrap()
+}
+
 fn count(s: &Store, table: &str) -> i64 {
     s.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
 }
@@ -1265,4 +1270,110 @@ fn list_and_counts_agree_on_every_category() {
     assert_eq!(in_category(&s, local), ["4", "6"]);
     assert_eq!(in_category(&s, tech), ["3", "5", "7"]);
     assert_eq!(counts.uncategorized, 1, "only article 8");
+}
+
+// ---- feeds in groups -----------------------------------------------------------
+
+/// Group sports with category football; politics in no group. Feed f is in
+/// sports: its "1" is mapped to politics, "2" has no category. Feed g (no group)
+/// has "3" mapped to football.
+fn group_data() -> (Store, FeedId, FeedId, GroupId, CategoryId, CategoryId) {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://f.example/rss");
+    let g = feed(&mut s, "https://g.example/rss");
+    s.ingest(f, &[entry("1", &["Pol"]), entry("2", &[])]).unwrap();
+    s.ingest(g, &[entry("3", &["Foot"])]).unwrap();
+    let sports = s.create_group("Sports").unwrap();
+    let football = s.create_category("Football").unwrap();
+    let politics = s.create_category("Politics").unwrap();
+    s.move_category(football, Some(sports), 0).unwrap();
+    map_term(&s, "Foot", football);
+    map_term(&s, "Pol", politics);
+    s.set_feed_group(f, Some(sports)).unwrap();
+    (s, f, g, sports, football, politics)
+}
+
+#[test]
+fn a_group_contains_all_articles_of_its_feeds() {
+    let (s, f, _, sports, _, _) = group_data();
+    let in_group = matching(&s, &SearchQuery { group_ids: vec![sports], ..Default::default() });
+    assert_eq!(in_group, ["1", "2", "3"]);
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(c.groups.get(&sports), Some(&3));
+    assert_eq!(c.feeds.get(&f), Some(&2));
+    assert_eq!(c.uncategorized, 1); // "2": in the group only through its feed
+}
+
+#[test]
+fn a_group_counts_an_article_once_via_feed_and_category() {
+    let (mut s, f, _, sports, football, _) = group_data();
+    // "2" is football and, through feed f, in sports; "1" maps to two categories of sports.
+    s.conn().execute("UPDATE feed_terms SET category_id = ?1 WHERE name = 'Pol'", [football]).unwrap();
+    let hockey = s.create_category("Hockey").unwrap();
+    s.move_category(hockey, Some(sports), 1).unwrap();
+    s.set_article_category(article_id(&s, "2"), Some(football)).unwrap();
+    s.ingest(f, &[entry("4", &["Pol", "Puck"])]).unwrap();
+    map_term(&s, "Puck", hockey);
+    let c = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(c.groups.get(&sports), Some(&4)); // 1, 2, 4 via feed f; 3 via football
+    assert_eq!(matching(&s, &SearchQuery { group_ids: vec![sports], ..Default::default() }).len(), 4);
+}
+
+#[test]
+fn group_feed_counts_follow_the_scope() {
+    let (s, f, g, sports, _, _) = group_data();
+    let c = s.category_counts(ListFilter { feed_id: Some(g), ..Default::default() }).unwrap();
+    assert_eq!(c.feeds.get(&f).copied().unwrap_or(0), 0);
+    assert_eq!(c.groups.get(&sports), Some(&1));
+}
+
+#[test]
+fn tree_lists_group_feeds_and_default_users_by_title() {
+    let mut s = Store::open_in_memory().unwrap();
+    let b = titled(&mut s, "b.example");
+    let a = titled(&mut s, "A.example");
+    let c = titled(&mut s, "c.example");
+    let sports = s.create_group("Sports").unwrap();
+    let football = s.create_category("Football").unwrap();
+    s.move_category(football, Some(sports), 0).unwrap();
+    s.set_feed_group(b, Some(sports)).unwrap();
+    s.set_feed_group(a, Some(sports)).unwrap();
+    s.set_feed_default_category(c, Some(football)).unwrap();
+    let t = s.category_tree().unwrap();
+    let titles = |v: &[GroupFeed]| v.iter().map(|f| f.title.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&t.groups[0].feeds), ["A.example", "b.example"]);
+    assert_eq!(t.groups[0].categories[0].default_for, ["c.example"]);
+    assert_eq!(titles(&t.ungrouped_feeds), ["c.example"]);
+}
+
+#[test]
+fn deleting_a_group_releases_its_feeds() {
+    let (mut s, f, _, sports, _, _) = group_data();
+    s.delete_group(sports).unwrap();
+    assert_eq!(s.feed(f).unwrap().category_group_id, None);
+    assert!(s.category_tree().unwrap().groups.is_empty());
+}
+
+#[test]
+fn set_feed_group_rejects_missing_feed_or_group() {
+    let (s, f, _, _, _, _) = group_data();
+    assert!(matches!(s.set_feed_group(99, None), Err(Error::NotFound)));
+    assert!(matches!(s.set_feed_group(f, Some(99)), Err(Error::NotFound)));
+}
+
+#[test]
+fn find_or_create_group_reuses_by_normalized_name() {
+    let s = Store::open_in_memory().unwrap();
+    let a = s.find_or_create_group("Urheilu").unwrap();
+    assert_eq!(s.find_or_create_group(" urheilu ").unwrap(), a);
+    assert_ne!(s.find_or_create_group("Politiikka").unwrap(), a);
+}
+
+#[test]
+fn category_feed_id_intersects_with_the_feed_scope() {
+    let (s, f, g, _, _, _) = group_data();
+    let q = SearchQuery { feed_ids: vec![g], category_feed_id: Some(f), ..Default::default() };
+    assert!(matching(&s, &q).is_empty());
+    let q = SearchQuery { category_feed_id: Some(f), ..Default::default() };
+    assert_eq!(matching(&s, &q), ["1", "2"]);
 }

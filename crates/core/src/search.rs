@@ -410,6 +410,9 @@ pub struct SearchQuery {
     pub text: String,
     pub view: View,
     pub feed_ids: Vec<i64>,
+    /// Only articles of this feed; intersects with `feed_ids`.
+    #[serde(default)]
+    pub category_feed_id: Option<i64>,
     pub folder_ids: Vec<i64>,
     /// Inclusive lower bound, UTC unix seconds.
     pub from: Option<i64>,
@@ -520,6 +523,10 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     };
     in_list(&mut sql, &mut params, "a.feed_id", &q.feed_ids);
     in_list(&mut sql, &mut params, "f.folder_id", &q.folder_ids);
+    if let Some(feed) = q.category_feed_id {
+        sql.push_str(" AND a.feed_id = ?");
+        params.push(Value::Integer(feed));
+    }
     if let Some(from) = q.from {
         sql.push_str(" AND a.effective_at >= ?");
         params.push(Value::Integer(from));
@@ -540,8 +547,11 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
         params.extend(std::iter::repeat_n(Value::Integer(*id), MEMBERSHIP_TARGETS));
     }
     for id in &q.group_ids {
-        sql.push_str(&format!(" AND ({})", category_membership("IN (SELECT id FROM categories WHERE group_id = ?)")));
-        params.extend(std::iter::repeat_n(Value::Integer(*id), MEMBERSHIP_TARGETS));
+        sql.push_str(&format!(
+            " AND ({} OR f.category_group_id = ?)",
+            category_membership("IN (SELECT id FROM categories WHERE group_id = ?)")
+        ));
+        params.extend(std::iter::repeat_n(Value::Integer(*id), MEMBERSHIP_TARGETS + 1));
     }
     if q.uncategorized {
         sql.push_str(&format!(" AND NOT ({})", category_membership("IS NOT NULL")));

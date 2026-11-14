@@ -208,7 +208,7 @@ impl State {
         Self {
             db,
             open: true,
-            tree: CategoryTree { groups: vec![], ungrouped: vec![], favourites: vec![] },
+            tree: CategoryTree { groups: vec![], ungrouped: vec![], favourites: vec![], ungrouped_feeds: vec![] },
             counts: CategoryCounts::default(),
             filter: ListFilter::default(),
             expanded: HashSet::new(),

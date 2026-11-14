@@ -10,7 +10,7 @@ mod common;
 use common::{MockReply, mock};
 
 fn cat(id: CategoryId, name: &str, group_id: Option<i64>) -> CategoryNode {
-    CategoryNode { category: Category { id, name: name.into() }, group_id, term_count: 0 }
+    CategoryNode { category: Category { id, name: name.into() }, group_id, term_count: 0, default_for: vec![] }
 }
 
 fn term(id: i64, name: &str) -> TermRow {
