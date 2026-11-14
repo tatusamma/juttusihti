@@ -124,10 +124,18 @@ pub fn subscription<M: 'static + Send>(on_move: fn(Point) -> M, on_release: fn()
 }
 
 /// A "⋮⋮" grip beside `content`; pressing it sends `on_press` (with a NaN point, see [`DragMsg::Press`]).
-pub fn handle<'a, M: Clone + 'a>(content: Element<'a, M>, on_press: impl Fn(Point) -> M) -> Element<'a, M> {
+/// Releasing over it sends `on_release` too: the [`subscription`] starts only after the
+/// press, so a quick tap whose press and release arrive together would otherwise lose
+/// the release (a second release is a no-op).
+pub fn handle<'a, M: Clone + 'a>(
+    content: Element<'a, M>,
+    on_press: impl Fn(Point) -> M,
+    on_release: M,
+) -> Element<'a, M> {
     let grip = text("⋮⋮").size(style::SIZE_BODY).style(style::faint);
     mouse_area(row![grip, content].spacing(style::SPACE[1]).align_y(iced::Center))
         .on_press(on_press(Point::new(f32::NAN, f32::NAN)))
+        .on_release(on_release)
         .interaction(mouse::Interaction::Grab)
         .into()
 }
@@ -273,6 +281,18 @@ mod tests {
         assert_eq!(s.update(DragMsg::Cancel), None);
         assert!(s.dragging().is_none());
         assert_eq!(s.update(DragMsg::Release), None);
+    }
+
+    #[test]
+    fn a_second_release_is_a_no_op() {
+        let mut s = pressed();
+        s.update(DragMsg::Move(p(30.0, 10.0)));
+        s.update(DragMsg::Enter("a"));
+        // The row's own release and the window's release both arrive.
+        assert_eq!(s.update(DragMsg::Release), Some((7, "a")));
+        assert_eq!(s.update(DragMsg::Release), None);
+        s.update(DragMsg::Move(p(90.0, 90.0)));
+        assert!(s.dragging().is_none(), "no ghost drag starts afterwards");
     }
 
     #[test]

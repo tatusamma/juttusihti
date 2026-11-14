@@ -337,6 +337,16 @@ impl Store {
         )?)
     }
 
+    /// Marks exactly the matches of `q` as read (a category or search list).
+    /// Returns the number changed.
+    pub fn mark_query_read(&self, q: &SearchQuery) -> Result<usize> {
+        let (from_where, params, _) = search::build_where(q)?;
+        Ok(self.conn.execute(
+            &format!("UPDATE articles SET is_read = 1 WHERE is_read = 0 AND id IN (SELECT a.id{from_where})"),
+            rusqlite::params_from_iter(params.iter()),
+        )?)
+    }
+
     /// Deletes articles whose effective date is older than `days`, keeping
     /// bookmarked articles and anything the user annotated or confirmed in
     /// research. Returns the number deleted.

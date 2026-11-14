@@ -522,8 +522,13 @@ impl App {
 
     /// Reloads the feeds and unread counts, and the categories with their counts.
     fn load_sidebar(&mut self) -> Task<Message> {
+        Task::batch([self.load_feeds(), self.load_categories()])
+    }
+
+    /// Reloads the feeds and their unread counts.
+    fn load_feeds(&self) -> Task<Message> {
         let db = self.db.clone();
-        let feeds = Task::perform(
+        Task::perform(
             async move {
                 db.call(|s| -> juttusihti_core::Result<_> {
                     Ok(Sidebar { feeds: s.feeds()?, folders: s.folders()?, unread: s.unread_counts()? })
@@ -531,8 +536,17 @@ impl App {
                 .await
             },
             Message::SidebarLoaded,
-        );
-        Task::batch([feeds, self.load_categories()])
+        )
+    }
+
+    /// After articles were marked read or unread: the unread counts, and the
+    /// category counts only while they count unread articles (they are costly).
+    fn after_read_change(&mut self) -> Task<Message> {
+        if self.list_filter().view == View::Unread {
+            Task::batch([self.load_feeds(), self.load_categories()])
+        } else {
+            self.load_feeds()
+        }
     }
 
     /// Reloads the categories sidebar with counts for the list's All/Unread and feed picker.
@@ -714,6 +728,15 @@ impl App {
         let _ = self.quick.update(crate::quick::Msg::Close);
     }
 
+    /// What "Mark all read" marks.
+    fn read_scope(&self) -> ReadScope {
+        if self.is_filtered() {
+            ReadScope::Query(Box::new(self.list_query()))
+        } else {
+            ReadScope::List(self.list_filter())
+        }
+    }
+
     /// Unread articles in the current News scope.
     fn scope_unread(&self) -> u64 {
         let feeds = &self.sidebar.feeds;
@@ -803,7 +826,7 @@ impl App {
                     item.is_read = true;
                 }
                 let load = self.load_preview(id, true);
-                if was_unread { Task::batch([load, self.load_sidebar()]) } else { load }
+                if was_unread { Task::batch([load, self.after_read_change()]) } else { load }
             }
             Message::PreviewLoaded(Ok(mut preview)) => {
                 // Reopened while its fetch still runs.
@@ -885,7 +908,7 @@ impl App {
                 if let Some(item) = self.listing.items.iter_mut().find(|a| a.id == id) {
                     item.is_read = read;
                 }
-                Task::batch([self.set_state(id, Some(read), None), self.load_sidebar()])
+                Task::batch([self.set_state(id, Some(read), None), self.after_read_change()])
             }
             Message::OpenInBrowser => {
                 if let Some(url) = self.preview.as_ref().and_then(|p| p.article.url.clone()) {
@@ -1028,15 +1051,12 @@ impl App {
             }
             Message::MarkAllRead => {
                 let db = self.db.clone();
-                let filter = self.list_filter();
+                let scope = self.read_scope();
                 for item in &mut self.listing.items {
                     item.is_read = true;
                 }
-                Task::perform(
-                    async move { db.call(move |s| s.mark_all_read(filter).map(|_| ())).await },
-                    Message::StateChanged,
-                )
-                .chain(self.load_sidebar())
+                Task::perform(async move { db.call(move |s| scope.apply(s).map(|_| ())).await }, Message::StateChanged)
+                    .chain(self.after_read_change())
             }
             Message::RefreshAll | Message::AutoRefresh => {
                 if self.refreshing > 0 {
@@ -1112,6 +1132,11 @@ impl App {
             }
             Message::ShowScreen(screen) => {
                 self.close_overlays();
+                // A row pressed on the screen being left would start a drag on return.
+                if screen != self.screen {
+                    self.categories.cancel_drag();
+                    self.organise.cancel_drag();
+                }
                 self.screen = screen;
                 match screen {
                     Screen::Reports => self.reports.load().map(Message::Reports),
@@ -1225,7 +1250,8 @@ impl App {
                     }
                     self.status_review = session;
                 }
-                if refresh { Task::batch([task, self.load_list(), self.load_sidebar()]) } else { task }
+                // AI runs add categories but leave the feeds' unread counts alone.
+                if refresh { Task::batch([task, self.load_list(), self.load_categories()]) } else { task }
             }
             Message::FactCheck(crate::fact_check::Msg::ToggleCard) => {
                 if let Some(id) = self.preview.as_ref().map(|p| p.article.id) {
@@ -1433,7 +1459,9 @@ impl App {
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
             Key::Character("p") => self.update(Message::PrevPage),
-            Key::Character("c") => self.update(Message::Categories(category_sidebar::Msg::Toggle)),
+            Key::Character("c") if self.screen == Screen::Reader => {
+                self.update(Message::Categories(category_sidebar::Msg::Toggle))
+            }
             Key::Named(keyboard::key::Named::Escape) => self.update(Message::CloseOverlays),
             Key::Named(keyboard::key::Named::F1) => self.update(Message::ShowScreen(Screen::Help)),
             _ => Task::none(),
@@ -2031,6 +2059,24 @@ fn header_icon<'a>(i: Icon, tip: &'a str, open: bool, target: Message) -> Elemen
         tooltip::Position::Bottom,
     )
     .into()
+}
+
+/// The articles "Mark all read" marks.
+#[derive(Debug, Clone)]
+enum ReadScope {
+    /// Everything in the place and feed scope.
+    List(ListFilter),
+    /// Exactly the matches of a category or search query.
+    Query(Box<SearchQuery>),
+}
+
+impl ReadScope {
+    fn apply(self, s: &Store) -> juttusihti_core::Result<usize> {
+        match self {
+            ReadScope::List(filter) => s.mark_all_read(filter),
+            ReadScope::Query(q) => s.mark_query_read(&q),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2673,6 +2719,94 @@ mod tests {
         let _ = app.view();
         app.db.shared().lock().unwrap().save_fact_check(&check(Verdict::Supported)).unwrap();
         assert!(list(&app).flagged.is_empty());
+    }
+
+    #[test]
+    fn read_changes_reload_category_counts_only_when_they_count_unread() {
+        let (mut app, a, b) = app_with_articles();
+        let relist = |app: &mut App| {
+            let items = read_listing(&app.db.shared().lock().unwrap(), &app.list_query(), app.page).unwrap().items;
+            app.listing.items = items;
+        };
+        app.show_preview(a);
+        relist(&mut app);
+        // All: the read state, and the feeds' unread counts; the category counts stay.
+        let all = app.update(Message::ToggleRead).units();
+        let open_all = app.update(Message::Open(b)).units();
+        let _ = app.update(Message::SetUnreadOnly(true));
+        app.show_preview(a);
+        let unread = app.update(Message::ToggleRead).units();
+        app.db.shared().lock().unwrap().set_read(b, false).unwrap();
+        relist(&mut app);
+        let open_unread = app.update(Message::Open(b)).units();
+        assert_eq!(unread, all + 1, "Unread also reloads the category counts");
+        assert_eq!(open_unread, open_all + 1);
+    }
+
+    #[test]
+    fn mark_all_read_keeps_to_the_selected_category() {
+        let (mut app, a, b) = app_with_articles();
+        let l = {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_label("Tech").unwrap();
+            s.tag_article(a, l, juttusihti_core::Origin::User, None).unwrap();
+            l
+        };
+        reload_categories(&mut app);
+        select(&mut app, Selection::Category(l));
+        let read = |app: &App, id| app.db.shared().lock().unwrap().article(id).unwrap().is_read;
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(read(&app, a));
+        assert!(!read(&app, b), "an article outside the category stays unread");
+        // A search narrows it the same way; with neither, the whole scope is marked.
+        select(&mut app, Selection::All);
+        app.active_search = "nothing-matches-this".into();
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(!read(&app, b));
+        app.active_search.clear();
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        assert!(read(&app, b));
+    }
+
+    #[test]
+    fn c_toggles_the_sidebar_only_in_the_reader() {
+        let (mut app, _) = app_with_feed();
+        let _ = app.update(Message::ShowScreen(Screen::Settings));
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(app.categories.open, "c is not a shortcut on other screens");
+    }
+
+    #[test]
+    fn a_tap_selects_once_and_leaves_no_drag_armed() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        // The row's own release and the window's release both arrive.
+        for m in [DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan), DragMsg::Release, DragMsg::Release]
+        {
+            let _ = app.update(Message::Categories(SidebarMsg::Drag(m)));
+        }
+        assert_eq!(app.category, Selection::Group(c.local));
+        assert!(!app.categories.armed());
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 0.0))));
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 40.0))));
+        assert_eq!(app.categories.ghost(), None, "no drag without a held button");
+    }
+
+    #[test]
+    fn leaving_the_reader_or_hiding_the_sidebar_drops_a_pressed_row() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        let press =
+            || Message::Categories(SidebarMsg::Drag(DragMsg::Press(SidebarItem::Group(c.tech), "Tech".into(), nan)));
+        let _ = app.update(press());
+        assert!(app.categories.armed());
+        let _ = app.update(Message::ShowScreen(Screen::Settings));
+        assert!(!app.categories.armed(), "another screen");
+        let _ = app.update(Message::ShowScreen(Screen::Reader));
+        let _ = app.update(press());
+        let _ = app.update(Message::Categories(SidebarMsg::Toggle));
+        assert!(!app.categories.armed(), "the sidebar was hidden");
     }
 
     #[test]

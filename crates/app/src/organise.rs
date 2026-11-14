@@ -331,6 +331,19 @@ impl State {
         Subscription::batch([pointer, escape])
     }
 
+    /// Drops a pressed or dragged row (also in the draft), e.g. when the screen is left mid-drag.
+    pub fn cancel_drag(&mut self) {
+        self.drag.update(DragMsg::Cancel);
+        if let Some(d) = self.draft.as_mut() {
+            d.cancel_drag();
+        }
+    }
+
+    /// Whether a row is pressed or being dragged (the pointer is tracked).
+    pub(crate) fn armed(&self) -> bool {
+        self.drag.dragging().is_some() || self.draft.as_ref().is_some_and(Draft::dragging)
+    }
+
     /// The label and cursor position of the chip to draw at the pointer, while dragging.
     pub fn ghost(&self) -> Option<(&str, Point)> {
         if let Some(d) = &self.draft {
@@ -736,7 +749,11 @@ impl State {
 
     fn grip<'a>(&self, item: OrgItem, label: &str, content: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
         let label = label.to_string();
-        drag::handle(content.into(), move |p| Msg::Drag(DragMsg::Press(item, label.clone(), p)))
+        drag::handle(
+            content.into(),
+            move |p| Msg::Drag(DragMsg::Press(item, label.clone(), p)),
+            Msg::Drag(DragMsg::Release),
+        )
     }
 
     /// A group or category name: click to rename, or the open name field.

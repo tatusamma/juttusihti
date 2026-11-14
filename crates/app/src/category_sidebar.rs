@@ -256,6 +256,8 @@ impl State {
             Msg::Toggle => {
                 self.open = !self.open;
                 self.menu = None;
+                // A hidden sidebar cannot finish a drag.
+                self.cancel_drag();
                 return Effect::Run(Op::SetOpen(self.open));
             }
             Msg::Select(s) => {
@@ -338,6 +340,16 @@ impl State {
             Subscription::none()
         };
         Subscription::batch([pointer, escape])
+    }
+
+    /// Drops a pressed or dragged row, e.g. when the reader is left mid-drag.
+    pub fn cancel_drag(&mut self) {
+        self.drag.update(DragMsg::Cancel);
+    }
+
+    /// Whether a row is pressed or being dragged (the pointer is tracked).
+    pub(crate) fn armed(&self) -> bool {
+        self.drag.dragging().is_some()
     }
 
     /// The label and cursor position of the chip to draw at the pointer, while dragging.
@@ -667,8 +679,11 @@ impl State {
             .style(style::row_surface(hovered || is_selected));
         let surface: Element<'_, Msg> = if is_selected { with_edge(surface.into()) } else { surface.into() };
         let label = name.to_string();
+        // The release is caught here too: the window-wide release subscription starts only
+        // after the press, so a tap whose press and release arrive together would lose it.
         let r = mouse_area(surface)
             .on_press(Msg::Drag(DragMsg::Press(item, label, Point::new(f32::NAN, f32::NAN))))
+            .on_release(Msg::Drag(DragMsg::Release))
             .on_right_press(Msg::Menu(item))
             .on_enter(Msg::Hover(item, true))
             .on_exit(Msg::Hover(item, false))

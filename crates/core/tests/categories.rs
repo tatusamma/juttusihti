@@ -424,6 +424,22 @@ fn counts_follow_folder_and_saved_view() {
     assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
 }
 
+#[test]
+fn marking_a_category_read_leaves_other_articles_unread() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
+    let l = s.create_label("Tekoäly").unwrap();
+    map_term(&s, "AI", l);
+    s.tag_article(article_id(&s, "3"), l, Origin::User, None).unwrap();
+    let q = SearchQuery { label_ids: vec![l], feed_ids: vec![f], ..Default::default() };
+    assert_eq!(s.mark_query_read(&q).unwrap(), 2);
+    let read = |guid: &str| s.article(article_id(&s, guid)).unwrap().is_read;
+    assert!(read("1") && read("3"));
+    assert!(!read("2"));
+    assert_eq!(s.mark_query_read(&q).unwrap(), 0, "already read");
+}
+
 mod draft {
     use super::*;
     use juttusihti_core::category_draft::*;

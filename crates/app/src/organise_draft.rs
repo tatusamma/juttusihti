@@ -313,6 +313,10 @@ impl Draft {
         false
     }
 
+    pub fn cancel_drag(&mut self) {
+        self.drag.update(DragMsg::Cancel);
+    }
+
     pub fn dragging(&self) -> bool {
         self.drag.dragging().is_some()
     }
@@ -636,7 +640,11 @@ impl Draft {
 
     fn grip<'a>(&self, item: DItem, label: &str, content: impl Into<Element<'a, DraftMsg>>) -> Element<'a, DraftMsg> {
         let label = label.to_string();
-        drag::handle(content.into(), move |p| DraftMsg::Drag(DragMsg::Press(item, label.clone(), p)))
+        drag::handle(
+            content.into(),
+            move |p| DraftMsg::Drag(DragMsg::Press(item, label.clone(), p)),
+            DraftMsg::Drag(DragMsg::Release),
+        )
     }
 
     /// A draft name: click to rename, or the open name field.
