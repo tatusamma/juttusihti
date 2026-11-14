@@ -662,8 +662,9 @@ impl Store {
 
     /// Saves what "find categories with AI" found, in one transaction: a name
     /// is an existing category (by normalized name, never moved) or a new one,
-    /// last in its group (Ungrouped when it has none or the group is gone), and becomes the article's AI category. The manual choice is
-    /// never touched. Every `checked` article is marked as sent.
+    /// last in its group (Ungrouped when it has none or the group is gone), and
+    /// becomes the article's AI category. The manual choice is never touched.
+    /// Every `checked` article is marked as sent.
     pub fn apply_article_categories(
         &mut self,
         results: &[(ArticleId, Option<AiCategory>)],

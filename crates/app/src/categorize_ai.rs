@@ -87,7 +87,7 @@ impl Plan {
     }
 
     pub fn sends_line(&self) -> String {
-        format!("Sends their headlines and descriptions and your category names to {}.", self.provider)
+        format!("Sends their headlines and descriptions and your group and category names to {}.", self.provider)
     }
 
     pub fn estimate_line(&self) -> String {
@@ -236,5 +236,12 @@ mod tests {
         assert_eq!(p.blocker(), None);
         let p = Plan { ready: Err("Sign in to ChatGPT first.".into()), ..p };
         assert_eq!(p.blocker().as_deref(), Some("Sign in to ChatGPT first."));
+    }
+
+    #[test]
+    fn the_consent_line_names_groups_and_categories() {
+        let d = AiDefaults::default();
+        let p = Plan::build(&d, vec![], 0, Vocabulary::default(), None, Ok(()));
+        assert!(p.sends_line().contains("your group and category names"));
     }
 }

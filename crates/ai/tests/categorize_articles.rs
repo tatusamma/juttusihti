@@ -180,6 +180,7 @@ fn sent_ids(r: &Recorded) -> Vec<i64> {
 }
 
 fn reply_for(r: &Recorded) -> MockReply {
+    // No "group" key on purpose: `parse` accepts a missing group as no group.
     let items: Vec<Value> = sent_ids(r).iter().map(|id| json!({"id": id, "category": "Space"})).collect();
     answer(&json!({ "articles": items }).to_string())
 }
