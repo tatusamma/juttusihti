@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::normalize::normalize_text;
+use crate::search::{SearchQuery, build_where};
 use crate::store::{ListFilter, Store};
-use crate::{Error, Label, LabelId, Result, View, now};
+use crate::{ArticleId, Error, Label, LabelId, Result, View, now};
 
 pub type GroupId = i64;
 pub type TermId = i64;
@@ -58,6 +59,27 @@ pub struct CategoryCounts {
     /// Articles in no category.
     pub uncategorized: u64,
 }
+
+/// An article offered to AI for categories: its headline and a short text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleForCategorizing {
+    pub id: ArticleId,
+    pub title: String,
+    /// The description, or the start of the content when there is none.
+    pub text: String,
+}
+
+/// What [`Store::apply_article_categories`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplyStats {
+    /// Articles now confirmed in at least one of the given categories.
+    pub categorized: usize,
+    /// Categories that did not exist before.
+    pub new_categories: usize,
+}
+
+/// Characters of content sent when an article has no description.
+const CONTENT_START: usize = 300;
 
 fn clean_group_name(name: &str) -> Result<(String, String)> {
     let name = name.trim().to_string();
@@ -355,5 +377,87 @@ impl Store {
             };
         }
         Ok(out)
+    }
+
+    /// The articles "find categories with AI" offers next: uncategorized ones
+    /// whose feed gave no publisher categories, in `filter`'s scope, not yet
+    /// checked, newest first; at most `limit`, with how many are eligible.
+    pub fn articles_to_categorize(
+        &self,
+        filter: ListFilter,
+        limit: usize,
+    ) -> Result<(Vec<ArticleForCategorizing>, usize)> {
+        let q = SearchQuery {
+            view: filter.view,
+            feed_ids: filter.feed_id.into_iter().collect(),
+            folder_ids: filter.folder_id.into_iter().collect(),
+            uncategorized: true,
+            without_terms: true,
+            ..Default::default()
+        };
+        let (from_where, params, _) = build_where(&q)?;
+        let from_where =
+            format!("{from_where} AND NOT EXISTS (SELECT 1 FROM category_ai_checks c WHERE c.article_id = a.id)");
+        let conn = self.conn();
+        let eligible: i64 =
+            conn.query_row(&format!("SELECT COUNT(*){from_where}"), rusqlite::params_from_iter(params.iter()), |r| {
+                r.get(0)
+            })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT a.id, a.title,
+                    COALESCE(NULLIF(TRIM(a.summary_text), ''), SUBSTR(COALESCE(a.content_text, ''), 1, {CONTENT_START}))
+             {from_where} ORDER BY a.effective_at DESC, a.id DESC LIMIT {limit}"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok(ArticleForCategorizing { id: r.get(0)?, title: r.get(1)?, text: r.get(2)? })
+        })?;
+        Ok((rows.collect::<rusqlite::Result<_>>()?, eligible as usize))
+    }
+
+    /// Saves what "find categories with AI" found, in one transaction: each
+    /// name is an existing category (by normalized name) or a new ungrouped
+    /// one; the links are confirmed AI links, except that a link the user
+    /// rejected stays rejected. Every `checked` article is marked as sent.
+    pub fn apply_article_categories(
+        &mut self,
+        results: &[(ArticleId, Vec<String>)],
+        checked: &[ArticleId],
+    ) -> Result<ApplyStats> {
+        let tx = self.conn_mut().transaction()?;
+        let mut stats = ApplyStats::default();
+        let t = now();
+        for (article, names) in results {
+            let mut confirmed = false;
+            for name in names {
+                if normalize_text(name).is_empty() {
+                    continue;
+                }
+                let (label, created) = crate::research::insert_label(&tx, name)?;
+                stats.new_categories += usize::from(created);
+                tx.execute(
+                    "INSERT INTO article_labels(article_id, label_id, origin, status, suggestion_id, created_at)
+                     VALUES (?1, ?2, 'ai', 'confirmed', NULL, ?3)
+                     ON CONFLICT(article_id, label_id) DO UPDATE SET status = 'confirmed'
+                     WHERE article_labels.status <> 'rejected'",
+                    params![article, label, t],
+                )?;
+                let status: String = tx.query_row(
+                    "SELECT status FROM article_labels WHERE article_id = ?1 AND label_id = ?2",
+                    params![article, label],
+                    |r| r.get(0),
+                )?;
+                confirmed |= status == "confirmed";
+            }
+            stats.categorized += usize::from(confirmed);
+        }
+        for id in checked {
+            tx.execute(
+                "INSERT INTO category_ai_checks(article_id, checked_at) VALUES (?1, ?2)
+                 ON CONFLICT(article_id) DO UPDATE SET checked_at = excluded.checked_at",
+                params![id, t],
+            )?;
+        }
+        tx.commit()?;
+        Ok(stats)
     }
 }

@@ -841,3 +841,135 @@ fn analysis_scope_covers_exactly_the_articles_without_terms() {
     want.sort();
     assert_eq!(ids, want);
 }
+
+// ---- AI categorizing of uncategorized articles ----------------------------------
+
+fn dated(guid: &str, published_at: i64, terms: &[&str]) -> NewArticle {
+    NewArticle { published_at: Some(published_at), ..entry(guid, terms) }
+}
+
+/// (old) no terms, (mid) no terms, (new) no terms, (termed) a publisher term,
+/// (labelled) no terms but a confirmed label. Newest first: new, mid, old.
+fn to_categorize_data() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(
+        f,
+        &[
+            dated("old", 1_000, &[]),
+            dated("mid", 2_000, &[]),
+            dated("new", 3_000, &[]),
+            dated("termed", 4_000, &["Odd"]),
+            dated("labelled", 5_000, &[]),
+        ],
+    )
+    .unwrap();
+    let l = s.create_label("L").unwrap();
+    s.tag_article(article_id(&s, "labelled"), l, Origin::User, None).unwrap();
+    s
+}
+
+fn guids(s: &Store, items: &[juttusihti_core::categories::ArticleForCategorizing]) -> Vec<String> {
+    items.iter().map(|a| s.article(a.id).unwrap().guid).collect()
+}
+
+#[test]
+fn articles_to_categorize_are_uncategorized_without_terms_and_newest_first() {
+    let s = to_categorize_data();
+    let (items, eligible) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
+    assert_eq!(guids(&s, &items), ["new", "mid", "old"]);
+    assert_eq!(eligible, 3);
+    assert_eq!(items[0].title, "Title new");
+    assert_eq!(items[0].text, "Body");
+    let (items, eligible) = s.articles_to_categorize(ListFilter::default(), 2).unwrap();
+    assert_eq!(guids(&s, &items), ["new", "mid"]);
+    assert_eq!(eligible, 3, "the total counts every eligible article");
+}
+
+#[test]
+fn articles_to_categorize_skip_checked_ones_and_follow_the_filter() {
+    let mut s = to_categorize_data();
+    let new = article_id(&s, "new");
+    s.apply_article_categories(&[], &[new]).unwrap();
+    let (items, eligible) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
+    assert_eq!(guids(&s, &items), ["mid", "old"]);
+    assert_eq!(eligible, 2);
+
+    s.set_read(article_id(&s, "mid"), true).unwrap();
+    let unread = ListFilter { view: View::Unread, ..Default::default() };
+    assert_eq!(guids(&s, &s.articles_to_categorize(unread, 100).unwrap().0), ["old"]);
+
+    let other = feed(&mut s, "https://b.example/rss");
+    s.ingest(other, &[dated("elsewhere", 9_000, &[])]).unwrap();
+    let only_other = ListFilter { feed_id: Some(other), ..Default::default() };
+    let (items, eligible) = s.articles_to_categorize(only_other, 100).unwrap();
+    assert_eq!((guids(&s, &items), eligible), (vec!["elsewhere".to_string()], 1));
+}
+
+#[test]
+fn articles_to_categorize_fall_back_to_the_start_of_the_content() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    let long = "word ".repeat(200);
+    s.ingest(f, &[NewArticle { summary: None, content: Some(long), ..entry("a", &[]) }]).unwrap();
+    let (items, _) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
+    assert!(items[0].text.starts_with("word word"));
+    assert!(items[0].text.chars().count() <= 300);
+}
+
+fn link_status(s: &Store, a: ArticleId, l: LabelId) -> String {
+    s.conn()
+        .query_row("SELECT status FROM article_labels WHERE article_id = ?1 AND label_id = ?2", [a, l], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn applying_categories_reuses_names_confirms_links_and_marks_articles_checked() {
+    let mut s = to_categorize_data();
+    let (new, mid, old) = (article_id(&s, "new"), article_id(&s, "mid"), article_id(&s, "old"));
+    let space = s.create_label("Space").unwrap();
+    // The user rejected Space for `mid` earlier: AI must not bring it back.
+    s.tag_article(mid, space, Origin::Ai, None).unwrap();
+    s.decide_label(mid, space, Status::Rejected).unwrap();
+
+    let results = vec![
+        (new, vec!["  space ".to_string(), "Tiede".to_string()]),
+        (mid, vec!["Space".to_string(), "tiede".to_string()]),
+    ];
+    let sent = [new, mid, old];
+    let stats = s.apply_article_categories(&results, &sent).unwrap();
+    assert_eq!(stats.new_categories, 1, "Tiede is created once");
+    assert_eq!(stats.categorized, 2);
+    let tiede = s.labels().unwrap().into_iter().find(|l| l.name == "Tiede").unwrap().id;
+    assert!(s.category_tree().unwrap().ungrouped.iter().any(|c| c.label.id == tiede), "new ones are ungrouped");
+
+    assert_eq!(link_status(&s, new, space), "confirmed");
+    assert_eq!(link_status(&s, new, tiede), "confirmed");
+    assert_eq!(link_status(&s, mid, space), "rejected", "a user's rejection stays");
+    assert_eq!(link_status(&s, mid, tiede), "confirmed");
+    let origin: String = s
+        .conn()
+        .query_row("SELECT origin FROM article_labels WHERE article_id = ?1 AND label_id = ?2", [new, tiede], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(origin, "ai");
+    assert_eq!(count(&s, "category_ai_checks"), 3, "every sent article is checked, also `old`");
+    assert!(s.articles_to_categorize(ListFilter::default(), 100).unwrap().0.is_empty());
+
+    let again = s.apply_article_categories(&results, &sent).unwrap();
+    assert_eq!(again.new_categories, 0);
+    assert_eq!(count(&s, "labels"), 3, "L, Space and Tiede");
+    assert_eq!(count(&s, "category_ai_checks"), 3);
+    assert_eq!(link_status(&s, mid, space), "rejected");
+}
+
+#[test]
+fn applying_categories_confirms_a_pending_suggestion() {
+    let mut s = to_categorize_data();
+    let new = article_id(&s, "new");
+    let l = s.create_label("Space").unwrap();
+    s.tag_article(new, l, Origin::Ai, None).unwrap();
+    s.apply_article_categories(&[(new, vec!["Space".into()])], &[new]).unwrap();
+    assert_eq!(link_status(&s, new, l), "confirmed");
+}

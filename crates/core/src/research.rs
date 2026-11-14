@@ -99,24 +99,31 @@ fn similar_labels(a: &str, b: &str) -> bool {
     (n >= 4 && long.starts_with(short) && long.chars().count() - n <= 3) || (n >= 6 && edit_distance(a, b) <= 2)
 }
 
+/// Creates a label (last in Ungrouped) or finds the one with the same
+/// normalized name. Returns its id and whether it was created.
+pub(crate) fn insert_label(conn: &rusqlite::Connection, name: &str) -> Result<(LabelId, bool)> {
+    let name = name.trim();
+    let normalized = normalize_text(name);
+    if normalized.is_empty() {
+        return Err(Error::Invalid("label name must contain letters or digits".into()));
+    }
+    let created = conn.execute(
+        "INSERT INTO labels(name, normalized, created_at, position)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL))
+         ON CONFLICT(normalized) DO NOTHING",
+        params![name, normalized, now()],
+    )? > 0;
+    let id = conn.query_row("SELECT id FROM labels WHERE normalized = ?1", [normalized], |r| r.get(0))?;
+    Ok((id, created))
+}
+
 impl Store {
     // ---- labels --------------------------------------------------------
 
     /// Creates a label or returns the existing one with the same normalized name.
     /// A new one goes last in Ungrouped.
     pub fn create_label(&self, name: &str) -> Result<LabelId> {
-        let name = name.trim();
-        let normalized = normalize_text(name);
-        if normalized.is_empty() {
-            return Err(Error::Invalid("label name must contain letters or digits".into()));
-        }
-        self.conn().execute(
-            "INSERT INTO labels(name, normalized, created_at, position)
-             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL))
-             ON CONFLICT(normalized) DO NOTHING",
-            params![name, normalized, now()],
-        )?;
-        Ok(self.conn().query_row("SELECT id FROM labels WHERE normalized = ?1", [normalized], |r| r.get(0))?)
+        Ok(insert_label(self.conn(), name)?.0)
     }
 
     pub fn labels(&self) -> Result<Vec<Label>> {
