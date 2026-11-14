@@ -109,7 +109,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
     (
         "Reports",
         &[
-            "Charts of what you read: volume per source, topics, categories, entities that appear together, relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day, week or month buckets, and export any report as CSV.",
+            "Charts of what you read: volume per source, topics, categories, entities that appear together, relevance and clickbait trends, and AI usage and cost. Choose 7, 30, 90 or 365 days and day, week or month buckets, and export any report as CSV. Categories that articles reach only through publisher categories are not counted in reports yet.",
         ],
     ),
     (

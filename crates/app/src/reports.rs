@@ -189,7 +189,7 @@ impl State {
                 style::intro(
                     "Computed by DuckDB on a read-only snapshot of the local database.",
                     "Computed by DuckDB on a read-only snapshot of the local database. Only confirmed categories and \
-                     entities are counted unless noted.",
+                     entities are counted unless noted. Categories that articles reach only through publisher categories are not counted in reports yet.",
                 ),
             ]
             .spacing(SPACE[1]),
