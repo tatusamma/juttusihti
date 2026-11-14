@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-use crate::categories::{CategoryNode, Group, GroupId, TermId, TermRow};
+use crate::categories::{BY_ARTICLES, CategoryNode, Group, GroupId, TermId, TermRow};
 use crate::normalize::normalize_text;
 use crate::pricing::Provider;
 use crate::research::NewSuggestion;
@@ -132,11 +132,12 @@ impl Store {
         }
         categories.extend(tree.ungrouped);
         let conn = self.conn();
-        let mut stmt = conn.prepare(
+        // The most frequent terms first: sorting them helps the most articles.
+        let mut stmt = conn.prepare(&format!(
             "SELECT t.id, t.name, f.title FROM feed_terms t JOIN feeds f ON f.id = t.feed_id
              WHERE t.label_id IS NULL AND t.ignored = 0
-             ORDER BY t.first_seen_at, t.id LIMIT ?1",
-        )?;
+             ORDER BY {BY_ARTICLES} LIMIT ?1"
+        ))?;
         let terms: Vec<TermRow> = stmt
             .query_map([max_terms as i64], |r| Ok(TermRow { id: r.get(0)?, name: r.get(1)?, feed_title: r.get(2)? }))?
             .collect::<rusqlite::Result<_>>()?;

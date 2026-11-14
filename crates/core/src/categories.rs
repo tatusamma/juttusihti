@@ -85,10 +85,17 @@ fn node_from_row(r: &rusqlite::Row) -> rusqlite::Result<CategoryNode> {
     })
 }
 
-fn terms(conn: &Connection, cond: &str, label: Option<LabelId>) -> Result<Vec<TermRow>> {
+/// Orders terms by name, then feed.
+const BY_NAME: &str = "t.name COLLATE NOCASE, f.title COLLATE NOCASE, t.id";
+
+/// Orders terms by how many articles carry them, most first, then by name.
+pub(crate) const BY_ARTICLES: &str = "(SELECT COUNT(*) FROM article_terms x WHERE x.term_id = t.id) DESC,
+     t.name COLLATE NOCASE, f.title COLLATE NOCASE, t.id";
+
+fn terms(conn: &Connection, cond: &str, order: &str, label: Option<LabelId>) -> Result<Vec<TermRow>> {
     let sql = format!(
         "SELECT t.id, t.name, f.title FROM feed_terms t JOIN feeds f ON f.id = t.feed_id
-         WHERE {cond} ORDER BY t.name COLLATE NOCASE, f.title COLLATE NOCASE, t.id"
+         WHERE {cond} ORDER BY {order}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let map = |r: &rusqlite::Row| Ok(TermRow { id: r.get(0)?, name: r.get(1)?, feed_title: r.get(2)? });
@@ -218,15 +225,16 @@ impl Store {
     }
 
     pub fn category_terms(&self, label: LabelId) -> Result<Vec<TermRow>> {
-        terms(self.conn(), "t.label_id = ?1", Some(label))
+        terms(self.conn(), "t.label_id = ?1", BY_NAME, Some(label))
     }
 
+    /// The terms waiting to be sorted, the most frequent first.
     pub fn unsorted_terms(&self) -> Result<Vec<TermRow>> {
-        terms(self.conn(), "t.label_id IS NULL AND t.ignored = 0", None)
+        terms(self.conn(), "t.label_id IS NULL AND t.ignored = 0", BY_ARTICLES, None)
     }
 
     pub fn ignored_terms(&self) -> Result<Vec<TermRow>> {
-        terms(self.conn(), "t.ignored = 1", None)
+        terms(self.conn(), "t.ignored = 1", BY_NAME, None)
     }
 
     /// Maps a term to a category (or unmaps with `None`); clears `ignored`.

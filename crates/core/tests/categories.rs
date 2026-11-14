@@ -330,6 +330,17 @@ fn mapping_and_ignoring_terms() {
 }
 
 #[test]
+fn unsorted_terms_come_most_frequent_first() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["Aa", "Harvinainen"]), entry("2", &["Yleinen", "Bb"]), entry("3", &["Yleinen", "Bb"])])
+        .unwrap();
+    s.ingest(f, &[entry("4", &["Yleinen"])]).unwrap();
+    let names: Vec<String> = s.unsorted_terms().unwrap().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["Yleinen", "Bb", "Aa", "Harvinainen"], "by article count, then by name");
+}
+
+#[test]
 fn favourites_keep_their_order() {
     let mut s = Store::open_in_memory().unwrap();
     let g = s.create_group("G").unwrap();
@@ -492,6 +503,19 @@ mod draft {
         assert!(input.terms.iter().all(|t| t.id != ids[0] && t.id != ids[1]));
         assert_eq!(input.groups.iter().map(|x| x.id).collect::<Vec<_>>(), vec![g]);
         assert_eq!(input.categories.len(), 1);
+    }
+
+    #[test]
+    fn plan_input_sends_the_most_frequent_terms_first() {
+        let mut s = Store::open_in_memory().unwrap();
+        let f = feed(&mut s, "https://a.example/rss");
+        // "Vanha" is seen first but in one article; "Uusi" later but in three. Ties go by name.
+        s.ingest(f, &[entry("1", &["Vanha"])]).unwrap();
+        s.ingest(f, &[entry("2", &["Uusi"]), entry("3", &["Uusi"]), entry("4", &["Uusi", "Toinen"])]).unwrap();
+        let input = s.category_plan_input(2).unwrap();
+        let names: Vec<&str> = input.terms.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Uusi", "Toinen"]);
+        assert_eq!(input.more_terms, 1);
     }
 
     #[test]

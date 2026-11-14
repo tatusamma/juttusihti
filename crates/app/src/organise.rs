@@ -39,6 +39,17 @@ pub enum OrgTarget {
     Ignored,
 }
 
+/// Where a publisher term row sits, so its "Move to…" menu can leave that out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermPlace {
+    Unsorted,
+    Ignored,
+    Category(LabelId),
+}
+
+/// How many unsorted terms show before "Show all": the most frequent ones.
+pub(crate) const UNSORTED_SHOWN: usize = 50;
+
 /// A "Move to…" entry: where the row goes and how the menu names it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dest(pub OrgTarget, pub String);
@@ -84,7 +95,10 @@ pub struct Snapshot {
     counts: HashMap<LabelId, (u64, u64)>,
     /// Terms of the opened categories.
     terms: HashMap<LabelId, Vec<TermRow>>,
+    /// The most frequent first.
     pub(crate) unsorted: Vec<TermRow>,
+    /// Where each unsorted term is in `unsorted`.
+    pub(crate) unsorted_at: HashMap<TermId, usize>,
     ignored: Vec<TermRow>,
     /// The AI draft waiting for Approve or Cancel.
     pending: Option<Box<(i64, CategoryDraft)>>,
@@ -98,12 +112,15 @@ fn snapshot(s: &Store, expanded: &BTreeSet<LabelId>) -> juttusihti_core::Result<
     for &id in expanded {
         terms.insert(id, s.category_terms(id)?);
     }
+    let unsorted = s.unsorted_terms()?;
+    let unsorted_at = unsorted.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     Ok(Snapshot {
         groups: tree.groups,
         ungrouped: tree.ungrouped,
         counts,
         terms,
-        unsorted: s.unsorted_terms()?,
+        unsorted,
+        unsorted_at,
         ignored: s.ignored_terms()?,
         pending: s.pending_category_draft()?.map(Box::new),
     })
@@ -189,6 +206,8 @@ pub enum Msg {
     MoveTo(OrgItem, Dest),
     ToggleTerms(LabelId),
     ToggleIgnored,
+    /// "Show all (N)" or "Show fewer" under the unsorted terms.
+    ShowAllUnsorted(bool),
     NewGroup,
     NewCategory,
     /// Click on a group or category name.
@@ -229,6 +248,7 @@ pub struct State {
     loaded: bool,
     expanded: BTreeSet<LabelId>,
     show_ignored: bool,
+    show_all_unsorted: bool,
     drag: DragState<OrgItem, OrgTarget>,
     editing: Option<Editing>,
     actions: Option<LabelId>,
@@ -254,6 +274,7 @@ impl State {
             loaded: false,
             expanded: BTreeSet::new(),
             show_ignored: false,
+            show_all_unsorted: false,
             drag: DragState::default(),
             editing: None,
             actions: None,
@@ -396,6 +417,7 @@ impl State {
                 }
             }
             Msg::ToggleIgnored => self.show_ignored = !self.show_ignored,
+            Msg::ShowAllUnsorted(all) => self.show_all_unsorted = all,
             Msg::NewGroup => {
                 self.editing = Some(Editing::NewGroup(String::new()));
                 return Effect::Focus;
@@ -656,24 +678,31 @@ impl State {
                 out.extend(reorder);
                 out
             }
-            OrgItem::Term(id) => {
-                let unsorted = self.snap.unsorted.iter().any(|t| t.id == id);
-                let ignored = self.snap.ignored.iter().any(|t| t.id == id);
-                let current = self.snap.terms.iter().find(|(_, ts)| ts.iter().any(|t| t.id == id)).map(|(l, _)| *l);
-                let mut out: Vec<Dest> = self
-                    .categories()
-                    .filter(|c| Some(c.label.id) != current)
-                    .map(|c| Dest(OrgTarget::Category(c.label.id), c.label.name.clone()))
-                    .collect();
-                if !unsorted {
-                    out.push(Dest(OrgTarget::Unsorted, "Unsorted".into()));
-                }
-                if !ignored {
-                    out.push(Dest(OrgTarget::Ignored, "Ignored".into()));
-                }
-                out
-            }
+            // A term's menu depends on where its row is: see `term_dests`.
+            OrgItem::Term(_) => vec![],
         }
+    }
+
+    /// Where a term's "Move to…" menu can send it from `place`.
+    fn term_dests(&self, place: TermPlace) -> Vec<Dest> {
+        let mut out: Vec<Dest> = self
+            .categories()
+            .filter(|c| place != TermPlace::Category(c.label.id))
+            .map(|c| Dest(OrgTarget::Category(c.label.id), c.label.name.clone()))
+            .collect();
+        if place != TermPlace::Unsorted {
+            out.push(Dest(OrgTarget::Unsorted, "Unsorted".into()));
+        }
+        if place != TermPlace::Ignored {
+            out.push(Dest(OrgTarget::Ignored, "Ignored".into()));
+        }
+        out
+    }
+
+    /// The unsorted terms shown: the most frequent ones, or all after "Show all".
+    fn shown_unsorted(&self) -> &[TermRow] {
+        let all = &self.snap.unsorted;
+        if self.show_all_unsorted { all } else { &all[..all.len().min(UNSORTED_SHOWN)] }
     }
 
     /// The question shown while a deletion waits for confirmation.
@@ -772,8 +801,7 @@ impl State {
     }
 
     /// The row's "Move to…" menu (the keyboard way to do what dragging does).
-    fn move_to(&self, item: OrgItem) -> Element<'_, Msg> {
-        let dests = self.dests(item);
+    fn move_to(&self, item: OrgItem, dests: Vec<Dest>) -> Element<'_, Msg> {
         if dests.is_empty() {
             return Space::new().into();
         }
@@ -803,7 +831,7 @@ impl State {
         let heading = row![
             self.grip(item, &g.group.name, self.name(item, &g.group.name, true)),
             Space::new().width(Fill),
-            self.move_to(item),
+            self.move_to(item, self.dests(item)),
             style::icon_button(Icon::Close, "Delete group", SIZE_SMALL, Some(Msg::AskDelete(Confirm::Group(id)))),
         ]
         .spacing(SPACE[1])
@@ -905,19 +933,18 @@ impl State {
         if pending > 0 {
             line = line.push(text(format!("+{pending} AI")).size(SIZE_SMALL).style(style::accent));
         }
-        line = line.push(Space::new().width(Fill)).push(terms).push(self.move_to(item)).push(style::icon_button(
-            Icon::More,
-            "Merge, delete…",
-            SIZE_SMALL,
-            Some(Msg::Actions(id)),
-        ));
+        line = line
+            .push(Space::new().width(Fill))
+            .push(terms)
+            .push(self.move_to(item, self.dests(item)))
+            .push(style::icon_button(Icon::More, "Merge, delete…", SIZE_SMALL, Some(Msg::Actions(id))));
         let mut col = column![container(line).padding(iced::padding::left(INDENT).top(2.0).bottom(2.0))];
         if self.actions == Some(id) {
             col = col.push(self.view_actions(c));
         }
         if open {
             for t in self.snap.terms.get(&id).into_iter().flatten() {
-                col = col.push(self.view_term(t, false, 2.0 * INDENT));
+                col = col.push(self.view_term(t, TermPlace::Category(id), 2.0 * INDENT));
             }
         }
         col.into()
@@ -977,8 +1004,9 @@ impl State {
         .into()
     }
 
-    /// A publisher term with its feed in grey; `ignored` offers Un-ignore instead of Ignore.
-    fn view_term<'a>(&'a self, t: &'a TermRow, ignored: bool, indent: f32) -> Element<'a, Msg> {
+    /// A publisher term with its feed in grey; an ignored one offers Un-ignore instead of Ignore.
+    fn view_term<'a>(&'a self, t: &'a TermRow, place: TermPlace, indent: f32) -> Element<'a, Msg> {
+        let ignored = place == TermPlace::Ignored;
         let item = OrgItem::Term(t.id);
         let name = row![text(&t.name).size(SIZE_BODY), text(&t.feed_title).size(SIZE_SMALL).style(style::muted)]
             .spacing(SPACE[1])
@@ -989,9 +1017,14 @@ impl State {
             style::quiet_button(None, "Ignore", style::quiet, Some(Msg::Ignore(t.id, true)))
         };
         container(
-            row![self.grip(item, &t.name, name), Space::new().width(Fill), action, self.move_to(item)]
-                .spacing(SPACE[1])
-                .align_y(Center),
+            row![
+                self.grip(item, &t.name, name),
+                Space::new().width(Fill),
+                action,
+                self.move_to(item, self.term_dests(place))
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
         )
         .padding(iced::padding::left(indent).top(2.0).bottom(2.0))
         .into()
@@ -1009,8 +1042,24 @@ impl State {
                     .padding(iced::padding::left(INDENT)),
             );
         }
-        for t in terms {
-            block = block.push(self.view_term(t, false, INDENT));
+        for t in self.shown_unsorted() {
+            block = block.push(self.view_term(t, TermPlace::Unsorted, INDENT));
+        }
+        if terms.len() > UNSORTED_SHOWN {
+            let (label, msg) = if self.show_all_unsorted {
+                ("Show fewer".to_string(), Msg::ShowAllUnsorted(false))
+            } else {
+                (format!("Show all ({})", terms.len()), Msg::ShowAllUnsorted(true))
+            };
+            block = block.push(
+                container(
+                    button(text(label).size(SIZE_SMALL).style(style::accent))
+                        .padding([0.0, SPACE[0]])
+                        .style(style::row)
+                        .on_press(msg),
+                )
+                .padding(iced::padding::left(INDENT)),
+            );
         }
         if matches!(kind, Some(OrgItem::Term(_))) { self.zone(block, OrgTarget::Unsorted) } else { block.into() }
     }
@@ -1030,7 +1079,7 @@ impl State {
         let mut block = column![toggle].spacing(SPACE[0]);
         if self.show_ignored {
             for t in &self.snap.ignored {
-                block = block.push(self.view_term(t, true, INDENT));
+                block = block.push(self.view_term(t, TermPlace::Ignored, INDENT));
             }
         }
         if matches!(kind, Some(OrgItem::Term(_))) { self.zone(block, OrgTarget::Ignored) } else { block.into() }
@@ -1215,6 +1264,33 @@ mod tests {
     }
 
     #[test]
+    fn unsorted_terms_show_the_most_frequent_until_show_all() {
+        let mut st = state();
+        let names: Vec<String> = (0..UNSORTED_SHOWN + 10).map(|i| format!("Term {i:02}")).collect();
+        add_terms(&st, &names.iter().map(String::as_str).collect::<Vec<_>>());
+        reload(&mut st);
+        assert_eq!(st.shown_unsorted().len(), UNSORTED_SHOWN, "a long list starts short");
+        let _ = st.view();
+        send(&mut st, Msg::ShowAllUnsorted(true));
+        assert_eq!(st.shown_unsorted().len(), UNSORTED_SHOWN + 10);
+        let _ = st.view();
+        send(&mut st, Msg::ShowAllUnsorted(false));
+        assert_eq!(st.shown_unsorted().len(), UNSORTED_SHOWN);
+    }
+
+    #[test]
+    fn a_term_row_offers_moves_from_where_it_is() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        reload(&mut st);
+        let names = |d: Vec<Dest>| d.into_iter().map(|d| d.1).collect::<Vec<_>>();
+        assert_eq!(names(st.term_dests(TermPlace::Unsorted)), ["AI", "Ignored"]);
+        assert_eq!(names(st.term_dests(TermPlace::Category(ai))), ["Unsorted", "Ignored"]);
+        assert_eq!(names(st.term_dests(TermPlace::Ignored)), ["AI", "Unsorted"]);
+    }
+
+    #[test]
     fn delete_group_needs_confirmation() {
         let mut st = state();
         let (ai, tech) = with(&st, |s| (s.create_label("AI").unwrap(), s.create_group("Tech").unwrap()));
@@ -1262,7 +1338,7 @@ mod tests {
         assert!(matches!(by_menu, Effect::Run(op) if Some(&op) == by_drag.as_ref()));
 
         // A term moved to a category, or ignored.
-        let dests = st.dests(OrgItem::Term(t));
+        let dests = st.term_dests(TermPlace::Unsorted);
         for (name, target) in [("AI", OrgTarget::Category(ai)), ("Ignored", OrgTarget::Ignored)] {
             let d = dests.iter().find(|d| d.1 == name).unwrap().clone();
             let by_menu = st.handle(Msg::MoveTo(OrgItem::Term(t), d));
@@ -1508,6 +1584,51 @@ mod tests {
         assert!(plan.new_groups[0].ticked && plan.placements[0].ticked);
         assert!(!plan.new_categories[0].ticked);
         assert_eq!(pending(&st).unwrap().1, *plan);
+    }
+
+    #[test]
+    fn unticking_a_term_keeps_it_unsorted_on_approve() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly", "Avaruus"]);
+        reload(&mut st);
+        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let (a, b) = (term_id(&st, "Tekoäly"), term_id(&st, "Avaruus"));
+        let draft = CategoryDraft {
+            mappings: vec![
+                Mapping { term: a, category: CategoryRef::Existing(ai), ticked: true },
+                Mapping { term: b, category: CategoryRef::Existing(ai), ticked: true },
+            ],
+            ..Default::default()
+        };
+        open_draft(&mut st, &draft);
+        draft_msg(&mut st, DraftMsg::TickTerm(b));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert!(plan.mappings[0].ticked && !plan.mappings[1].ticked);
+        assert_eq!(pending(&st).unwrap().1, *plan, "every edit is stored");
+        draft_msg(&mut st, DraftMsg::ToggleTerms(CategoryRef::Existing(ai)));
+        let _ = st.view();
+        draft_msg(&mut st, DraftMsg::Approve);
+        assert_eq!(with(&st, |s| s.category_terms(ai)).unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [a]);
+        assert!(st.snap.unsorted.iter().any(|t| t.id == b), "the unticked term stays unsorted");
+    }
+
+    #[test]
+    fn leaving_the_screen_drops_a_pressed_row() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        reload(&mut st);
+        let nan = Point::new(f32::NAN, f32::NAN);
+        send(&mut st, Msg::Drag(DragMsg::Press(OrgItem::Category(ai), "AI".into(), nan)));
+        assert!(st.armed());
+        st.cancel_drag();
+        assert!(!st.armed());
+        let (draft, _, t) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+        draft_msg(&mut st, DraftMsg::Drag(DragMsg::Press(DItem::Term(t), "t".into(), nan)));
+        assert!(st.armed(), "a draft row");
+        st.cancel_drag();
+        assert!(!st.armed());
     }
 
     #[test]

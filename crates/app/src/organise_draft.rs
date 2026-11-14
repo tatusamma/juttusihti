@@ -238,6 +238,8 @@ enum Edit {
 #[derive(Debug, Clone)]
 pub enum DraftMsg {
     Tick(Name),
+    /// Ticks or unticks one suggested term mapping.
+    TickTerm(TermId),
     StartRename(Name),
     EditName(String),
     SaveName,
@@ -360,6 +362,13 @@ impl Draft {
                 self.tick_entry(n);
                 Outcome::Changed
             }
+            DraftMsg::TickTerm(t) => match self.plan.mappings.iter_mut().find(|m| m.term == t) {
+                Some(m) => {
+                    m.ticked = !m.ticked;
+                    Outcome::Changed
+                }
+                None => Outcome::None,
+            },
             DraftMsg::StartRename(n) => {
                 self.edit = self.shown_name(n, snap).map(|s| Edit::Rename(n, s));
                 if self.edit.is_some() { Outcome::Focus } else { Outcome::None }
@@ -545,13 +554,13 @@ impl Draft {
         placed.chain(new).collect()
     }
 
-    /// The terms the draft maps to `c` that are still unsorted.
-    fn terms<'a>(&'a self, c: CategoryRef, snap: &'a Snapshot) -> Vec<&'a TermRow> {
+    /// The terms the draft maps to `c` that are still unsorted, with whether each is ticked.
+    fn terms<'a>(&'a self, c: CategoryRef, snap: &'a Snapshot) -> Vec<(&'a TermRow, bool)> {
         self.plan
             .mappings
             .iter()
             .filter(|m| m.category == c)
-            .filter_map(|m| snap.unsorted.iter().find(|t| t.id == m.term))
+            .filter_map(|m| snap.unsorted_at.get(&m.term).map(|&i| (&snap.unsorted[i], m.ticked)))
             .collect()
     }
 
@@ -749,14 +758,21 @@ impl Draft {
         }
         let mut col = column![container(line).padding(iced::padding::left(INDENT).top(2.0).bottom(2.0))];
         if open {
-            for t in terms {
-                let label =
-                    row![text(&t.name).size(SIZE_BODY), text(&t.feed_title).size(SIZE_SMALL).style(style::muted)]
-                        .spacing(SPACE[1])
-                        .align_y(Center);
+            for (t, ticked) in terms {
+                // An unticked term stays unsorted on Approve, so it is drawn faint.
+                let name = text(&t.name).size(SIZE_BODY);
+                let name = if ticked { name } else { name.style(style::faint) };
+                let label = row![name, text(&t.feed_title).size(SIZE_SMALL).style(style::muted)]
+                    .spacing(SPACE[1])
+                    .align_y(Center);
+                let id = t.id;
+                let tick =
+                    checkbox(ticked).size(SIZE_SMALL).style(style::checkbox).on_toggle(move |_| DraftMsg::TickTerm(id));
                 col = col.push(
-                    container(self.grip(DItem::Term(t.id), &t.name, label))
-                        .padding(iced::padding::left(2.0 * INDENT).top(2.0).bottom(2.0)),
+                    container(
+                        row![tick, self.grip(DItem::Term(t.id), &t.name, label)].spacing(SPACE[1]).align_y(Center),
+                    )
+                    .padding(iced::padding::left(2.0 * INDENT).top(2.0).bottom(2.0)),
                 );
             }
         }
