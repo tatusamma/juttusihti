@@ -155,6 +155,14 @@ pub async fn plan(db: Db, catalog: Catalog) -> Result<Box<SuggestPlan>, String> 
 /// Shown instead of an empty draft when the AI proposed nothing.
 pub(crate) const NO_SUGGESTIONS: &str = "The AI suggested no changes. Nothing was saved.";
 
+/// Shown when the AI's grouping put nearly every category into one group.
+pub(crate) const GROUPING_SKIPPED: &str = "The AI put nearly all categories into one group, so no grouping is suggested. Create your own groups, or try again.";
+
+/// Why nothing was saved for an empty `draft`.
+pub(crate) fn empty_reason(draft: &CategoryDraft) -> &'static str {
+    if draft.grouping_skipped { GROUPING_SKIPPED } else { NO_SUGGESTIONS }
+}
+
 /// Sends the consented request and saves the validated answer as the pending
 /// draft: its id, the draft and how many terms wait for a later run.
 pub async fn run(db: Db, plan: SuggestPlan) -> Result<(i64, Box<CategoryDraft>, usize), String> {
@@ -164,7 +172,7 @@ pub async fn run(db: Db, plan: SuggestPlan) -> Result<(i64, Box<CategoryDraft>, 
         .await
         .map_err(|e| e.to_string())?;
     if draft.is_empty() {
-        return Err(NO_SUGGESTIONS.into());
+        return Err(empty_reason(&draft).into());
     }
     let (saved, provider, model) = (draft.clone(), plan.provider, plan.model.clone());
     let id = db.call(move |s| s.save_category_draft(&saved, provider, &model)).await?;
@@ -628,6 +636,9 @@ impl Draft {
         if let Some(line) = vague_line(self.plan.vague.len()) {
             body = body.push(style::note(line));
         }
+        if self.plan.grouping_skipped {
+            body = body.push(style::note(GROUPING_SKIPPED));
+        }
 
         let mut header = column![
             row![icon(Icon::Sparkles).size(SIZE_BODY).style(style::accent), style::title("Suggested categories")]
@@ -852,4 +863,17 @@ fn name_input<'a>(placeholder: &'a str, value: &'a str) -> iced::widget::TextInp
         .size(SIZE_BODY)
         .padding(SPACE[0])
         .width(260)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_draft_says_why_nothing_was_saved() {
+        let mut d = CategoryDraft::default();
+        assert_eq!(empty_reason(&d), NO_SUGGESTIONS);
+        d.grouping_skipped = true;
+        assert_eq!(empty_reason(&d), GROUPING_SKIPPED);
+    }
 }

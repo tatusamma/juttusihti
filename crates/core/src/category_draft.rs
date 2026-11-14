@@ -67,6 +67,10 @@ pub struct CategoryDraft {
     pub placements: Vec<Placement>,
     pub mappings: Vec<Mapping>,
     pub vague: Vec<TermId>,
+    /// The AI's grouping put nearly every category into one group, so no
+    /// grouping is suggested.
+    #[serde(default)]
+    pub grouping_skipped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

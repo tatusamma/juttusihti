@@ -1502,13 +1502,17 @@ mod tests {
         let st = state();
         let plan = suggest_plan(&st, Ok(()));
         assert_eq!(plan.blocker().as_deref(), Some("Nothing is unsorted or ungrouped."));
+        let input = with(&st, |s| {
+            s.create_category("AI").unwrap();
+            s.category_plan_input(MAX_TERMS)
+        })
+        .unwrap();
+        // The worst case follows the input: nothing to send costs nothing.
+        let (worst_in, worst_out) = juttusihti_ai::categorize::estimate_tokens(&input);
         let tight = SuggestPlan {
             limits: juttusihti_core::budget::Limits { max_tokens: Some(10), ..plan.limits },
-            input: with(&st, |s| {
-                s.create_category("AI").unwrap();
-                s.category_plan_input(MAX_TERMS)
-            })
-            .unwrap(),
+            tokens: worst_in + worst_out,
+            input,
             ..(*plan).clone()
         };
         assert!(tight.blocker().unwrap().contains("more than the per-run limit"));
@@ -1557,6 +1561,7 @@ mod tests {
             placements: vec![Placement { category: space, rename: None, group: GroupRef::New(1), ticked: true }],
             mappings: vec![Mapping { term: t, category: CategoryRef::New(1), ticked: true }],
             vague: vec![],
+            grouping_skipped: false,
         };
         (draft, space, t)
     }

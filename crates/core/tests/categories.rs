@@ -676,6 +676,7 @@ mod draft {
             }],
             mappings: vec![mp(a, CategoryRef::New(1)), mp(b, CategoryRef::Existing(loose))],
             vague: vec![],
+            grouping_skipped: false,
         };
         let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
         let r = s.apply_category_draft(id, &d).unwrap();
