@@ -51,7 +51,8 @@ fn groups_request_sends_only_groups_and_categories() {
     assert_eq!(r.user.matches("</data>").count(), 1);
     assert!(r.system.contains("untrusted"));
     assert!(r.system.contains("existing groups") && r.system.contains("new_groups"), "the user's groups are the frame");
-    assert!(r.system.contains("5 to 12") && r.system.contains("never put most categories into one group"));
+    assert!(r.system.contains("5 to 12") && r.system.contains("max_per_group"));
+    assert!(r.system.contains("not a catch-all"), "existing groups do not absorb everything");
     assert!(r.system.contains("any language"));
     assert_eq!(r.reasoning_effort, Some("medium"), "a small request that needs thought");
     assert!(r.web_search.is_none());
@@ -61,6 +62,21 @@ fn groups_request_sends_only_groups_and_categories() {
     assert_eq!(v["categories"][1], json!({"id": 12, "name": "Space", "group_id": null}));
     assert_eq!(props(&r.schema), ["new_groups", "place_categories"]);
     assert_eq!(r.schema["additionalProperties"], false);
+}
+
+#[test]
+fn groups_request_states_the_limit_the_lopsided_check_enforces() {
+    // Seven ungrouped categories: 60 % of them is 4.2, so 4 may share a group and 5 may not.
+    let r = groups_request("m", &seven()).unwrap();
+    assert_eq!(data_of(&r.user)["max_per_group"], 4);
+    let into_one = |n: i64| {
+        json!({"new_groups": [{"ref": "new:1", "name": "Urheilu"}],
+               "place_categories": (21..21 + n).map(|id| json!({"category_id": id, "group": "new:1"})).collect::<Vec<_>>()})
+    };
+    assert!(!lopsided(&into_one(4), &seven()));
+    assert!(lopsided(&into_one(5), &seven()));
+    // Too few ungrouped categories for the check: any group may take them all.
+    assert_eq!(data_of(&groups_request("m", &input()).unwrap().user)["max_per_group"], 2);
 }
 
 #[test]

@@ -22,6 +22,10 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Fixed
 
+- ✨ Suggest categories no longer puts nearly every category into one existing group (such as
+  "Kotimaa") and then suggests no grouping at all. Your groups are now treated as sections, not
+  catch-alls: the AI proposes new sections such as Sport or Culture for the rest, and it is told
+  how many categories one group may take.
 - On Windows, a window no longer flashes in the top-left corner and takes the focus for a
   moment when a full article is fetched. It came from the graphics setup inside the browser
   engine (surfman), which the engine now builds patched.
