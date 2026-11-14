@@ -40,6 +40,8 @@ fn request_wraps_data_and_never_includes_article_text() {
     assert_eq!(r.user.matches("</data>").count(), 1);
     assert!(r.system.contains("untrusted"));
     assert!(r.system.contains("top-level group") && r.system.contains("new_groups"), "asks for groups");
+    assert!(r.system.contains("any language"), "terms in any language map to one category");
+    assert!(r.system.contains("existing groups"), "the user's groups are the frame");
     assert_eq!(r.reasoning_effort, Some("low"));
     assert!(r.web_search.is_none());
     let (_, out) = estimate_tokens(&i);

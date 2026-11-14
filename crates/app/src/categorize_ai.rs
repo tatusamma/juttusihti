@@ -1,7 +1,8 @@
 //! "Find categories with AI", the ✨ on the sidebar's Uncategorized row: a
 //! small consent panel in the sidebar, then one run for the next uncategorized
 //! articles whose feed gave no publisher categories. What the AI finds is
-//! saved directly (it may create new, ungrouped categories).
+//! saved directly (new categories are filed under one of the user's groups,
+//! or Ungrouped when none fits; it never creates groups).
 
 use chrono::Local;
 use iced::widget::{column, row, text};

@@ -16,8 +16,9 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - **Uncategorized**: a row under "All articles" in the categories sidebar lists the articles that
   are in no category, with a count; its ✨ gives one main category to each of the next 100
   uncategorized articles whose feed gave no categories (or only ignored ones), newest first
-  (headlines and descriptions are sent, after you see an estimate). It may create new, ungrouped
-  categories and remembers the articles it checked. This is the one exception to "AI results are
+  (headlines and descriptions are sent, after you see an estimate). It may create new categories,
+  filed under one of your groups (Ungrouped when none fits; it never creates groups), and
+  remembers the articles it checked. This is the one exception to "AI results are
   suggestions": the categories are saved directly, without Review.
 - **Category in the article view**: a Category row shows the article's category and where it
   came from (from the feed, from AI, or set by you) and lets you change it; Automatic clears
@@ -34,6 +35,8 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 - **✨ Suggest categories**: your AI can propose a grouping for your unsorted terms. You see what
   is sent (publisher terms, feed titles, your group and category names; no article text) and an
   estimate first, and the result is an editable draft: nothing is saved until you press Approve.
+  Suggestions file categories under your own groups first and propose a new group only when
+  nothing fits; terms and articles in any language go to the matching category.
 
 ### Changed
 

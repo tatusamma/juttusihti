@@ -1,7 +1,8 @@
 //! Asks the model for categories for uncategorized articles: their headlines
-//! and short descriptions plus the existing category names are sent, in one
-//! request (split once into two halves when it is too big). The model names one
-//! main category per article; the store matches names to existing categories.
+//! and short descriptions plus the group names and the existing category names
+//! with their group are sent, in one request (split once into two halves when it
+//! is too big). The model names one main category per article; the store matches
+//! names to existing categories.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};

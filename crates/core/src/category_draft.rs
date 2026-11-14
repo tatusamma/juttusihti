@@ -14,7 +14,7 @@ use crate::store::Store;
 use crate::{Error, Result, now};
 
 pub const DRAFT_KIND: &str = "category_plan";
-pub const DRAFT_PROMPT_VERSION: &str = "categories-2";
+pub const DRAFT_PROMPT_VERSION: &str = "categories-3";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GroupRef {
