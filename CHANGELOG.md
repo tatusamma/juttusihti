@@ -9,6 +9,8 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
 ### Added
 
 - **Categories**, separate from labels: labels stay as they were (search, analytics, reports, the
@@ -21,8 +23,9 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   remembers the articles it checked. This is the one exception to "AI results are
   suggestions": the categories are saved directly, without Review.
 - **Category in the article view**: a Category row shows the article's category and where it
-  came from (from the feed, from AI, or set by you) and lets you change it; Automatic clears
-  your choice.
+  came from (from the feed, the default of its feed, from AI, or set by you) and lets you change
+  it; Automatic clears your choice. Your choice wins, then publisher categories, then the feed's
+  default category, then AI.
 - **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
   category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
   reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
@@ -44,11 +47,33 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Changed
 
-- The Help screen and README describe labels and categories as separate things.
 - New app icon: a news page going through a funnel, with a feed symbol.
-- An article whose publisher categories are filed under a category no longer also counts in the
-  category AI gave it: your choice wins, then publisher categories, then the feed's default
-  category, then AI.
+- The README is shorter and starts with why Juttusihti exists. The full user guide moved to
+  [docs/guide.md](https://github.com/tero-k/juttusihti/blob/master/docs/guide.md) (the same
+  guide is in the app under F1) and the development notes to
+  [docs/development.md](https://github.com/tero-k/juttusihti/blob/master/docs/development.md).
+  The reader and Categories screenshots are new and use made-up demo news.
+- The Help screen and README describe labels and categories as separate things.
+
+### Security
+
+- `rustix` was updated to 1.1.6 for RUSTSEC-2026-0486. The dependency audit in
+  [SECURITY.md](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md) lists one new
+  advisory that cannot be fixed yet: the SQLite bundled inside the full-article browser engine
+  (pinned by Servo 0.7) has CVE-2026-119375. It needs crafted database files placed in the
+  engine's throwaway profile, which the engine creates for one fetch and then deletes. The app's
+  own database uses the fixed SQLite.
+
+### Known issues
+
+- ✨ Suggest categories was tried against the real service only with OpenAI, in its first form.
+  Its current two-request form, the ✨ on Uncategorized and other providers are covered by tests
+  against local fake servers.
+- Publisher categories are collected from now on: articles fetched before this version get them
+  only if they are still in the feed at the next refresh.
+- With the feed edit form open in a very small window, the feed list shrinks to a row and a half.
+- The first start after the update adds new tables to the database. An older Juttusihti version
+  cannot open the database after that.
 
 ## [0.5.0] - 2026-11-08
 
@@ -251,7 +276,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tero-k/juttusihti/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tero-k/juttusihti/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tero-k/juttusihti/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tero-k/juttusihti/compare/v0.2.1...v0.3.0

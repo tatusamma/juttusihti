@@ -85,11 +85,11 @@ Valuables:
    address.
 5. **Dependency advisories:** see the next section.
 
-### Dependency audit (`cargo audit`, RustSec database of 2026-11-08)
+### Dependency audit (`cargo audit`, RustSec database of 2026-11-14)
 
 **App workspace** (`Cargo.lock`, 654 crates): no vulnerabilities. `arrow` was updated to 60.1.0
-for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays). Warnings, all from
-transitive dependencies:
+for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays), and `rustix` to
+1.1.6 for RUSTSEC-2026-0486 (unsound xattr functions). Warnings, all from transitive dependencies:
 
 | Advisory | Crate | Kind | Path | Assessment |
 |---|---|---|---|---|
@@ -101,10 +101,11 @@ transitive dependencies:
 | RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | build-time proc macro | No runtime exposure. |
 
 **Full-article helper** (`crates/browser/Cargo.lock`, 840 crates, mostly Servo 0.7). Not part of
-the CI audit job, because of the finding below; re-run it by hand in `crates/browser`.
+the CI audit job, because of the findings below; re-run it by hand in `crates/browser`.
 
 | Advisory | Crate | Kind | Path | Assessment |
 |---|---|---|---|---|
+| RUSTSEC-2026-0459 | libsqlite3-sys 0.36.0 (bundled SQLite before 3.54.0) | **vulnerability** (CVE-2026-119375: a crafted database file with a mismatched `-wal` file can make queries return stale process memory; local, medium) | servo-net, servo-storage → rusqlite 0.38 | Servo 0.7 pins rusqlite 0.38, so the fixed libsqlite3-sys 0.39 cannot be used yet. The attack needs someone to place crafted database files where the helper opens them. The helper's databases live in a brand-new profile folder that it creates for one fetch and deletes afterwards, and web pages cannot write raw database files there. The app itself uses rusqlite 0.41 with the fixed SQLite. Re-check when Servo updates. |
 | RUSTSEC-2023-0071 | rsa 0.10.0-rc.18 | **vulnerability** (Marvin attack: timing side channel in RSA decryption, medium) | servo-script (WebCrypto) | No fixed version exists. Only web pages use it, through WebCrypto, with keys they make themselves in a throwaway profile that is deleted after one fetch. Juttusihti holds no RSA keys and the helper never decrypts anything of the user's. WebCrypto stays on because the news sites tested do not render without it. Re-check when Servo updates. |
 | RUSTSEC-2025-0141 | bincode 1.3.3 | unmaintained | Servo internals | No runtime exposure to page input beyond Servo's own IPC. |
 | RUSTSEC-2025-0075/0080/0081/0098/0100 | unic-* 0.9.0 | unmaintained | Servo (Unicode tables) | Static Unicode data. |
