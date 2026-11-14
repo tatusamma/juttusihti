@@ -92,7 +92,7 @@ impl Task {
 
     pub fn label(self) -> &'static str {
         match self {
-            Task::Labels => "Suggest labels",
+            Task::Labels => "Suggest categories",
             Task::Related => "Find related stories",
             Task::Entities => "Extract entities & locations",
             Task::Relevance => "Relevance filtering",

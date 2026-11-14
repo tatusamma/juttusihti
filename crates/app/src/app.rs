@@ -1316,7 +1316,7 @@ impl App {
                 if let Some(p) = self.preview.as_mut() {
                     p.labels = labels;
                 }
-                // Adding a label may have created a new one for the label filter.
+                // Adding a category may have created a new one for the category filter.
                 self.load_sidebar()
             }
             Message::EditFeed(id) => {
@@ -1936,21 +1936,21 @@ impl App {
                 chip = chip
                     .push(chip_button(
                         Icon::Check,
-                        "Accept label",
+                        "Accept category",
                         Message::DecideLabel(id, juttusihti_core::Status::Confirmed),
                     ))
                     .push(chip_button(
                         Icon::Close,
-                        "Reject label",
+                        "Reject category",
                         Message::DecideLabel(id, juttusihti_core::Status::Rejected),
                     ));
             } else {
-                chip = chip.push(chip_button(Icon::Close, "Remove label", Message::RemoveLabel(id)));
+                chip = chip.push(chip_button(Icon::Close, "Remove category", Message::RemoveLabel(id)));
             }
             labels = labels.push(container(chip).padding([2.0, SPACE[1]]).style(style::chip));
         }
         labels = labels.push(
-            text_input("+ label", &self.label_input)
+            text_input("+ category", &self.label_input)
                 .style(style::text_input)
                 .on_input(Message::LabelInput)
                 .on_submit(Message::AddLabel)
@@ -1982,7 +1982,7 @@ impl App {
         let rest = rest
             .push(text(body).size(SIZE_BODY).line_height(1.6).style(style::body))
             .push(rule::horizontal(1))
-            .push(column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
+            .push(column![text("Categories").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
         let width = READ_WIDTH + 2.0 * SPACE[4];
         let picture = p.picture.as_ref().filter(|_| self.settings.values.fulltext_pictures);
         let content: Element<'_, Message> = match picture {

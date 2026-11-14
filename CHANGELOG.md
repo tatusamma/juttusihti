@@ -9,6 +9,29 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Added
+
+- **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
+  category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
+  reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
+  opens the Categories screen.
+- **Groups and publisher categories**: the Categories screen now has groups, **+ New group** and
+  **+ New category**, drag or **Move to…** to file a category, and the section names publishers
+  give their articles, collected as terms you can file, leave in Unsorted or Ignore. Publisher
+  categories are collected from now on; articles fetched earlier get them only if they are
+  still in the feed at the next refresh.
+- **✨ Suggest categories**: your AI can propose a grouping for your unsorted terms. You see what
+  is sent (publisher terms, feed titles, your group and category names; no article text) and an
+  estimate first, and the result is an editable draft: nothing is saved until you press Approve.
+
+### Changed
+
+- **Labels are now called categories** everywhere you see them: the article preview, the
+  filters, Custom analysis, AI tasks, reports and their CSV files. Your existing labels are your
+  categories; nothing was moved or deleted.
+- The Help screen and README describe the sidebar, the Categories screen and ✨ Suggest
+  categories.
+
 ## [0.5.0] - 2026-11-08
 
 ### Added

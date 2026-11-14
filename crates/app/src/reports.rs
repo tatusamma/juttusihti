@@ -188,7 +188,7 @@ impl State {
                 header,
                 style::intro(
                     "Computed by DuckDB on a read-only snapshot of the local database.",
-                    "Computed by DuckDB on a read-only snapshot of the local database. Only confirmed labels and \
+                    "Computed by DuckDB on a read-only snapshot of the local database. Only confirmed categories and \
                      entities are counted unless noted.",
                 ),
             ]
@@ -206,20 +206,20 @@ impl State {
         col = col.push(style::note(format!("Snapshot of {} articles; trends per {}.", d.articles, d.bucket_label)));
         col = col.push(section("Articles per source", Report::Volume, volume_view(&d.volume)));
         col = col.push(section(
-            "Topic evolution (top labels)",
+            "Topic evolution (top categories)",
             Report::LabelTrend,
             trend_view(&d.label_trend, d.bucket_label, false),
         ));
         col =
             col.push(section(
-                "Labels",
+                "Categories",
                 Report::Labels,
                 lines(d.labels.iter().map(|l| {
                     format!("{} — {} confirmed, {} pending AI suggestions", l.label, l.confirmed, l.suggested)
                 })),
             ));
         col = col.push(section(
-            "Labels by source",
+            "Categories by source",
             Report::LabelsBySource,
             lines(d.labels_by_source.iter().map(|c| format!("{} · {}: {}", c.label, c.source, c.articles))),
         ));
@@ -388,25 +388,25 @@ fn export(d: &Data, report: Report) -> (&'static str, String) {
             ),
         ),
         Report::Labels => (
-            "labels",
+            "categories",
             to_csv(
-                &["label", "confirmed", "suggested"],
+                &["category", "confirmed", "suggested"],
                 d.labels.iter().map(|l| vec![l.label.clone().into(), l.confirmed.into(), l.suggested.into()]),
             ),
         ),
         Report::LabelTrend => (
             "topic-evolution",
             to_csv(
-                &["bucket_start", "label", "articles"],
+                &["bucket_start", "category", "articles"],
                 d.label_trend
                     .iter()
                     .map(|t| vec![iso_day(t.bucket_start).into(), t.key.clone().into(), t.articles.into()]),
             ),
         ),
         Report::LabelsBySource => (
-            "labels-by-source",
+            "categories-by-source",
             to_csv(
-                &["label", "source", "articles"],
+                &["category", "source", "articles"],
                 d.labels_by_source
                     .iter()
                     .map(|c| vec![c.label.clone().into(), c.source.clone().into(), c.articles.into()]),

@@ -66,7 +66,7 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Stage::ClickbaitCheck => "Clickbait check",
-            Stage::Extraction => "Labels / entities / relevance",
+            Stage::Extraction => "Categories / entities / relevance",
             Stage::RelationshipValidation => "Related-story validation",
             Stage::ChunkSummaries => "Partial summaries",
             Stage::FinalSummary => "Final summary",

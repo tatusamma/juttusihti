@@ -487,7 +487,7 @@ impl Runner {
         }
         let batches: Vec<(&BTreeSet<Task>, &[&ArticleRecord])> =
             groups.iter().flat_map(|(t, recs)| recs.chunks(EXTRACT_BATCH).map(move |b| (t, b))).collect();
-        self.emit(Progress::Stage { name: "Labels / entities / relevance / headlines", requests: batches.len() });
+        self.emit(Progress::Stage { name: "Categories / entities / relevance / headlines", requests: batches.len() });
         let started = std::time::Instant::now();
         let vocabulary: Vec<String> =
             self.db(|s| s.labels()).map(|l| l.into_iter().map(|l| l.name).collect()).unwrap_or_default();
