@@ -97,6 +97,27 @@ pub struct ApplyStats {
     pub new_categories: usize,
 }
 
+/// A category the AI chose: a name and the existing group it belongs under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiCategory {
+    pub name: String,
+    pub group: Option<GroupId>,
+}
+
+/// An existing category as the AI sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocabCategory {
+    pub name: String,
+    pub group_id: Option<GroupId>,
+}
+
+/// The groups and categories sent to the AI, in tree order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Vocabulary {
+    pub groups: Vec<Group>,
+    pub categories: Vec<VocabCategory>,
+}
+
 /// Characters of content sent when an article has no description.
 const CONTENT_START: usize = 300;
 
@@ -117,15 +138,22 @@ fn clean_category_name(name: &str) -> Result<(String, String)> {
     clean_name(name, "category")
 }
 
-/// Creates a category (last in Ungrouped) or finds the one with the same
-/// normalized name. Returns its id and whether it was created.
-pub(crate) fn insert_category(conn: &Connection, name: &str) -> Result<(CategoryId, bool)> {
+/// Creates a category (last in `group` when it exists, else in Ungrouped) or
+/// finds the one with the same normalized name, which is never moved. Returns
+/// its id and whether it was created.
+pub(crate) fn insert_category(conn: &Connection, name: &str, group: Option<GroupId>) -> Result<(CategoryId, bool)> {
     let (name, normalized) = clean_category_name(name)?;
+    let group = match group {
+        Some(g) => conn
+            .query_row("SELECT id FROM category_groups WHERE id = ?1", [g], |r| r.get::<_, GroupId>(0))
+            .optional()?,
+        None => None,
+    };
     let created = conn.execute(
         "INSERT INTO categories(name, normalized, group_id, position, created_at)
-         VALUES (?1, ?2, NULL, (SELECT COALESCE(MAX(position) + 1, 0) FROM categories WHERE group_id IS NULL), ?3)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position) + 1, 0) FROM categories WHERE group_id IS ?3), ?4)
          ON CONFLICT(normalized) DO NOTHING",
-        params![name, normalized, now()],
+        params![name, normalized, group, now()],
     )? > 0;
     let id = conn.query_row("SELECT id FROM categories WHERE normalized = ?1", [normalized], |r| r.get(0))?;
     Ok((id, created))
@@ -213,6 +241,16 @@ impl Store {
         Ok(CategoryTree { groups, ungrouped, favourites })
     }
 
+    /// All groups and categories, in tree order (groups first, then Ungrouped).
+    pub fn category_vocabulary(&self) -> Result<Vocabulary> {
+        let tree = self.category_tree()?;
+        let vocab = |n: &CategoryNode| VocabCategory { name: n.category.name.clone(), group_id: n.group_id };
+        let mut categories: Vec<VocabCategory> =
+            tree.groups.iter().flat_map(|g| g.categories.iter().map(vocab)).collect();
+        categories.extend(tree.ungrouped.iter().map(vocab));
+        Ok(Vocabulary { groups: tree.groups.into_iter().map(|g| g.group).collect(), categories })
+    }
+
     // ---- categories --------------------------------------------------------
 
     /// All categories, by name.
@@ -224,13 +262,13 @@ impl Store {
     /// Creates a category, last in Ungrouped, or returns the existing one with
     /// the same normalized name.
     pub fn create_category(&self, name: &str) -> Result<CategoryId> {
-        Ok(insert_category(self.conn(), name)?.0)
+        Ok(insert_category(self.conn(), name, None)?.0)
     }
 
     /// Like `create_category`, and says whether it was created (false: a
     /// category with the same normalized name already existed).
     pub fn create_category_checked(&self, name: &str) -> Result<(CategoryId, bool)> {
-        insert_category(self.conn(), name)
+        insert_category(self.conn(), name, None)
     }
 
     pub fn rename_category(&self, id: CategoryId, name: &str) -> Result<()> {
@@ -623,26 +661,26 @@ impl Store {
     }
 
     /// Saves what "find categories with AI" found, in one transaction: a name
-    /// is an existing category (by normalized name) or a new one, last in
-    /// Ungrouped, and becomes the article's AI category. The manual choice is
+    /// is an existing category (by normalized name, never moved) or a new one,
+    /// last in its group (Ungrouped when it has none or the group is gone), and becomes the article's AI category. The manual choice is
     /// never touched. Every `checked` article is marked as sent.
     pub fn apply_article_categories(
         &mut self,
-        results: &[(ArticleId, Option<String>)],
+        results: &[(ArticleId, Option<AiCategory>)],
         checked: &[ArticleId],
     ) -> Result<ApplyStats> {
         let tx = self.conn_mut().transaction()?;
         let mut stats = ApplyStats::default();
         let t = now();
-        for (article, name) in results {
-            let Some(name) = name.as_deref().filter(|n| !normalize_text(n).is_empty()) else { continue };
+        for (article, found) in results {
+            let Some(found) = found.as_ref().filter(|c| !normalize_text(&c.name).is_empty()) else { continue };
             // An article deleted while the request ran is skipped, so the rest applies.
             let exists: bool =
                 tx.query_row("SELECT EXISTS (SELECT 1 FROM articles WHERE id = ?1)", params![article], |r| r.get(0))?;
             if !exists {
                 continue;
             }
-            let (category, created) = insert_category(&tx, name)?;
+            let (category, created) = insert_category(&tx, &found.name, found.group)?;
             stats.new_categories += usize::from(created);
             tx.execute(
                 "INSERT INTO article_categories(article_id, user_category_id, ai_category_id, updated_at)

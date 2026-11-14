@@ -286,7 +286,7 @@ impl Store {
                 skipped += 1;
                 continue;
             };
-            let (category, _) = insert_category(&tx, name)?;
+            let (category, _) = insert_category(&tx, name, None)?;
             let grouped: Option<GroupId> =
                 tx.query_row("SELECT group_id FROM categories WHERE id = ?1", [category], |r| r.get(0))?;
             if grouped.is_none() {

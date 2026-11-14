@@ -2505,7 +2505,7 @@ mod tests {
         let (articles, eligible) =
             app.db.shared().lock().unwrap().articles_to_categorize(app.list_filter(), 100).unwrap();
         let price = Some(Price::chatgpt_plan(&d.model()));
-        Box::new(crate::categorize_ai::Plan::build(&d, articles, eligible, vec!["Space".into()], price, Ok(())))
+        Box::new(crate::categorize_ai::Plan::build(&d, articles, eligible, Default::default(), price, Ok(())))
     }
 
     #[test]

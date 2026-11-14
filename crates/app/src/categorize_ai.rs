@@ -10,7 +10,7 @@ use juttusihti_ai::categorize_articles::{self, MAX_ARTICLES};
 use juttusihti_ai::{Client, RetryPolicy};
 use juttusihti_core::ai_defaults::AiDefaults;
 use juttusihti_core::budget::Limits;
-use juttusihti_core::categories::{ApplyStats, ArticleForCategorizing};
+use juttusihti_core::categories::{ApplyStats, ArticleForCategorizing, Vocabulary};
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Provider, Usage};
 use juttusihti_core::store::ListFilter;
 
@@ -29,8 +29,8 @@ pub struct Plan {
     pub model: String,
     /// Exactly the articles that are sent.
     pub articles: Vec<ArticleForCategorizing>,
-    /// All category names, sent as the vocabulary.
-    pub vocabulary: Vec<String>,
+    /// All groups and categories, sent as the vocabulary.
+    pub vocabulary: Vocabulary,
     /// Articles that could be sent, including these.
     pub eligible: usize,
     /// Worst-case tokens (input and output) and their cost.
@@ -46,7 +46,7 @@ impl Plan {
         d: &AiDefaults,
         articles: Vec<ArticleForCategorizing>,
         eligible: usize,
-        vocabulary: Vec<String>,
+        vocabulary: Vocabulary,
         price: Option<Price>,
         ready: Result<(), String>,
     ) -> Self {
@@ -120,7 +120,7 @@ pub async fn plan(db: Db, catalog: Catalog, filter: ListFilter) -> Result<Box<Pl
     let (articles, eligible, vocabulary) = db
         .call(move |s| -> juttusihti_core::Result<_> {
             let (articles, eligible) = s.articles_to_categorize(filter, MAX_ARTICLES)?;
-            Ok((articles, eligible, s.categories()?.into_iter().map(|c| c.name).collect()))
+            Ok((articles, eligible, s.category_vocabulary()?))
         })
         .await?;
     let price = catalog.price_for(d.provider, &d.model(), d.billing(), Local::now().date_naive());
@@ -228,7 +228,7 @@ mod tests {
     fn the_plan_is_bounded_and_mirrors_the_limits() {
         let d = AiDefaults { billing: Billing::ChatGptPlan, max_tokens: Some(10), ..Default::default() };
         let one = vec![ArticleForCategorizing { id: 1, title: "T".into(), text: "D".into() }];
-        let p = Plan::build(&d, one, 7, vec![], Some(Price::chatgpt_plan(&d.model())), Ok(()));
+        let p = Plan::build(&d, one, 7, Vocabulary::default(), Some(Price::chatgpt_plan(&d.model())), Ok(()));
         assert_eq!(p.heading(), "Find categories for the next article");
         assert!(p.blocker().unwrap().contains("more than the per-run limit"));
         let p = Plan { limits: Limits { max_tokens: None, ..p.limits }, ..p };

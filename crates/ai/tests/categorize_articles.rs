@@ -8,7 +8,7 @@ use std::time::Duration;
 use juttusihti_ai::categorize_articles::{CategorizeError, TEXT_CHARS, categorize, estimate_tokens, parse, request};
 use juttusihti_ai::{AiError, Auth, Client, Endpoint, RetryPolicy, is_context_window_exceeded};
 use juttusihti_core::budget::Limits;
-use juttusihti_core::categories::ArticleForCategorizing;
+use juttusihti_core::categories::{AiCategory, ArticleForCategorizing, Group, VocabCategory, Vocabulary};
 use juttusihti_core::pricing::Provider;
 use juttusihti_core::store::Store;
 use serde_json::{Value, json};
@@ -24,8 +24,14 @@ fn articles() -> Vec<ArticleForCategorizing> {
     vec![article(1, "Rocket launch", "A rocket went up."), article(2, "Election", "Votes were counted.")]
 }
 
-fn vocabulary() -> Vec<String> {
-    vec!["Space".into(), "Politiikka".into()]
+fn vocabulary() -> Vocabulary {
+    Vocabulary {
+        groups: vec![Group { id: 3, name: "Sport".into() }],
+        categories: vec![
+            VocabCategory { name: "Space".into(), group_id: None },
+            VocabCategory { name: "Politiikka".into(), group_id: Some(3) },
+        ],
+    }
 }
 
 fn data_of(user: &str) -> Value {
@@ -47,13 +53,16 @@ fn request_wraps_bounded_data_and_is_strict() {
     assert_eq!(u64::from(r.max_output_tokens), estimate_tokens(&a, &vocabulary()).1);
     assert!(!r.user.contains(&long), "no text beyond the bound");
     let v = data_of(&r.user);
-    assert_eq!(v["categories"], json!(["Space", "Politiikka"]));
+    assert_eq!(v["groups"], json!([{"id": 3, "name": "Sport"}]));
+    assert_eq!(v["categories"], json!([{"name": "Space", "group_id": null}, {"name": "Politiikka", "group_id": 3}]));
     assert_eq!(v["articles"][0], json!({"id": 1, "title": "Rocket launch", "text": "A rocket went up."}));
     assert_eq!(v["articles"][2]["text"].as_str().unwrap().chars().count(), TEXT_CHARS);
     assert_eq!(r.schema["additionalProperties"], false);
     let item = &r.schema["properties"]["articles"]["items"];
     assert_eq!(item["additionalProperties"], false);
-    assert_eq!(item["required"], json!(["id", "category"]));
+    assert_eq!(item["required"], json!(["id", "category", "group"]));
+    assert!(r.system.contains("any language"), "multilingual matching is asked for");
+    assert!(r.system.contains("never create a group") || r.system.contains("Never create a group"));
 }
 
 #[test]
@@ -81,8 +90,27 @@ fn parse_keeps_one_category_per_article() {
         {"id": 99, "category": "Space"},
         {"id": 1, "category": "Politiikka"}
     ]});
-    let got = parse(&v, &articles()).unwrap();
-    assert_eq!(got, vec![(1, Some("Space".to_string())), (2, None)]);
+    let got = parse(&v, &articles(), &vocabulary()).unwrap();
+    assert_eq!(got, vec![(1, Some(AiCategory { name: "Space".into(), group: None })), (2, None)]);
+}
+
+#[test]
+fn parse_reads_group_refs() {
+    let v = json!({"articles": [
+        {"id": 1, "category": "Jalkapallo", "group": "id:3"},
+        {"id": 2, "category": "Vaalit", "group": "id:99"},
+        {"id": 3, "category": "X", "group": "Sport"},
+        {"id": 4, "category": "Y", "group": "new:1"},
+        {"id": 5, "category": "", "group": "id:3"},
+    ]});
+    let a: Vec<_> = (1..=5).map(|i| article(i, "t", "x")).collect();
+    let found = parse(&v, &a, &vocabulary()).unwrap();
+    let g = |i: usize| found[i].1.as_ref().map(|c| c.group);
+    assert_eq!(g(0), Some(Some(3)));
+    assert_eq!(g(1), Some(None), "unknown group id");
+    assert_eq!(g(2), Some(None));
+    assert_eq!(g(3), Some(None));
+    assert_eq!(found[4].1, None, "empty name means no category");
 }
 
 #[test]
@@ -94,8 +122,8 @@ fn prompt_asks_for_a_single_main_category() {
 
 #[test]
 fn malformed_answers_are_errors() {
-    assert!(parse(&json!([]), &articles()).is_err());
-    assert!(parse(&json!({"x": []}), &articles()).is_err());
+    assert!(parse(&json!([]), &articles(), &vocabulary()).is_err());
+    assert!(parse(&json!({"x": []}), &articles(), &vocabulary()).is_err());
 }
 
 #[test]
@@ -159,7 +187,7 @@ fn reply_for(r: &Recorded) -> MockReply {
 async fn run_with(
     handler: common::Handler,
     n: i64,
-) -> (common::Mock, Result<Vec<(i64, Option<String>)>, CategorizeError>, Arc<Mutex<Store>>) {
+) -> (common::Mock, Result<Vec<(i64, Option<AiCategory>)>, CategorizeError>, Arc<Mutex<Store>>) {
     let server = mock(handler).await;
     let endpoint =
         Endpoint { provider: Provider::Openai, base_url: server.base.clone(), auth: Auth::ApiKey("k".into()) };
@@ -263,6 +291,35 @@ async fn the_second_half_knows_the_first_halfs_new_categories() {
             .unwrap()
             .to_string()
     };
-    assert_eq!(data_of(&user(&reqs[1]))["categories"], json!(["Space", "Politiikka"]));
-    assert_eq!(data_of(&user(&reqs[2]))["categories"], json!(["Space", "Politiikka", "Avaruus"]));
+    assert_eq!(
+        data_of(&user(&reqs[1]))["categories"],
+        json!([{"name": "Space", "group_id": null}, {"name": "Politiikka", "group_id": 3}])
+    );
+    assert_eq!(
+        data_of(&user(&reqs[2]))["categories"],
+        json!([{"name": "Space", "group_id": null}, {"name": "Politiikka", "group_id": 3}, {"name": "Avaruus", "group_id": null}])
+    );
+}
+
+#[tokio::test]
+async fn split_passes_new_categories_with_groups() {
+    let handler: common::Handler = Arc::new(|r, n| {
+        if n == 0 {
+            return too_long();
+        }
+        let items: Vec<Value> =
+            sent_ids(r).iter().map(|id| json!({"id": id, "category": "Jalkapallo", "group": "id:3"})).collect();
+        answer(&json!({ "articles": items }).to_string())
+    });
+    let (server, r, _) = run_with(handler, 4).await;
+    r.unwrap();
+    let reqs = server.requests();
+    let user = reqs[2].body["input"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        data_of(&user)["categories"].as_array().unwrap().contains(&json!({"name": "Jalkapallo", "group_id": 3})),
+        "the second half sees the new category under its group"
+    );
 }

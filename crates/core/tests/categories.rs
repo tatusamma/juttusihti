@@ -1035,7 +1035,8 @@ fn apply_writes_one_ai_category_and_never_manual() {
     // The user chose a category for `mid` by hand: AI must not change that.
     s.set_article_category(mid, Some(mine)).unwrap();
 
-    let results = vec![(new, Some("  space ".to_string())), (mid, Some("Tiede".to_string())), (old, Some("  ".into()))];
+    let ai = |n: &str| Some(AiCategory { name: n.into(), group: None });
+    let results = vec![(new, ai("  space ")), (mid, ai("Tiede")), (old, ai("  "))];
     let sent = [new, mid, old];
     let stats = s.apply_article_categories(&results, &sent).unwrap();
     assert_eq!(stats.new_categories, 1, "Tiede is created");
@@ -1059,8 +1060,48 @@ fn apply_writes_one_ai_category_and_never_manual() {
     assert_eq!(count(&s, "categories"), 4, "L, Space, Mine and Tiede");
     assert_eq!(count(&s, "category_ai_checks"), 3);
     // A later result replaces the earlier AI choice.
-    s.apply_article_categories(&[(new, Some("Tiede".into()))], &[new]).unwrap();
+    s.apply_article_categories(&[(new, ai("Tiede"))], &[new]).unwrap();
     assert_eq!(choices(&s, new), (None, Some(tiede)));
+}
+
+#[test]
+fn apply_files_new_category_into_named_group() {
+    let mut s = to_categorize_data();
+    let (new, mid, old) = (article_id(&s, "new"), article_id(&s, "mid"), article_id(&s, "old"));
+    let sport = s.create_group("Sport").unwrap();
+    let science = s.create_group("Science").unwrap();
+    let existing = s.create_category("Space").unwrap(); // ungrouped
+    let ai = |n: &str, g| Some(AiCategory { name: n.into(), group: g });
+    let results = vec![
+        (new, ai("Jalkapallo", Some(sport))),
+        (mid, ai("jalkapallo", Some(science))), // same new name, other group: first wins
+        (old, ai("space", Some(science))),      // existing: never moved
+    ];
+    s.apply_article_categories(&results, &[new, mid, old]).unwrap();
+    let tree = s.category_tree().unwrap();
+    let in_group = |g| {
+        tree.groups
+            .iter()
+            .find(|n| n.group.id == g)
+            .unwrap()
+            .categories
+            .iter()
+            .map(|c| c.category.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(in_group(sport), ["Jalkapallo"]);
+    assert!(in_group(science).is_empty());
+    assert!(tree.ungrouped.iter().any(|c| c.category.id == existing), "Space stays ungrouped");
+    // A group deleted meanwhile means Ungrouped.
+    let gone = s.create_group("Gone").unwrap();
+    s.delete_group(gone).unwrap();
+    s.apply_article_categories(&[(new, ai("Tennis", Some(gone)))], &[new]).unwrap();
+    let tree = s.category_tree().unwrap();
+    assert_eq!(tree.ungrouped.last().unwrap().category.name, "Tennis");
+    assert_eq!(
+        s.category_vocabulary().unwrap().categories.iter().find(|c| c.name == "Jalkapallo").unwrap().group_id,
+        Some(sport)
+    );
 }
 
 #[test]
@@ -1068,7 +1109,8 @@ fn apply_skips_articles_deleted_meanwhile() {
     let mut s = to_categorize_data();
     let (new, mid, old) = (article_id(&s, "new"), article_id(&s, "mid"), article_id(&s, "old"));
     s.conn().execute("DELETE FROM articles WHERE id = ?1", [mid]).unwrap();
-    let results = vec![(new, Some("Space".to_string())), (mid, Some("Tiede".to_string())), (old, None)];
+    let ai = |n: &str| Some(AiCategory { name: n.into(), group: None });
+    let results = vec![(new, ai("Space")), (mid, ai("Tiede")), (old, None)];
     let stats = s.apply_article_categories(&results, &[new, mid, old]).unwrap();
     assert_eq!(stats.categorized, 1);
     assert_eq!(stats.new_categories, 1, "only Space; the deleted article's Tiede is not created");
