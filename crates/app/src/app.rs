@@ -645,11 +645,12 @@ impl App {
         let page = self.page;
         let query = self.list_query();
         // An open quick panel follows the list being viewed.
-        let retarget = if self.quick.open && !self.quick.is_running() && !self.quick.targets(&query) {
-            self.quick.open(query.clone(), self.quick_label()).map(Message::Quick)
-        } else {
-            Task::none()
-        };
+        let retarget =
+            if self.quick.open && !self.quick.is_running() && !self.quick.is_pinned() && !self.quick.targets(&query) {
+                self.quick.open(query.clone(), self.quick_label()).map(Message::Quick)
+            } else {
+                Task::none()
+            };
         let load = Task::perform(async move { db.call(move |s| read_listing(s, &query, page)).await }, move |r| {
             Message::ListLoaded(generation, r)
         });
@@ -2301,6 +2302,18 @@ mod tests {
         assert_eq!(app.quick.selected_tasks(), [Task::Labels].into_iter().collect());
         assert_eq!(app.quick.scope_label(), "Uncategorized articles without publisher categories");
         assert!(!app.list_query().without_terms, "the list itself still shows every uncategorized article");
+    }
+
+    #[test]
+    fn uncategorized_ai_scope_survives_list_reloads() {
+        use juttusihti_core::analysis::Task;
+        let (mut app, _) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
+        let _ = app.load_list();
+        let _ = app.update(Message::ToggleHideDismissed);
+        let _ = app.update(Message::ToggleHideDismissed);
+        assert!(app.quick.scope().without_terms && app.quick.scope().uncategorized);
+        assert_eq!(app.quick.selected_tasks(), [Task::Labels].into_iter().collect());
     }
 
     #[test]

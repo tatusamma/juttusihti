@@ -166,6 +166,11 @@ impl State {
         cmd
     }
 
+    /// Whether the panel was opened for a special scope that list reloads must not change.
+    pub fn is_pinned(&self) -> bool {
+        self.preset_tasks
+    }
+
     #[cfg(test)]
     pub fn scope(&self) -> &SearchQuery {
         &self.scope
