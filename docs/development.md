@@ -274,6 +274,13 @@ tokenizer, or AI-assisted query expansion.
   Fact Check Tools, with evidence rules enforced in code. Tried against OpenAI on a ChatGPT plan;
   OpenAI with an API key, Anthropic and Gemini are tested against local fake servers only.
   Released in 0.5.0. Details: [fact-check.md](fact-check.md).
+- **Categories**: done. Groups and categories apart from labels; publisher terms are collected per
+  feed and filed under categories; membership is worked out in SQL (your choice, then publisher
+  terms, then the feed's default category, then AI), by the list filter and by one counts
+  statement that a test compares under every scope and view. ✨ Suggest categories (two requests,
+  an editable draft) was tried against OpenAI in its first, one-request form; the two-request
+  form, the ✨ on Uncategorized with groups, feed defaults and feeds in groups are covered by
+  tests. Released in 0.6.0.
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).
