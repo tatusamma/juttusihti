@@ -12,11 +12,11 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 ### Added
 
 - **Uncategorized**: a row under "All articles" in the categories sidebar lists the articles that
-  are in no category, with a count; select it and use ✨ to have AI suggest categories for them.
+  are in no category, with a count; its ✨ has AI suggest categories for the uncategorized articles whose feed gave no categories; confirm them in Review.
 - **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
   category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
   reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
-  opens the Categories screen.
+  (at the top of the sidebar) opens the Categories screen.
 - **Groups and publisher categories**: the Categories screen now has groups, **+ New group** and
   **+ New category**, drag or **Move to…** to file a category, and the section names publishers
   give their articles, collected as terms you can file, leave in Unsorted or Ignore. Publisher

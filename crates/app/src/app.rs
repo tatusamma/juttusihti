@@ -770,6 +770,21 @@ impl App {
                 self.screen = Screen::Reader;
                 self.load_list()
             }
+            Some(category_sidebar::Event::FindWithAi) => {
+                self.close_overlays();
+                self.category = Selection::Uncategorized;
+                self.page = Page::first(PAGE_SIZE);
+                self.screen = Screen::Reader;
+                // The list loads first: an open panel would otherwise follow it back to the plain query.
+                let load = self.load_list();
+                let scope = SearchQuery { without_terms: true, ..self.list_query() };
+                let label = "Uncategorized articles without publisher categories".to_string();
+                let open = self
+                    .quick
+                    .open_for(scope, label, [juttusihti_core::analysis::Task::Labels].into())
+                    .map(Message::Quick);
+                Task::batch([load, open])
+            }
             Some(category_sidebar::Event::Organise) => self.update(Message::ShowScreen(Screen::Organise)),
             // A group's articles change when categories move in or out of it.
             Some(category_sidebar::Event::Changed) if matches!(self.category, Selection::Group(_)) => self.load_list(),
@@ -2263,6 +2278,41 @@ mod tests {
         assert!(app.is_filtered());
         select(&mut app, Selection::All);
         assert!(!app.list_query().uncategorized);
+    }
+
+    #[test]
+    fn organise_link_in_the_sidebar_header_opens_the_categories_screen() {
+        let (mut app, _) = app_with_categories();
+        assert_eq!(app.categories.handle(SidebarMsg::Organise), SidebarEffect::Organise);
+        let _ = app.update(Message::Categories(SidebarMsg::Organise));
+        assert_eq!(app.screen, Screen::Organise);
+    }
+
+    #[test]
+    fn uncategorized_sparkles_opens_ai_for_articles_without_publisher_categories() {
+        use juttusihti_core::analysis::Task;
+        let (mut app, _) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
+        assert_eq!(app.category, Selection::Uncategorized);
+        assert!(app.quick.open);
+        let scope = app.quick.scope();
+        assert!(scope.uncategorized && scope.without_terms);
+        assert_eq!(*scope, SearchQuery { without_terms: true, ..app.list_query() });
+        assert_eq!(app.quick.selected_tasks(), [Task::Labels].into_iter().collect());
+        assert_eq!(app.quick.scope_label(), "Uncategorized articles without publisher categories");
+        assert!(!app.list_query().without_terms, "the list itself still shows every uncategorized article");
+    }
+
+    #[test]
+    fn list_sparkles_keeps_the_plain_query_and_default_tasks() {
+        let (mut app, _) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
+        let _ = app.update(Message::OpenQuick); // closes
+        let _ = app.update(Message::OpenQuick);
+        assert!(app.quick.open);
+        assert_eq!(*app.quick.scope(), app.list_query());
+        assert!(!app.quick.scope().without_terms);
+        assert!(app.quick.selected_tasks().is_empty(), "defaults are filled in when they load");
     }
 
     #[test]

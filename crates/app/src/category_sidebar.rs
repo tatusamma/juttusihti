@@ -117,6 +117,7 @@ pub enum Effect {
     Reload,
     Run(Op),
     Select(Selection),
+    FindWithAi,
     Organise,
     /// New tree and counts arrived.
     Loaded,
@@ -127,6 +128,8 @@ pub enum Effect {
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Select(Selection),
+    /// The ✨ on Uncategorized: select it and open AI for the articles without publisher categories.
+    FindWithAi,
     Organise,
     /// The tree was reloaded; the selection may be gone.
     Loaded,
@@ -144,6 +147,8 @@ pub enum Msg {
     /// « and », and the c key.
     Toggle,
     Select(Selection),
+    /// The ✨ on the Uncategorized row.
+    FindWithAi,
     Fold(GroupId),
     Find(String),
     ClearFind,
@@ -229,6 +234,7 @@ impl State {
                 (Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, done), None)
             }
             Effect::Select(s) => (Cmd::none(), Some(Event::Select(s))),
+            Effect::FindWithAi => (Cmd::none(), Some(Event::FindWithAi)),
             Effect::Organise => (Cmd::none(), Some(Event::Organise)),
             Effect::Loaded => (Cmd::none(), Some(Event::Loaded)),
             Effect::Failed(e) => (Cmd::none(), Some(Event::Failed(e))),
@@ -310,6 +316,10 @@ impl State {
                 if let Some(item) = click {
                     return self.handle(Msg::Select(item.selection()));
                 }
+            }
+            Msg::FindWithAi => {
+                self.menu = None;
+                return Effect::FindWithAi;
             }
             Msg::Organise => return Effect::Organise,
             Msg::Done(Ok(())) => return Effect::Reload,
@@ -479,6 +489,10 @@ impl State {
     pub fn view(&self, selected: Selection) -> Element<'_, Msg> {
         let header = row![
             text("Categories").size(SIZE_SMALL).style(style::muted).width(Fill),
+            button(text("Organise…").size(SIZE_SMALL).style(style::accent))
+                .padding([0.0, SPACE[1]])
+                .style(style::row)
+                .on_press(Msg::Organise),
             tooltip(
                 button(text("«").size(SIZE_BODY)).padding([0.0, SPACE[1]]).style(style::icon).on_press(Msg::Toggle),
                 style::tip("Hide categories (c)"),
@@ -537,12 +551,16 @@ impl State {
         let dragged = self.dragged();
         let mut col = column![
             plain_row(text("All articles").size(SIZE_BODY).into(), None, selected == Selection::All, Selection::All),
-            plain_row(
-                text("Uncategorized").size(SIZE_BODY).into(),
-                self.count(Selection::Uncategorized),
-                selected == Selection::Uncategorized,
-                Selection::Uncategorized
-            ),
+            row![
+                plain_row(
+                    text("Uncategorized").size(SIZE_BODY).into(),
+                    self.count(Selection::Uncategorized),
+                    selected == Selection::Uncategorized,
+                    Selection::Uncategorized
+                ),
+                style::icon_button(Icon::Sparkles, "Find categories with AI", SIZE_SMALL, Some(Msg::FindWithAi)),
+            ]
+            .align_y(Center),
         ]
         .spacing(1);
 
@@ -591,11 +609,7 @@ impl State {
         if self.tree.groups.is_empty() && self.tree.ungrouped.is_empty() {
             col = col.push(container(style::note("No categories yet.")).padding([SPACE[0], SPACE[1]]));
         }
-        let organise = button(text("Organise…").size(SIZE_SMALL).style(style::accent))
-            .padding([SPACE[1], SPACE[1]])
-            .style(style::row)
-            .on_press(Msg::Organise);
-        col.push(Space::new().height(SPACE[0])).push(organise).into()
+        col.into()
     }
 
     fn view_group<'a>(&'a self, g: &'a GroupNode, selected: Selection, dragged: Option<Item>) -> Element<'a, Msg> {

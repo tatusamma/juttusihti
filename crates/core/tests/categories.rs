@@ -785,3 +785,59 @@ fn counts_include_uncategorized_and_follow_the_view() {
     let unread = ListFilter { view: View::Unread, ..Default::default() };
     assert_eq!(s.category_counts(unread).unwrap().uncategorized, 2);
 }
+
+/// (a) unsorted term, (b) mapped term, (c) no terms but an AI suggestion, (d) nothing,
+/// (e) no terms but a confirmed label.
+fn without_terms_data() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("a", &["Odd"]), entry("b", &["AI"]), entry("c", &[]), entry("d", &[]), entry("e", &[])])
+        .unwrap();
+    let l = s.create_label("L").unwrap();
+    let m = s.create_label("M").unwrap();
+    s.map_term(term_id(&s, "AI"), Some(m)).unwrap();
+    s.tag_article(article_id(&s, "c"), l, Origin::Ai, None).unwrap();
+    s.tag_article(article_id(&s, "e"), l, Origin::User, None).unwrap();
+    s
+}
+
+#[test]
+fn without_terms_filter_excludes_articles_with_publisher_terms() {
+    let s = without_terms_data();
+    let q = SearchQuery { uncategorized: true, without_terms: true, ..Default::default() };
+    let r = s.search(&q, Page { limit: 50, offset: 0 }).unwrap();
+    let mut guids: Vec<String> = r.items.iter().map(|i| s.article(i.id).unwrap().guid).collect();
+    guids.sort();
+    assert_eq!(guids, ["c", "d"]);
+}
+
+#[test]
+fn analysis_scope_covers_exactly_the_articles_without_terms() {
+    use juttusihti_core::analysis::{AnalysisConfig, ClickbaitCheck, Depth, Task};
+    use juttusihti_core::budget::Limits;
+    use juttusihti_core::pricing::Provider;
+    let s = without_terms_data();
+    let config = AnalysisConfig {
+        scope: SearchQuery { uncategorized: true, without_terms: true, ..Default::default() },
+        range_label: String::new(),
+        provider: Provider::Anthropic,
+        model: "claude-haiku-5-5".into(),
+        depth: Depth::HeadlinesAndDescriptions,
+        tasks: [Task::Labels].into_iter().collect(),
+        limits: Limits::default(),
+        max_articles: 100,
+        reuse_cached: true,
+        use_batch: false,
+        billing: Default::default(),
+        relevance_criteria: None,
+        clickbait: ClickbaitCheck::off(),
+        parallel_requests: 4,
+    };
+    let scope = s.analysis_scope(&config).unwrap();
+    assert_eq!(scope.stats.matched, 2);
+    let mut ids = scope.selected_ids.clone();
+    ids.sort();
+    let mut want = vec![article_id(&s, "c"), article_id(&s, "d")];
+    want.sort();
+    assert_eq!(ids, want);
+}

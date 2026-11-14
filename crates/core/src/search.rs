@@ -423,6 +423,9 @@ pub struct SearchQuery {
     /// Only articles in no category (confirmed labels and mapped terms count).
     #[serde(default)]
     pub uncategorized: bool,
+    /// Only articles whose feed gave no category terms at all.
+    #[serde(default)]
+    pub without_terms: bool,
     pub entity_ids: Vec<i64>,
     pub event_ids: Vec<i64>,
     /// Also match AI suggestions that the user has not yet confirmed.
@@ -520,6 +523,9 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     }
     if q.uncategorized {
         sql.push_str(&format!(" AND NOT ({})", membership("IS NOT NULL", "('confirmed')")));
+    }
+    if q.without_terms {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM article_terms t WHERE t.article_id = a.id)");
     }
     for id in &q.entity_ids {
         sql.push_str(&format!(

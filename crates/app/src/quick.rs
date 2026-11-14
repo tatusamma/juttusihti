@@ -64,6 +64,8 @@ pub struct State {
     defaults: Option<AiDefaults>,
     ready: Option<Result<(), String>>,
     tasks: BTreeSet<Task>,
+    /// `tasks` were set by [`State::open_for`] rather than chosen or defaulted.
+    preset_tasks: bool,
     generation: u64,
     estimate: Option<(AnalysisConfig, Estimate)>,
     run: Option<Running>,
@@ -84,6 +86,7 @@ impl State {
             defaults: None,
             ready: None,
             tasks: BTreeSet::new(),
+            preset_tasks: false,
             generation: 0,
             estimate: None,
             run: None,
@@ -135,6 +138,10 @@ impl State {
     /// fresh defaults and estimate.
     pub fn open(&mut self, scope: SearchQuery, label: String) -> Cmd<Msg> {
         self.open = true;
+        // Tasks chosen for a special scope do not carry over to the plain list.
+        if std::mem::take(&mut self.preset_tasks) {
+            self.tasks.clear();
+        }
         if self.run.is_none() && (self.scope != scope || self.scope_label != label) {
             self.scope = scope;
             self.scope_label = label;
@@ -149,6 +156,29 @@ impl State {
             },
             Msg::Loaded,
         )
+    }
+
+    /// Opens the panel for `scope` with exactly `tasks` ticked (instead of the saved defaults).
+    pub fn open_for(&mut self, scope: SearchQuery, label: String, tasks: BTreeSet<Task>) -> Cmd<Msg> {
+        let cmd = self.open(scope, label);
+        self.tasks = tasks;
+        self.preset_tasks = true;
+        cmd
+    }
+
+    #[cfg(test)]
+    pub fn scope(&self) -> &SearchQuery {
+        &self.scope
+    }
+
+    #[cfg(test)]
+    pub fn scope_label(&self) -> &str {
+        &self.scope_label
+    }
+
+    #[cfg(test)]
+    pub fn selected_tasks(&self) -> BTreeSet<Task> {
+        self.tasks.clone()
     }
 
     fn estimate(&mut self) -> Cmd<Msg> {
