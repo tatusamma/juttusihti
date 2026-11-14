@@ -632,6 +632,7 @@ impl App {
                 Selection::Category(c) => vec![c],
                 _ => vec![],
             },
+            uncategorized: self.category == Selection::Uncategorized,
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
         }
@@ -2250,6 +2251,35 @@ mod tests {
         assert_eq!(app.quick_label(), "All feeds in “Tech”");
         select(&mut app, Selection::All);
         assert!(app.list_query().group_ids.is_empty());
+    }
+
+    #[test]
+    fn selecting_uncategorized_filters_to_uncategorized() {
+        let (mut app, _) = app_with_categories();
+        select(&mut app, Selection::Uncategorized);
+        let q = app.list_query();
+        assert!(q.uncategorized && q.group_ids.is_empty() && q.label_ids.is_empty());
+        assert_eq!(app.quick_label(), "All feeds in “Uncategorized”");
+        assert!(app.is_filtered());
+        select(&mut app, Selection::All);
+        assert!(!app.list_query().uncategorized);
+    }
+
+    #[test]
+    fn mark_all_read_with_uncategorized_marks_only_the_matches() {
+        let (mut app, a, b) = app_with_articles();
+        {
+            let shared = app.db.shared();
+            let s = shared.lock().unwrap();
+            let l = s.create_label("Tech").unwrap();
+            s.tag_article(a, l, juttusihti_core::Origin::User, None).unwrap();
+        }
+        reload_categories(&mut app);
+        select(&mut app, Selection::Uncategorized);
+        app.read_scope().apply(&app.db.shared().lock().unwrap()).unwrap();
+        let read = |app: &App, id| app.db.shared().lock().unwrap().article(id).unwrap().is_read;
+        assert!(!read(&app, a), "a categorized article stays unread");
+        assert!(read(&app, b));
     }
 
     #[test]

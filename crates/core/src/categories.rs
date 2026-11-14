@@ -55,6 +55,8 @@ pub struct TermRow {
 pub struct CategoryCounts {
     pub groups: HashMap<GroupId, u64>,
     pub categories: HashMap<LabelId, u64>,
+    /// Articles in no category.
+    pub uncategorized: u64,
 }
 
 fn clean_group_name(name: &str) -> Result<(String, String)> {
@@ -307,7 +309,7 @@ impl Store {
 
     /// Distinct article counts per category and per group (confirmed labels
     /// plus mapped publisher terms), restricted like a list. One statement:
-    /// the memberships are worked out once and both counts read them.
+    /// the memberships are worked out once and the counts read them.
     pub fn category_counts(&self, filter: ListFilter) -> Result<CategoryCounts> {
         let view = match filter.view {
             View::All => "",
@@ -331,7 +333,11 @@ impl Store {
              SELECT 0, label_id, COUNT(*) FROM scoped GROUP BY label_id
              UNION ALL
              SELECT 1, l.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
-             JOIN labels l ON l.id = s.label_id WHERE l.group_id IS NOT NULL GROUP BY l.group_id"
+             JOIN labels l ON l.id = s.label_id WHERE l.group_id IS NOT NULL GROUP BY l.group_id
+             UNION ALL
+             SELECT 2, 0, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
+             WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
+               AND a.id NOT IN (SELECT article_id FROM scoped)"
         );
         let mut out = CategoryCounts::default();
         let mut stmt = self.conn().prepare(&sql)?;
@@ -341,7 +347,11 @@ impl Store {
         for r in rows {
             match r? {
                 (0, id, n) => out.categories.insert(id, n),
-                (_, id, n) => out.groups.insert(id, n),
+                (1, id, n) => out.groups.insert(id, n),
+                (_, _, n) => {
+                    out.uncategorized = n;
+                    None
+                }
             };
         }
         Ok(out)

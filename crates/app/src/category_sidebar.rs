@@ -1,5 +1,5 @@
 //! The categories sidebar of the reader, between the rail and the article list:
-//! All articles, Favourites, the groups with their categories, Ungrouped and
+//! All articles, Uncategorized, Favourites, the groups with their categories, Ungrouped and
 //! Organise…. Clicking a row picks what the list shows; dragging it reorders
 //! favourites, groups and categories (the same order as the Organise screen).
 //! "Find category…" turns the tree into a flat list of matching names.
@@ -33,6 +33,8 @@ const INDENT: f32 = 18.0;
 pub enum Selection {
     #[default]
     All,
+    /// Articles in no category.
+    Uncategorized,
     Group(GroupId),
     Category(LabelId),
 }
@@ -376,7 +378,7 @@ impl State {
     /// Whether the selection still exists.
     pub fn contains(&self, s: Selection) -> bool {
         match s {
-            Selection::All => true,
+            Selection::All | Selection::Uncategorized => true,
             Selection::Group(g) => self.group(g).is_some(),
             Selection::Category(c) => self.node(c).is_some(),
         }
@@ -386,6 +388,7 @@ impl State {
     pub fn name(&self, s: Selection) -> Option<&str> {
         match s {
             Selection::All => None,
+            Selection::Uncategorized => Some("Uncategorized"),
             Selection::Group(g) => self.group(g).map(|g| g.group.name.as_str()),
             Selection::Category(c) => self.node(c).map(|c| c.label.name.as_str()),
         }
@@ -403,6 +406,7 @@ impl State {
     fn count(&self, s: Selection) -> Option<u64> {
         match s {
             Selection::All => None,
+            Selection::Uncategorized => Some(self.counts.uncategorized),
             Selection::Group(g) => Some(self.counts.groups.get(&g).copied().unwrap_or(0)),
             Selection::Category(c) => Some(self.counts.categories.get(&c).copied().unwrap_or(0)),
         }
@@ -531,12 +535,15 @@ impl State {
 
     fn view_tree(&self, selected: Selection) -> Element<'_, Msg> {
         let dragged = self.dragged();
-        let mut col = column![plain_row(
-            text("All articles").size(SIZE_BODY).into(),
-            None,
-            selected == Selection::All,
-            Selection::All
-        )]
+        let mut col = column![
+            plain_row(text("All articles").size(SIZE_BODY).into(), None, selected == Selection::All, Selection::All),
+            plain_row(
+                text("Uncategorized").size(SIZE_BODY).into(),
+                self.count(Selection::Uncategorized),
+                selected == Selection::Uncategorized,
+                Selection::Uncategorized
+            ),
+        ]
         .spacing(1);
 
         if !self.tree.favourites.is_empty() {

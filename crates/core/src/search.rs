@@ -420,6 +420,9 @@ pub struct SearchQuery {
     /// Articles must be in at least one category of each of these groups.
     #[serde(default)]
     pub group_ids: Vec<i64>,
+    /// Only articles in no category (confirmed labels and mapped terms count).
+    #[serde(default)]
+    pub uncategorized: bool,
     pub entity_ids: Vec<i64>,
     pub event_ids: Vec<i64>,
     /// Also match AI suggestions that the user has not yet confirmed.
@@ -496,7 +499,7 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
         params.push(Value::Integer(to));
     }
     let statuses = if q.include_suggested { "('confirmed','suggested')" } else { "('confirmed')" };
-    let membership = |target: &str| {
+    let membership = |target: &str, statuses: &str| {
         format!(
             "EXISTS (SELECT 1 FROM article_labels x WHERE x.article_id = a.id AND x.label_id {target} AND x.status IN {statuses})
              OR EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
@@ -506,14 +509,17 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
         )
     };
     for id in &q.label_ids {
-        sql.push_str(&format!(" AND ({})", membership("= ?")));
+        sql.push_str(&format!(" AND ({})", membership("= ?", statuses)));
         params.push(Value::Integer(*id));
         params.push(Value::Integer(*id));
     }
     for id in &q.group_ids {
-        sql.push_str(&format!(" AND ({})", membership("IN (SELECT id FROM labels WHERE group_id = ?)")));
+        sql.push_str(&format!(" AND ({})", membership("IN (SELECT id FROM labels WHERE group_id = ?)", statuses)));
         params.push(Value::Integer(*id));
         params.push(Value::Integer(*id));
+    }
+    if q.uncategorized {
+        sql.push_str(&format!(" AND NOT ({})", membership("IS NOT NULL", "('confirmed')")));
     }
     for id in &q.entity_ids {
         sql.push_str(&format!(

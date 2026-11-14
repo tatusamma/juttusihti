@@ -11,6 +11,8 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Added
 
+- **Uncategorized**: a row under "All articles" in the categories sidebar lists the articles that
+  are in no category, with a count; select it and use ✨ to have AI suggest categories for them.
 - **Categories sidebar**: a sidebar between the rail and the article list picks a group or a
   category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
   reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"

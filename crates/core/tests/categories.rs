@@ -749,3 +749,39 @@ fn draft_is_empty_only_without_proposals() {
     d.placements.push(Placement { label: 1, rename: None, group: GroupRef::New(1), ticked: true });
     assert!(!d.is_empty());
 }
+
+/// (a) confirmed label, (b) mapped term, (c) mapped term rejected for it,
+/// (d) only an AI suggestion, (e) nothing.
+fn uncategorized_data() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("a", &[]), entry("b", &["AI"]), entry("c", &["AI"]), entry("d", &[]), entry("e", &[])])
+        .unwrap();
+    let l = s.create_label("L").unwrap();
+    let m = s.create_label("M").unwrap();
+    s.tag_article(article_id(&s, "a"), l, Origin::User, None).unwrap();
+    s.map_term(term_id(&s, "AI"), Some(m)).unwrap();
+    s.untag_article(article_id(&s, "c"), m).unwrap();
+    s.tag_article(article_id(&s, "d"), l, Origin::Ai, None).unwrap();
+    s
+}
+
+#[test]
+fn uncategorized_filter_excludes_categorized_articles() {
+    let s = uncategorized_data();
+    let q = SearchQuery { uncategorized: true, ..Default::default() };
+    let r = s.search(&q, Page { limit: 50, offset: 0 }).unwrap();
+    let mut guids: Vec<String> = r.items.iter().map(|i| s.article(i.id).unwrap().guid).collect();
+    guids.sort();
+    assert_eq!(guids, ["c", "d", "e"]);
+    assert_eq!(r.total, 3);
+}
+
+#[test]
+fn counts_include_uncategorized_and_follow_the_view() {
+    let s = uncategorized_data();
+    assert_eq!(s.category_counts(ListFilter::default()).unwrap().uncategorized, 3);
+    s.set_read(article_id(&s, "e"), true).unwrap();
+    let unread = ListFilter { view: View::Unread, ..Default::default() };
+    assert_eq!(s.category_counts(unread).unwrap().uncategorized, 2);
+}
