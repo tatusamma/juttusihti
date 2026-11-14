@@ -633,16 +633,17 @@ impl Store {
 
     /// Maps a term to a category (or unmaps with `None`); clears `ignored`.
     pub fn map_term(&self, term: TermId, category: Option<CategoryId>) -> Result<()> {
-        let n = self
-            .conn()
-            .execute("UPDATE feed_terms SET category_id = ?1, ignored = 0 WHERE id = ?2", params![category, term])?;
+        let n = self.conn().execute(
+            "UPDATE feed_terms SET category_id = ?1, ignored = 0, settled = 1 WHERE id = ?2",
+            params![category, term],
+        )?;
         if n == 0 { Err(Error::NotFound) } else { Ok(()) }
     }
 
     /// Ignoring a term clears its mapping.
     pub fn set_term_ignored(&self, term: TermId, ignored: bool) -> Result<()> {
         let n = self.conn().execute(
-            "UPDATE feed_terms SET ignored = ?1, category_id = CASE WHEN ?1 = 1 THEN NULL ELSE category_id END
+            "UPDATE feed_terms SET ignored = ?1, settled = 1, category_id = CASE WHEN ?1 = 1 THEN NULL ELSE category_id END
              WHERE id = ?2",
             params![ignored, term],
         )?;

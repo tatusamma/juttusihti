@@ -21,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_categories.sql"),
     include_str!("../migrations/0009_feed_categories.sql"),
     include_str!("../migrations/0010_file_publisher_terms.sql"),
+    include_str!("../migrations/0011_settled_terms.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -141,7 +142,7 @@ mod tests {
         let store = crate::store::Store::open(&path).unwrap();
         let conn = store.conn();
         let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!((v, SCHEMA_VERSION), (10, 10));
+        assert_eq!((v, SCHEMA_VERSION), (11, 11));
         let labels: Vec<(i64, String, Option<String>)> = conn
             .prepare("SELECT id, name, color FROM labels ORDER BY id")
             .unwrap()
@@ -219,15 +220,23 @@ mod tests {
             })
             .unwrap()
         };
-        let (kotimaa, ulkomaat) = (category("Kotimaa"), category("Ulkomaat"));
-        assert_eq!((kotimaa.1, kotimaa.2), (None, 1), "Ungrouped, after Economy, most used first");
-        assert_eq!((ulkomaat.1, ulkomaat.2), (None, 2));
+        let kotimaa = category("Kotimaa");
+        assert_eq!((kotimaa.1, kotimaa.2), (None, 1), "Ungrouped, after Economy");
         assert_eq!((filed(1), filed(2)), (Some(kotimaa.0), Some(kotimaa.0)), "one category for both feeds");
-        assert_eq!(filed(3), Some(ulkomaat.0));
-        assert_eq!(filed(4), Some(1), "joins the existing category in its group");
+        assert_eq!(filed(3), None, "Ulkomaat is on one article: it waits in Unsorted");
+        assert_eq!(filed(4), Some(1), "joins the existing category in its group, whatever its count");
         assert_eq!((filed(5), filed(6), filed(7)), (Some(2), None, None), "filed, ignored and nameless stay");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 3);
+        // Filed and ignored terms are settled; the waiting and nameless ones are not.
+        let settled: Vec<i64> = conn
+            .prepare("SELECT id FROM feed_terms WHERE settled = 1 ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(settled, [1, 2, 4, 5, 6]);
     }
 
     #[test]

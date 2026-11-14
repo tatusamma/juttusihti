@@ -85,30 +85,51 @@ fn filed_under(s: &Store, feed: FeedId, name: &str) -> Option<CategoryId> {
         .unwrap()
 }
 
-#[test]
-fn new_terms_are_filed_under_a_category_of_the_same_name() {
-    let mut s = Store::open_in_memory().unwrap();
-    let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["Urheilu", "Jääkiekko"])]).unwrap();
-    let tree = s.category_tree().unwrap();
-    assert_eq!(names(&tree.ungrouped), ["Urheilu", "Jääkiekko"]);
-    assert!(s.unsorted_terms().unwrap().is_empty());
-    let urheilu = filed_under(&s, f, "Urheilu").unwrap();
-    assert_eq!(in_category(&s, urheilu), ["1"]);
+/// The unsorted terms' names.
+fn unsorted(s: &Store) -> Vec<String> {
+    s.unsorted_terms().unwrap().into_iter().map(|t| t.name).collect()
 }
 
 #[test]
-fn the_same_publisher_category_from_two_feeds_shares_one_category() {
+fn a_publisher_category_on_two_articles_becomes_a_category() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["Urheilu", "Jääkiekko"]), entry("2", &["Urheilu", "Jääkiekko"])]).unwrap();
+    let tree = s.category_tree().unwrap();
+    assert_eq!(names(&tree.ungrouped), ["Urheilu", "Jääkiekko"]);
+    assert!(unsorted(&s).is_empty());
+    let urheilu = filed_under(&s, f, "Urheilu").unwrap();
+    assert_eq!(in_category(&s, urheilu), ["1", "2"]);
+}
+
+#[test]
+fn a_name_on_one_article_waits_in_unsorted_until_a_second() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["Cale Makar"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 0, "no category for a one-off name");
+    assert_eq!(unsorted(&s), ["Cale Makar"]);
+    s.ingest(f, &[entry("1", &["Cale Makar"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 0, "the same article again is still one");
+    s.ingest(f, &[entry("2", &["Cale Makar"])]).unwrap();
+    assert_eq!(names(&s.category_tree().unwrap().ungrouped), ["Cale Makar"]);
+    assert!(unsorted(&s).is_empty());
+}
+
+#[test]
+fn the_second_article_can_come_from_another_feed() {
     let mut s = Store::open_in_memory().unwrap();
     let (yle, is) = (feed(&mut s, "https://yle.example/rss"), feed(&mut s, "https://is.example/rss"));
     s.ingest(yle, &[entry("1", &["Kotimaa"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 0);
     s.ingest(is, &[entry("2", &[" kotimaa "])]).unwrap();
     assert_eq!(count(&s, "categories"), 1);
+    assert!(filed_under(&s, yle, "Kotimaa").is_some());
     assert_eq!(filed_under(&s, yle, "Kotimaa"), filed_under(&s, is, " kotimaa "));
 }
 
 #[test]
-fn a_publisher_category_joins_an_existing_category_and_keeps_its_group() {
+fn a_publisher_category_joins_an_existing_category_at_once_and_keeps_its_group() {
     let mut s = Store::open_in_memory().unwrap();
     let sports = s.create_group("Sports").unwrap();
     let urheilu = s.create_category("Urheilu").unwrap();
@@ -116,7 +137,7 @@ fn a_publisher_category_joins_an_existing_category_and_keeps_its_group() {
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["URHEILU"])]).unwrap();
     assert_eq!(count(&s, "categories"), 1);
-    assert_eq!(filed_under(&s, f, "URHEILU"), Some(urheilu));
+    assert_eq!(filed_under(&s, f, "URHEILU"), Some(urheilu), "one article is enough when the category exists");
     assert_eq!(names(&s.category_tree().unwrap().groups[0].categories), ["Urheilu"]);
 }
 
@@ -124,32 +145,36 @@ fn a_publisher_category_joins_an_existing_category_and_keeps_its_group() {
 fn a_term_moved_back_to_unsorted_or_ignored_stays_so_on_refresh() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["Tilaajille", "Mielipide"])]).unwrap();
+    let both = |g: &str| entry(g, &["Tilaajille", "Mielipide"]);
+    s.ingest(f, &[both("1"), both("2")]).unwrap();
     s.set_term_ignored(term_id(&s, "Tilaajille"), true).unwrap();
     s.map_term(term_id(&s, "Mielipide"), None).unwrap();
-    s.ingest(f, &[entry("1", &["Tilaajille", "Mielipide"]), entry("2", &["Tilaajille", "Mielipide"])]).unwrap();
+    // "Viihde" is still waiting (one article) when the user moves it to Unsorted by hand: that
+    // is a decision too.
+    s.ingest(f, &[entry("9", &["Viihde"])]).unwrap();
+    s.map_term(term_id(&s, "Viihde"), None).unwrap();
+    s.ingest(f, &[both("1"), both("2"), both("3"), entry("10", &["Viihde"])]).unwrap();
     assert_eq!(filed_under(&s, f, "Tilaajille"), None);
     assert_eq!(s.ignored_terms().unwrap().len(), 1);
-    let unsorted: Vec<String> = s.unsorted_terms().unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(unsorted, ["Mielipide"]);
+    assert_eq!(unsorted(&s), ["Mielipide", "Viihde"]);
 }
 
 #[test]
 fn a_term_whose_category_was_deleted_stays_unsorted_on_refresh() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["Viihde"])]).unwrap();
+    s.ingest(f, &[entry("1", &["Viihde"]), entry("2", &["Viihde"])]).unwrap();
     s.delete_category(filed_under(&s, f, "Viihde").unwrap()).unwrap();
-    s.ingest(f, &[entry("2", &["Viihde"])]).unwrap();
+    s.ingest(f, &[entry("3", &["Viihde"])]).unwrap();
     assert_eq!(count(&s, "categories"), 0);
-    assert_eq!(s.unsorted_terms().unwrap().len(), 1);
+    assert_eq!(unsorted(&s), ["Viihde"]);
 }
 
 #[test]
 fn a_term_without_letters_or_digits_stays_unsorted() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["—", "Talous"])]).unwrap();
+    s.ingest(f, &[entry("1", &["—", "Talous"]), entry("2", &["—", "Talous"])]).unwrap();
     assert_eq!(names(&s.category_tree().unwrap().ungrouped), ["Talous"]);
     assert_eq!(filed_under(&s, f, "—"), None);
 }

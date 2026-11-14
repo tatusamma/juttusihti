@@ -350,7 +350,7 @@ impl Store {
             };
             let n = match category {
                 Some(c) => tx.execute(
-                    "UPDATE feed_terms SET category_id = ?1 WHERE id = ?2 AND category_id IS NULL AND ignored = 0",
+                    "UPDATE feed_terms SET category_id = ?1, settled = 1 WHERE id = ?2 AND category_id IS NULL AND ignored = 0",
                     params![c, m.term],
                 )?,
                 None => 0,

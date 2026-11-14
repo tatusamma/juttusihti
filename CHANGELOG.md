@@ -37,11 +37,13 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ### Changed
 
-- **Publisher categories are accepted automatically.** Each new section name a feed gives its
-  articles is filed under the category with the same name, created in Ungrouped when there is
-  none, so "Kotimaa" from Yle and from Ilta-Sanomat land in one category. Terms already waiting
-  in Unsorted are filed the same way once, when you update. A term you move to another category,
-  back to Unsorted, or Ignore stays that way at later refreshes.
+- **Publisher categories are accepted automatically.** A section name a feed gives its articles
+  is filed under the category with the same name: at once when you have one, otherwise in a new
+  category in Ungrouped once the name is on two articles, so "Kotimaa" from Yle and from
+  Ilta-Sanomat land in one category and one-off names (a player, a place) wait under Unsorted
+  terms instead of each becoming a category. Terms already waiting in Unsorted are filed the same
+  way once, when you update. A term you move to another category, back to Unsorted, or Ignore
+  stays that way at later refreshes.
 - The full-article browser engine is Servo 0.8. Iltalehti, Ilta-Sanomat, Helsingin Sanomat and
   Yle articles were checked against 0.6.0's engine: the text is the same or more complete, and
   Yle articles now get their picture.

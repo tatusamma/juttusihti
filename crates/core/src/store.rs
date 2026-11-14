@@ -246,12 +246,10 @@ impl Store {
                 if let Some(article_id) = article_id {
                     for t in &e.terms {
                         let normalized = normalize_text(&t.name);
-                        let new = insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])? > 0;
+                        insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])?;
                         let tid: i64 = term_id.query_row(params![feed_id, normalized, t.scheme], |r| r.get(0))?;
-                        if new {
-                            file_new_term(&tx, tid, &t.name)?;
-                        }
                         link_term.execute(params![article_id, tid])?;
+                        file_waiting_terms(&tx, &normalized, &t.name)?;
                     }
                 }
             }
@@ -438,17 +436,54 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     })
 }
 
-/// Files a publisher category seen for the first time under the category with the same name,
-/// creating it in Ungrouped when there is none. Only new terms are filed, so a term the user
-/// moved back to Unsorted, ignored or whose category they deleted stays as they left it. A name
-/// that cannot be a category (no letters or digits) leaves the term unsorted.
-fn file_new_term(conn: &Connection, term: i64, name: &str) -> Result<()> {
-    let category = match crate::categories::insert_category(conn, name, None) {
-        Ok((id, _)) => id,
-        Err(Error::Invalid(_)) => return Ok(()),
-        Err(e) => return Err(e),
+/// Articles a publisher category must be on, across feeds, before a new category is made for
+/// it. One-off names (a player, a place) wait in Unsorted instead of each becoming a category.
+pub const AUTO_CATEGORY_MIN_ARTICLES: i64 = 2;
+
+/// Files the waiting (not yet settled) terms named `normalized` under the category with that
+/// name: at once when it exists, otherwise by creating it in Ungrouped once the name is on
+/// [`AUTO_CATEGORY_MIN_ARTICLES`] articles. Filing settles a term, as does anything the user
+/// does with it, so a term they moved, ignored or whose category they deleted stays as they
+/// left it. A name that cannot be a category (no letters or digits) stays unsorted.
+fn file_waiting_terms(conn: &Connection, normalized: &str, name: &str) -> Result<()> {
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    let waiting: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM feed_terms
+                       WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0)",
+        [normalized],
+        |r| r.get(0),
+    )?;
+    if !waiting {
+        return Ok(());
+    }
+    let existing: Option<i64> =
+        conn.query_row("SELECT id FROM categories WHERE normalized = ?1", [normalized], |r| r.get(0)).optional()?;
+    let category = match existing {
+        Some(id) => id,
+        None => {
+            let articles: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT a.article_id) FROM article_terms a JOIN feed_terms t ON t.id = a.term_id
+                 WHERE t.normalized = ?1 AND t.settled = 0 AND t.category_id IS NULL AND t.ignored = 0",
+                [normalized],
+                |r| r.get(0),
+            )?;
+            if articles < AUTO_CATEGORY_MIN_ARTICLES {
+                return Ok(());
+            }
+            match crate::categories::insert_category(conn, name, None) {
+                Ok((id, _)) => id,
+                Err(Error::Invalid(_)) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
     };
-    conn.execute("UPDATE feed_terms SET category_id = ?1 WHERE id = ?2", params![category, term])?;
+    conn.execute(
+        "UPDATE feed_terms SET category_id = ?2, settled = 1
+         WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0",
+        params![normalized, category],
+    )?;
     Ok(())
 }
 
