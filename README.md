@@ -39,7 +39,8 @@ after showing what it will send and what it will cost. Written in Rust with
   groups them, files the section names publishers give their articles (publisher categories)
   and sets aside the ones you do not want. "✨ Suggest categories" proposes a grouping as an
   editable draft; nothing is saved until you press Approve.
-- **Review**: everything AI produces is a suggestion until you confirm it.
+- **Review**: everything AI produces is a suggestion until you confirm it, except the ✨ on
+  Uncategorized, which saves the categories it finds directly.
 - **Reports**: volume per source, topics, categories, co-occurring entities, relevance and AI cost,
   with CSV export.
 - **Timeline, map and relationship map** of stories, places, people and organisations.
@@ -158,6 +159,12 @@ The sidebar between the rail and the article list picks a group or a category: A
 "Find category…" finds a name (Esc or ✕ clears it), right-click or the star on hover adds a row
 to Favourites, and drag reorders. **«** hides the sidebar and **»** (or **c**) shows it again;
 **Organise…** opens the Categories screen.
+
+**Uncategorized** lists the articles in no category. Its ✨ has AI find categories for the next 100
+uncategorized articles whose feed gave no categories: a small panel shows what is sent (their
+headlines and descriptions and your category names), the estimate and the per-run limit before
+anything is sent. The AI may create new categories (they go under Ungrouped), and the results are
+saved directly, without Review. Each press handles the next articles.
 
 On the Categories screen, **+ New group** and **+ New category** add them; drag a category onto
 a group (or use **Move to…**) to file it. Publisher categories, the section names a feed gives its
@@ -357,7 +364,8 @@ stopped and has a **Resume** button.
 
 Everything AI produces starts as a suggestion. On **Review** you confirm or reject entities,
 relationships, relevance and summaries, one by one or in bulk. AI never overrides a choice you
-have made.
+have made. The ✨ on Uncategorized is the one exception: it saves the categories it
+finds directly.
 
 ### Reports
 

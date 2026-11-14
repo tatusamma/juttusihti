@@ -12,8 +12,10 @@ use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event, mouse
 use juttusihti_core::LabelId;
 use juttusihti_core::categories::{CategoryCounts, CategoryNode, CategoryTree, Favourite, GroupId, GroupNode};
 use juttusihti_core::normalize::normalize_text;
+use juttusihti_core::pricing::Catalog;
 use juttusihti_core::store::{ListFilter, Store};
 
+use crate::categorize_ai::{self, Panel, Plan};
 use crate::db::Db;
 use crate::drag::{self, DragMsg, DragState};
 use crate::icons::{Icon, icon};
@@ -117,7 +119,12 @@ pub enum Effect {
     Reload,
     Run(Op),
     Select(Selection),
-    FindWithAi,
+    /// Work out the "find categories with AI" plan; the number tells answers apart.
+    PlanAi(u64),
+    /// Send the consented plan (the running panel's).
+    RunAi,
+    /// The AI saved categories: reload the tree, the counts and the list.
+    Categorized,
     Organise,
     /// New tree and counts arrived.
     Loaded,
@@ -128,8 +135,8 @@ pub enum Effect {
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Select(Selection),
-    /// The ✨ on Uncategorized: select it and open AI for the articles without publisher categories.
-    FindWithAi,
+    /// AI saved categories for some articles; the list may differ.
+    Categorized,
     Organise,
     /// The tree was reloaded; the selection may be gone.
     Loaded,
@@ -147,8 +154,12 @@ pub enum Msg {
     /// « and », and the c key.
     Toggle,
     Select(Selection),
-    /// The ✨ on the Uncategorized row.
+    /// The ✨ on the Uncategorized row: opens the "find categories with AI" panel.
     FindWithAi,
+    AiPlanned(u64, Result<Box<Plan>, String>),
+    SendAi,
+    CloseAi,
+    AiDone(Result<String, String>),
     Fold(GroupId),
     Find(String),
     ClearFind,
@@ -185,6 +196,11 @@ pub struct State {
     drag: DragState<Item, Target>,
     hover: Option<Item>,
     menu: Option<Item>,
+    /// The "find categories with AI" panel, when open.
+    ai: Option<Panel>,
+    /// Tells the latest plan from older ones.
+    ai_generation: u64,
+    catalog: Catalog,
 }
 
 impl State {
@@ -200,6 +216,9 @@ impl State {
             drag: DragState::default(),
             hover: None,
             menu: None,
+            ai: None,
+            ai_generation: 0,
+            catalog: Catalog::builtin(),
         }
     }
 
@@ -211,9 +230,17 @@ impl State {
 
     /// Reloads the tree and the counts for `filter` (the list's All/Unread and feed picker).
     pub fn load(&mut self, filter: ListFilter) -> Cmd<Msg> {
+        // An open AI panel offers the articles of the scope being viewed.
+        let replan = if filter != self.filter && matches!(self.ai, Some(Panel::Planning | Panel::Ready(_))) {
+            self.ai_generation += 1;
+            self.ai = Some(Panel::Planning);
+            self.plan_ai(self.ai_generation, filter)
+        } else {
+            Cmd::none()
+        };
         self.filter = filter;
         let db = self.db.clone();
-        Cmd::perform(
+        let load = Cmd::perform(
             async move {
                 db.call(move |s| -> juttusihti_core::Result<Data> {
                     Ok(Box::new((s.category_tree()?, s.category_counts(filter)?)))
@@ -221,7 +248,20 @@ impl State {
                 .await
             },
             move |r| Msg::Loaded(filter, r),
-        )
+        );
+        Cmd::batch([load, replan])
+    }
+
+    fn plan_ai(&self, generation: u64, filter: ListFilter) -> Cmd<Msg> {
+        Cmd::perform(categorize_ai::plan(self.db.clone(), self.catalog.clone(), filter), move |r| {
+            Msg::AiPlanned(generation, r)
+        })
+    }
+
+    /// The "find categories with AI" panel, when open.
+    #[cfg(test)]
+    pub fn ai_panel(&self) -> Option<&Panel> {
+        self.ai.as_ref()
     }
 
     pub fn update(&mut self, msg: Msg) -> (Cmd<Msg>, Option<Event>) {
@@ -234,7 +274,14 @@ impl State {
                 (Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, done), None)
             }
             Effect::Select(s) => (Cmd::none(), Some(Event::Select(s))),
-            Effect::FindWithAi => (Cmd::none(), Some(Event::FindWithAi)),
+            Effect::PlanAi(generation) => (self.plan_ai(generation, self.filter), None),
+            Effect::RunAi => match &self.ai {
+                Some(Panel::Running(p)) => {
+                    (Cmd::perform(categorize_ai::run(self.db.clone(), (**p).clone()), Msg::AiDone), None)
+                }
+                _ => (Cmd::none(), None),
+            },
+            Effect::Categorized => (self.load(self.filter), Some(Event::Categorized)),
             Effect::Organise => (Cmd::none(), Some(Event::Organise)),
             Effect::Loaded => (Cmd::none(), Some(Event::Loaded)),
             Effect::Failed(e) => (Cmd::none(), Some(Event::Failed(e))),
@@ -319,8 +366,39 @@ impl State {
             }
             Msg::FindWithAi => {
                 self.menu = None;
-                return Effect::FindWithAi;
+                if matches!(self.ai, Some(Panel::Planning | Panel::Running(_))) {
+                    return Effect::None;
+                }
+                self.ai_generation += 1;
+                self.ai = Some(Panel::Planning);
+                return Effect::PlanAi(self.ai_generation);
             }
+            Msg::AiPlanned(g, r) => {
+                if g == self.ai_generation && matches!(self.ai, Some(Panel::Planning)) {
+                    self.ai = Some(match r {
+                        Ok(p) => Panel::Ready(p),
+                        Err(e) => Panel::Failed(e),
+                    });
+                }
+            }
+            Msg::SendAi => {
+                if let Some(Panel::Ready(p)) = &self.ai
+                    && p.blocker().is_none()
+                {
+                    self.ai = Some(Panel::Running(p.clone()));
+                    return Effect::RunAi;
+                }
+            }
+            Msg::CloseAi => {
+                if !matches!(self.ai, Some(Panel::Running(_))) {
+                    self.ai = None;
+                }
+            }
+            Msg::AiDone(Ok(line)) => {
+                self.ai = Some(Panel::Done(line));
+                return Effect::Categorized;
+            }
+            Msg::AiDone(Err(e)) => self.ai = Some(Panel::Failed(e)),
             Msg::Organise => return Effect::Organise,
             Msg::Done(Ok(())) => return Effect::Reload,
             Msg::Saved(Ok(())) => {}
@@ -516,19 +594,16 @@ impl State {
         }
 
         let body = if self.find.is_empty() { self.view_tree(selected) } else { self.view_matches(selected) };
-        container(
-            column![
-                container(header).padding([0.0, SPACE[1]]),
-                find,
-                scrollable(container(body).padding(iced::padding::right(SPACE[1]))).height(Fill),
-            ]
-            .spacing(SPACE[1]),
-        )
-        .padding([SPACE[2], SPACE[1]])
-        .width(WIDTH)
-        .height(Fill)
-        .style(style::pane)
-        .into()
+        let mut col = column![container(header).padding([0.0, SPACE[1]])].spacing(SPACE[1]);
+        if let Some(panel) = &self.ai {
+            col = col.push(categorize_ai::view(panel));
+        }
+        container(col.push(find).push(scrollable(container(body).padding(iced::padding::right(SPACE[1]))).height(Fill)))
+            .padding([SPACE[2], SPACE[1]])
+            .width(WIDTH)
+            .height(Fill)
+            .style(style::pane)
+            .into()
     }
 
     fn view_matches(&self, selected: Selection) -> Element<'_, Msg> {

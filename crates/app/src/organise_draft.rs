@@ -56,13 +56,7 @@ impl SuggestPlan {
             cost: price.as_ref().and_then(|p| p.cost(&worst, false)),
             price,
             input,
-            // As the quick analysis: the user's per-run limits, and a known price.
-            limits: Limits {
-                max_tokens: d.max_tokens,
-                max_cost: d.max_cost,
-                max_calls: None,
-                allow_unknown_cost: false,
-            },
+            limits: run_limits(d),
             ready,
         }
     }
@@ -75,19 +69,7 @@ impl SuggestPlan {
         if let Err(e) = &self.ready {
             return Some(e.clone());
         }
-        if self.limits.max_tokens.is_some_and(|max| self.tokens > max) {
-            return Some(format!(
-                "This could use up to {} tokens, more than the per-run limit.",
-                thousands(self.tokens)
-            ));
-        }
-        match (self.limits.max_cost, self.cost) {
-            (Some(_), None) => Some(format!("The price of {} is unknown, so its cost cannot be limited.", self.model)),
-            (Some(max), Some(c)) if c > max => {
-                Some(format!("This could cost up to {}, more than the per-run limit.", format_usd(c)))
-            }
-            _ => None,
-        }
+        over_limit(&self.limits, self.tokens, self.cost, &self.model)
     }
 
     /// What is sent, and to whom.
@@ -104,24 +86,48 @@ impl SuggestPlan {
     }
 
     pub fn limit_line(&self) -> String {
-        let mut parts = Vec::new();
-        if self.billing == Billing::ApiKey
-            && let Some(c) = self.limits.max_cost
-        {
-            parts.push(format_usd(c));
+        limit_line(self.billing, &self.limits)
+    }
+}
+
+/// The per-run limits of a category run, as the quick analysis: the user's
+/// token and cost limits, and a known price.
+pub(crate) fn run_limits(d: &AiDefaults) -> Limits {
+    Limits { max_tokens: d.max_tokens, max_cost: d.max_cost, max_calls: None, allow_unknown_cost: false }
+}
+
+/// Why a run of at most `tokens` costing `cost` may not be sent under `limits`.
+pub(crate) fn over_limit(limits: &Limits, tokens: u64, cost: Option<Micros>, model: &str) -> Option<String> {
+    if limits.max_tokens.is_some_and(|max| tokens > max) {
+        return Some(format!("This could use up to {} tokens, more than the per-run limit.", thousands(tokens)));
+    }
+    match (limits.max_cost, cost) {
+        (Some(_), None) => Some(format!("The price of {model} is unknown, so its cost cannot be limited.")),
+        (Some(max), Some(c)) if c > max => {
+            Some(format!("This could cost up to {}, more than the per-run limit.", format_usd(c)))
         }
-        if let Some(t) = self.limits.max_tokens {
-            parts.push(format!("{} tokens", thousands(t)));
-        }
-        let limit = if parts.is_empty() {
-            "No per-run limit.".to_string()
-        } else {
-            format!("Limit {} per run.", parts.join(" and "))
-        };
-        match self.billing {
-            Billing::ChatGptPlan => format!("{limit} Your ChatGPT plan's usage limits apply."),
-            Billing::ApiKey => limit,
-        }
+        _ => None,
+    }
+}
+
+pub(crate) fn limit_line(billing: Billing, limits: &Limits) -> String {
+    let mut parts = Vec::new();
+    if billing == Billing::ApiKey
+        && let Some(c) = limits.max_cost
+    {
+        parts.push(format_usd(c));
+    }
+    if let Some(t) = limits.max_tokens {
+        parts.push(format!("{} tokens", thousands(t)));
+    }
+    let limit = if parts.is_empty() {
+        "No per-run limit.".to_string()
+    } else {
+        format!("Limit {} per run.", parts.join(" and "))
+    };
+    match billing {
+        Billing::ChatGptPlan => format!("{limit} Your ChatGPT plan's usage limits apply."),
+        Billing::ApiKey => limit,
     }
 }
 

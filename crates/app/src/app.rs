@@ -645,12 +645,11 @@ impl App {
         let page = self.page;
         let query = self.list_query();
         // An open quick panel follows the list being viewed.
-        let retarget =
-            if self.quick.open && !self.quick.is_running() && !self.quick.is_pinned() && !self.quick.targets(&query) {
-                self.quick.open(query.clone(), self.quick_label()).map(Message::Quick)
-            } else {
-                Task::none()
-            };
+        let retarget = if self.quick.open && !self.quick.is_running() && !self.quick.targets(&query) {
+            self.quick.open(query.clone(), self.quick_label()).map(Message::Quick)
+        } else {
+            Task::none()
+        };
         let load = Task::perform(async move { db.call(move |s| read_listing(s, &query, page)).await }, move |r| {
             Message::ListLoaded(generation, r)
         });
@@ -771,21 +770,8 @@ impl App {
                 self.screen = Screen::Reader;
                 self.load_list()
             }
-            Some(category_sidebar::Event::FindWithAi) => {
-                self.close_overlays();
-                self.category = Selection::Uncategorized;
-                self.page = Page::first(PAGE_SIZE);
-                self.screen = Screen::Reader;
-                // The list loads first: an open panel would otherwise follow it back to the plain query.
-                let load = self.load_list();
-                let scope = SearchQuery { without_terms: true, ..self.list_query() };
-                let label = "Uncategorized articles without publisher categories".to_string();
-                let open = self
-                    .quick
-                    .open_for(scope, label, [juttusihti_core::analysis::Task::Labels].into())
-                    .map(Message::Quick);
-                Task::batch([load, open])
-            }
+            // The open article's categories and the list's members may have changed.
+            Some(category_sidebar::Event::Categorized) => self.load_list(),
             Some(category_sidebar::Event::Organise) => self.update(Message::ShowScreen(Screen::Organise)),
             // A group's articles change when categories move in or out of it.
             Some(category_sidebar::Event::Changed) if matches!(self.category, Selection::Group(_)) => self.load_list(),
@@ -2289,43 +2275,79 @@ mod tests {
         assert_eq!(app.screen, Screen::Organise);
     }
 
-    #[test]
-    fn uncategorized_sparkles_opens_ai_for_articles_without_publisher_categories() {
-        use juttusihti_core::analysis::Task;
-        let (mut app, _) = app_with_categories();
-        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
-        assert_eq!(app.category, Selection::Uncategorized);
-        assert!(app.quick.open);
-        let scope = app.quick.scope();
-        assert!(scope.uncategorized && scope.without_terms);
-        assert_eq!(*scope, SearchQuery { without_terms: true, ..app.list_query() });
-        assert_eq!(app.quick.selected_tasks(), [Task::Labels].into_iter().collect());
-        assert_eq!(app.quick.scope_label(), "Uncategorized articles without publisher categories");
-        assert!(!app.list_query().without_terms, "the list itself still shows every uncategorized article");
+    /// A ready plan on a ChatGPT plan for what the store would send now.
+    fn categorize_plan(app: &App) -> Box<crate::categorize_ai::Plan> {
+        use juttusihti_core::ai_defaults::AiDefaults;
+        use juttusihti_core::pricing::{Billing, Price};
+        let d = AiDefaults { billing: Billing::ChatGptPlan, ..Default::default() };
+        let (articles, eligible) =
+            app.db.shared().lock().unwrap().articles_to_categorize(app.list_filter(), 100).unwrap();
+        let price = Some(Price::chatgpt_plan(&d.model()));
+        Box::new(crate::categorize_ai::Plan::build(&d, articles, eligible, vec!["Space".into()], price, Ok(())))
     }
 
     #[test]
-    fn uncategorized_ai_scope_survives_list_reloads() {
-        use juttusihti_core::analysis::Task;
+    fn uncategorized_sparkles_opens_the_sidebar_panel_not_the_quick_popover() {
+        use crate::categorize_ai::Panel;
         let (mut app, _) = app_with_categories();
+        let category = app.category;
+        assert_eq!(app.categories.handle(SidebarMsg::FindWithAi), SidebarEffect::PlanAi(1));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Planning)));
+        let _ = app.update(Message::Categories(SidebarMsg::CloseAi));
         let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
-        let _ = app.load_list();
-        let _ = app.update(Message::ToggleHideDismissed);
-        let _ = app.update(Message::ToggleHideDismissed);
-        assert!(app.quick.scope().without_terms && app.quick.scope().uncategorized);
-        assert_eq!(app.quick.selected_tasks(), [Task::Labels].into_iter().collect());
+        assert!(!app.quick.open, "the quick AI popover stays closed");
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Planning)));
+        assert_eq!(app.category, category, "the list is not changed");
+        let _ = app.update(Message::Categories(SidebarMsg::CloseAi));
+        assert!(app.categories.ai_panel().is_none());
     }
 
     #[test]
-    fn list_sparkles_keeps_the_plain_query_and_default_tasks() {
+    fn sending_finds_categories_once_and_reloads_when_done() {
+        use crate::categorize_ai::Panel;
+        let (mut app, _, _) = app_with_articles();
+        let plan = categorize_plan(&app);
+        assert_eq!(plan.articles.len(), 2);
+        assert_eq!(plan.blocker(), None);
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.update(Message::Categories(SidebarMsg::AiPlanned(g, Ok(plan))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Ready(_))));
+        assert_eq!(app.categories.handle(SidebarMsg::SendAi), SidebarEffect::RunAi);
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Running(_))));
+        assert_eq!(app.categories.handle(SidebarMsg::FindWithAi), SidebarEffect::None, "no second run");
+        assert_eq!(app.categories.handle(SidebarMsg::CloseAi), SidebarEffect::None);
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Running(_))), "a run cannot be closed");
+
+        let generation = app.list_generation;
+        let line = "Categorized 2 of 2 articles; 1 new category.".to_string();
+        let _ = app.update(Message::Categories(SidebarMsg::AiDone(Ok(line.clone()))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Done(l)) if *l == line));
+        assert!(app.list_generation > generation, "the list reloads");
+    }
+
+    #[test]
+    fn a_failed_run_shows_the_error() {
+        use crate::categorize_ai::Panel;
+        let (mut app, _, _) = app_with_articles();
+        let plan = categorize_plan(&app);
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.categories.handle(SidebarMsg::AiPlanned(g, Ok(plan)));
+        let _ = app.categories.handle(SidebarMsg::SendAi);
+        let generation = app.list_generation;
+        let _ = app.update(Message::Categories(SidebarMsg::AiDone(Err("the provider declined".into()))));
+        assert!(matches!(app.categories.ai_panel(), Some(Panel::Failed(e)) if e == "the provider declined"));
+        assert_eq!(app.list_generation, generation);
+    }
+
+    #[test]
+    fn no_articles_to_categorize_disables_send() {
         let (mut app, _) = app_with_categories();
-        let _ = app.update(Message::Categories(SidebarMsg::FindWithAi));
-        let _ = app.update(Message::OpenQuick); // closes
-        let _ = app.update(Message::OpenQuick);
-        assert!(app.quick.open);
-        assert_eq!(*app.quick.scope(), app.list_query());
-        assert!(!app.quick.scope().without_terms);
-        assert!(app.quick.selected_tasks().is_empty(), "defaults are filled in when they load");
+        let plan = categorize_plan(&app);
+        assert!(plan.articles.is_empty());
+        assert_eq!(plan.blocker().as_deref(), Some("No uncategorized articles without publisher categories."));
+        let SidebarEffect::PlanAi(g) = app.categories.handle(SidebarMsg::FindWithAi) else { panic!() };
+        let _ = app.categories.handle(SidebarMsg::AiPlanned(g, Ok(plan)));
+        assert_eq!(app.categories.handle(SidebarMsg::SendAi), SidebarEffect::None);
     }
 
     #[test]
