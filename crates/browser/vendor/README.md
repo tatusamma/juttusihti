@@ -1,9 +1,10 @@
 # Patched crates
 
 Servo 0.8 pins exact versions of two crates that have security advisories, and of one with a
-bug that shows on screen, so `cargo update` cannot pick up fixes. These copies replace them through `[patch.crates-io]` in
-`../Cargo.toml`. Each one is the upstream crate with the smallest change that makes the fix fit;
-everything not listed below is an unmodified copy of the published crate.
+bug that shows on screen, so `cargo update` cannot pick up fixes. These copies replace them
+through `[patch.crates-io]` in `../Cargo.toml`. Each one is the upstream crate with the
+smallest change that makes the fix fit; everything not listed below is an unmodified copy of
+the published crate.
 
 | Directory | Replaces | Contents | Fixes | Licence |
 |---|---|---|---|---|
@@ -33,17 +34,17 @@ the extra primes of a multi-prime key as JWK. Its build warns about the deprecat
 `build.rs` and the rest are 0.36.0's. The `sqlcipher/` folder is left out: it holds an older
 SQLite and is only used by the `bundled-sqlcipher` feature, which nothing here enables.
 
+```
+0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52  libsqlite3-sys/sqlite3/sqlite3.c
+d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c  libsqlite3-sys/sqlite3/sqlite3.h
+```
+
 **`surfman`**: `src/wgl/context.rs` creates its `SurfmanFalseWindow` (a temporary window for
 loading the WGL extension functions) without `WS_VISIBLE`. Upstream it is a visible 640×480
 window at the top-left corner for a few milliseconds, which Windows also makes the foreground
 window. A pixel format and a GL context need no visible window: surfman's own
 `SurfmanHiddenWindow` is never shown either. The `[[example]]` and `[dev-dependencies]` tables
 are removed from `Cargo.toml`, with the example files.
-
-```
-0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52  libsqlite3-sys/sqlite3/sqlite3.c
-d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c  libsqlite3-sys/sqlite3/sqlite3.h
-```
 
 ## Keeping them up to date
 
