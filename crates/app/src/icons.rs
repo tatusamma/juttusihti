@@ -22,6 +22,7 @@ pub enum Icon {
     Analysis,
     AiSetup,
     Labels,
+    Categories,
     Settings,
     Refresh,
     More,
@@ -50,6 +51,7 @@ fn codepoint(i: Icon) -> char {
         Icon::Analysis => '\u{e2a3}',     // chart-column
         Icon::AiSetup => '\u{e1bb}',      // bot
         Icon::Labels => '\u{e17f}',       // tag
+        Icon::Categories => '\u{e33c}',   // folder-tree
         Icon::Settings => '\u{e154}',     // settings
         Icon::Refresh => '\u{e145}',      // refresh-cw
         Icon::More => '\u{e0b6}',         // ellipsis
@@ -74,7 +76,7 @@ pub fn icon<'a>(i: Icon) -> Text<'a> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 24] = [
         Icon::News,
         Icon::Saved,
         Icon::Reports,
@@ -85,6 +87,7 @@ mod tests {
         Icon::Analysis,
         Icon::AiSetup,
         Icon::Labels,
+        Icon::Categories,
         Icon::Settings,
         Icon::Refresh,
         Icon::More,

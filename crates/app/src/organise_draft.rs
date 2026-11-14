@@ -504,7 +504,7 @@ impl Draft {
             }
             Name::Category(CategoryRef::Existing(l)) => {
                 let p = self.plan.placements.iter().find(|p| p.category == l)?;
-                p.rename.clone().or_else(|| label_name(snap, l).map(str::to_string))
+                p.rename.clone().or_else(|| category_name(snap, l).map(str::to_string))
             }
         }
     }
@@ -530,7 +530,7 @@ impl Draft {
             }
             Name::Category(CategoryRef::Existing(l)) => {
                 // A placement keeps a rename only while it differs from the category's name.
-                let original = label_name(snap, l);
+                let original = category_name(snap, l);
                 let Some(p) = self.plan.placements.iter_mut().find(|p| p.category == l) else { return false };
                 let rename = (Some(name) != original).then(|| name.to_string());
                 if p.rename == rename {
@@ -568,7 +568,7 @@ impl Draft {
             .filter(|c| c.group == g)
             .map(|c| (CategoryRef::New(c.temp), c.name.as_str()));
         let placed = self.plan.placements.iter().filter(|p| p.group == g).filter_map(|p| {
-            let name = p.rename.as_deref().or_else(|| label_name(snap, p.category))?;
+            let name = p.rename.as_deref().or_else(|| category_name(snap, p.category))?;
             Some((CategoryRef::Existing(p.category), name))
         });
         placed.chain(new).collect()
@@ -821,7 +821,7 @@ fn yours<'a>() -> iced::widget::Text<'a> {
 }
 
 /// A category's name anywhere in the tree.
-fn label_name(snap: &Snapshot, id: CategoryId) -> Option<&str> {
+fn category_name(snap: &Snapshot, id: CategoryId) -> Option<&str> {
     snap.groups
         .iter()
         .flat_map(|g| &g.categories)

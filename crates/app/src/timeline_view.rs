@@ -160,7 +160,7 @@ impl State {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let mut labels = vec![Choice(None, "All categories".into())];
+        let mut labels = vec![Choice(None, "All labels".into())];
         labels.extend(self.labels.iter().map(|l| Choice(Some(l.id), l.name.clone())));
         let mut sources = vec![Choice(None, "All sources".into())];
         sources.extend(self.feeds.iter().map(|f| Choice(Some(f.id), f.title.clone())));

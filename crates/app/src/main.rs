@@ -18,6 +18,7 @@ mod full_article;
 mod graph_view;
 mod help;
 mod icons;
+mod labels;
 mod map_view;
 mod organise;
 mod organise_draft;

@@ -114,7 +114,7 @@ impl State {
         self.run = Some(Running {
             session,
             control: Control::default(),
-            stage: "Categories".into(),
+            stage: "Labels".into(),
             done: 0,
             total: 0,
             tokens: 0,
@@ -336,7 +336,7 @@ impl State {
         for t in QUICK_TASKS {
             let label = match t {
                 Task::Headlines => "Fix clickbait headlines",
-                Task::Labels => "Categories",
+                Task::Labels => "Labels",
                 Task::Related => "Related stories",
                 Task::Entities => "People & places",
                 _ => "Summary",
@@ -473,7 +473,7 @@ mod tests {
         Running {
             session: 1,
             control: Control::default(),
-            stage: "Categories".into(),
+            stage: "Labels".into(),
             done,
             total,
             tokens: 0,

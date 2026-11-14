@@ -451,7 +451,7 @@ impl State {
                 row![
                     text("Model").size(SIZE_BODY),
                     style::help(
-                        "Fast models handle headlines, categories, people & places and related stories well and use \
+                        "Fast models handle headlines, labels, people & places and related stories well and use \
                          the fewest tokens. Pick Quality when you mostly want research summaries."
                     ),
                 ]

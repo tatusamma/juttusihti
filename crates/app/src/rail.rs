@@ -42,7 +42,8 @@ pub fn view<'a>(place: Place, screen: Screen) -> Element<'a, Message> {
     ];
     let bottom = [
         tool(Icon::AiSetup, "AI setup", Screen::Providers),
-        tool(Icon::Labels, "Categories", Screen::Organise),
+        tool(Icon::Categories, "Categories", Screen::Organise),
+        tool(Icon::Labels, "Labels", Screen::Labels),
         tool(Icon::Settings, "Settings", Screen::Settings),
         tool(Icon::Help, "Help (F1)", Screen::Help),
     ];

@@ -649,7 +649,7 @@ impl State {
                 );
             }
             if !lists.labels.is_empty() {
-                picks = picks.push(style::note("Only articles in these categories:"));
+                picks = picks.push(style::note("Only articles with confirmed labels:"));
                 for l in &lists.labels {
                     let id = l.id;
                     picks = picks.push(

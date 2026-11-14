@@ -8,7 +8,6 @@ use std::collections::{BTreeSet, HashMap};
 use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, operation, pick_list, row, scrollable, text, text_input};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event};
-use juttusihti_core::Status;
 use juttusihti_core::categories::{CategoryId, CategoryNode, GroupId, GroupNode, TermId, TermRow};
 use juttusihti_core::category_draft::CategoryDraft;
 use juttusihti_core::pricing::Catalog;
@@ -91,8 +90,8 @@ enum Editing {
 pub struct Snapshot {
     pub(crate) groups: Vec<GroupNode>,
     pub(crate) ungrouped: Vec<CategoryNode>,
-    /// Articles per category, and pending AI suggestions (none for categories).
-    counts: HashMap<CategoryId, (u64, u64)>,
+    /// Articles per category.
+    counts: HashMap<CategoryId, u64>,
     /// Terms of the opened categories.
     terms: HashMap<CategoryId, Vec<TermRow>>,
     /// The most frequent first.
@@ -106,13 +105,7 @@ pub struct Snapshot {
 
 fn snapshot(s: &Store, expanded: &BTreeSet<CategoryId>) -> juttusihti_core::Result<Snapshot> {
     let tree = s.category_tree()?;
-    // Articles per category; categories have no pending AI suggestions.
-    let counts = s
-        .category_counts(juttusihti_core::store::ListFilter::default())?
-        .categories
-        .into_iter()
-        .map(|(id, n)| (id, (n, 0)))
-        .collect();
+    let counts = s.category_counts(juttusihti_core::store::ListFilter::default())?.categories.into_iter().collect();
     let mut terms = HashMap::new();
     for &id in expanded {
         terms.insert(id, s.category_terms(id)?);
@@ -143,7 +136,6 @@ pub enum Op {
     RenameCategory(CategoryId, String),
     Merge(CategoryId, CategoryId, String),
     DeleteCategory(CategoryId),
-    Decide(CategoryId, Status),
     MapTerm(TermId, Option<CategoryId>),
     Ignore(TermId, bool),
     ApproveDraft(i64, Box<CategoryDraft>),
@@ -173,13 +165,6 @@ impl Op {
             Op::Merge(from, into, name) => s.merge_categories(from, into).map(|_| format!("Merged into “{name}”.")),
             Op::DeleteCategory(id) => {
                 s.delete_category(id).map(|_| "Category deleted. Its terms are Unsorted again.".into())
-            }
-            Op::Decide(id, status) => {
-                let n = s.bulk_decide_label(id, status)?;
-                Ok(format!(
-                    "{} {n} pending suggestions.",
-                    if status == Status::Confirmed { "Accepted" } else { "Rejected" }
-                ))
             }
             Op::MapTerm(id, category) => s.map_term(id, category).map(|_| String::new()),
             Op::Ignore(id, ignored) => s.set_term_ignored(id, ignored).map(|_| String::new()),
@@ -225,11 +210,10 @@ pub enum Msg {
     AskDelete(Confirm),
     ConfirmDelete,
     CancelDelete,
-    /// Opens or closes a category's merge, bulk-decide and delete actions.
+    /// Opens or closes a category's merge and delete actions.
     Actions(CategoryId),
     MergeTarget(Target),
     Merge,
-    Decide(Status),
     Ignore(TermId, bool),
     /// "Suggest categories": opens the consent panel.
     Suggest,
@@ -500,11 +484,6 @@ impl State {
                 };
                 self.actions = None;
                 return Effect::Run(Op::Merge(from, into, name));
-            }
-            Msg::Decide(status) => {
-                if let Some(id) = self.actions {
-                    return Effect::Run(Op::Decide(id, status));
-                }
             }
             Msg::Ignore(id, ignored) => return Effect::Run(Op::Ignore(id, ignored)),
             Msg::Suggest
@@ -918,7 +897,6 @@ impl State {
         let id = c.category.id;
         let item = OrgItem::Category(id);
         let open = self.expanded.contains(&id);
-        let (_, pending) = self.snap.counts.get(&id).copied().unwrap_or_default();
         let terms: Element<'_, Msg> = match c.term_count {
             0 => text("No terms").size(SIZE_SMALL).style(style::faint).into(),
             n => button(
@@ -939,9 +917,6 @@ impl State {
         let mut line = row![self.grip(item, &c.category.name, self.name(item, &c.category.name, false))]
             .spacing(SPACE[1])
             .align_y(Center);
-        if pending > 0 {
-            line = line.push(text(format!("+{pending} AI")).size(SIZE_SMALL).style(style::accent));
-        }
         line = line
             .push(Space::new().width(Fill))
             .push(terms)
@@ -959,10 +934,10 @@ impl State {
         col.into()
     }
 
-    /// Today's label actions for one category: merge, bulk decisions, delete.
+    /// A category's actions: merge into another, delete.
     fn view_actions<'a>(&'a self, c: &'a CategoryNode) -> Element<'a, Msg> {
         let id = c.category.id;
-        let (confirmed, pending) = self.snap.counts.get(&id).copied().unwrap_or_default();
+        let articles = self.snap.counts.get(&id).copied().unwrap_or_default();
         let targets: Vec<Target> = self
             .categories()
             .filter(|o| o.category.id != id)
@@ -978,21 +953,6 @@ impl State {
         ]
         .spacing(SPACE[1])
         .align_y(Center);
-        let decide = row![
-            style::quiet_button(
-                Some(Icon::Check),
-                "Accept all suggestions",
-                style::quiet,
-                (pending > 0).then_some(Msg::Decide(Status::Confirmed))
-            ),
-            style::quiet_button(
-                None,
-                "Reject all suggestions",
-                style::quiet_danger,
-                (pending > 0).then_some(Msg::Decide(Status::Rejected))
-            ),
-        ]
-        .spacing(SPACE[1]);
         let delete = if self.confirm == Some(Confirm::Category(id)) {
             self.confirm_row()
         } else {
@@ -1005,9 +965,8 @@ impl State {
         };
         container(
             column![
-                style::note(format!("{confirmed} confirmed, {pending} pending AI suggestions")),
+                style::note(format!("{articles} {}", if articles == 1 { "article" } else { "articles" })),
                 merge,
-                decide,
                 delete
             ]
             .spacing(SPACE[1]),
@@ -1205,6 +1164,21 @@ mod tests {
     fn term_id(st: &State, name: &str) -> TermId {
         let snap = &st.snap;
         snap.unsorted.iter().chain(&snap.ignored).find(|t| t.name == name).unwrap().id
+    }
+
+    #[test]
+    fn organise_never_lists_labels() {
+        let mut st = state();
+        with(&st, |s| {
+            s.create_label("Sää").unwrap();
+            s.create_category("Tech").unwrap();
+        });
+        reload(&mut st);
+        let names: Vec<&str> = st.categories().map(|c| c.category.name.as_str()).collect();
+        assert_eq!(names, ["Tech"], "a label with no category of that name is not listed");
+        assert!(st.snap.groups.is_empty());
+        assert!(st.snap.unsorted.iter().chain(&st.snap.ignored).all(|t| t.name != "Sää"));
+        let _ = st.view();
     }
 
     #[test]
