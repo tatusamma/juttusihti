@@ -20,6 +20,10 @@ opposite.
   hidden for you; the newest article is simply on top.
 - **Clickbait loses its grip.** Headlines that tease can be rewritten from what the article
   actually says, with the original shown underneath.
+- **Claims can be checked.** False information spreads through news in almost any media,
+  sometimes by accident and sometimes on purpose. So Juttusihti has a fact check: one button
+  has an AI check an article's factual claims against other sources and show you what it
+  found, with links.
 - **Your reading stays yours.** Everything is stored in one database on your own computer.
   There is no account, no ads and no tracking of what you read.
 
