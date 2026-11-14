@@ -181,8 +181,20 @@ impl std::fmt::Display for GroupChoice {
 }
 
 /// Saves an edited feed: folder, title, default category and group, in that order.
-/// A typed new folder or group wins over the picked one.
+/// A typed new folder or group wins over the picked one. All steps succeed or none
+/// is kept.
 fn save_feed_edit(s: &Store, edit: FeedEdit) -> juttusihti_core::Result<()> {
+    s.conn().execute_batch("SAVEPOINT feed_edit")?;
+    match save_feed_steps(s, edit) {
+        Ok(()) => Ok(s.conn().execute_batch("RELEASE feed_edit")?),
+        Err(e) => {
+            let _ = s.conn().execute_batch("ROLLBACK TO feed_edit; RELEASE feed_edit");
+            Err(e)
+        }
+    }
+}
+
+fn save_feed_steps(s: &Store, edit: FeedEdit) -> juttusihti_core::Result<()> {
     let folder = match edit.new_folder.trim() {
         "" => edit.folder,
         name => Some(s.create_folder(name)?),
@@ -1547,7 +1559,15 @@ impl App {
                 let db = self.db.clone();
                 Task::perform(async move { db.call(move |s| save_feed_edit(s, edit)).await }, Message::FeedSaved)
             }
-            Message::FeedSaved(Ok(())) => Task::batch([self.load_sidebar(), self.load_categories()]),
+            Message::FeedSaved(Ok(())) => {
+                // The feed's default or group can change any list row and the open
+                // article's category.
+                let reload = match self.preview.as_ref().map(|p| p.article.id) {
+                    Some(id) => self.load_preview(id, false),
+                    None => Task::none(),
+                };
+                Task::batch([self.load_sidebar(), self.load_list(), reload])
+            }
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
             Message::DismissStatus => {
                 self.status = None;
@@ -2322,6 +2342,60 @@ mod tests {
         let g = f.category_group_id.unwrap();
         let tree = s.category_tree().unwrap();
         assert_eq!(tree.groups.iter().find(|x| x.group.id == g).unwrap().group.name, "Urheilu");
+    }
+
+    #[test]
+    fn a_failing_group_step_saves_nothing() {
+        let (mut app, feed) = app_with_feed();
+        let sport = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::NewGroup("!!!".into()));
+        let mut edit = app.feed_edit.clone().unwrap();
+        edit.title = "Renamed".into();
+        edit.new_folder = "Newfolder".into();
+        assert!(save_feed_edit(&app.db.shared().lock().unwrap(), edit).is_err());
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        let f = s.feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_eq!((f.title.as_str(), f.default_category_id, f.category_group_id), ("Example", None, None));
+        assert!(s.folders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn saving_a_feed_reloads_the_list() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, a) = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let entry = juttusihti_core::NewArticle {
+                guid: "g1".into(),
+                url: Some("https://x.test/g1".into()),
+                title: "g1".into(),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800),
+                terms: vec![],
+            };
+            s.ingest(feed, &[entry]).unwrap();
+            let a = s.conn().query_row("SELECT id FROM articles", [], |r| r.get::<_, i64>(0)).unwrap();
+            (s.create_category("Sport").unwrap(), a)
+        };
+        reload_feeds(&mut app);
+        reload_categories(&mut app);
+        select(&mut app, Selection::Uncategorized);
+        assert_eq!(listed(&app), vec![a]);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        assert!(listed(&app).is_empty());
+        // The save's follow-up reloads sidebar and list, and the open article when there is one.
+        let expected = app.load_sidebar().units() + app.load_list().units();
+        assert_eq!(app.update(Message::FeedSaved(Ok(()))).units(), expected);
+        app.show_preview(a);
+        assert_eq!(app.update(Message::FeedSaved(Ok(()))).units(), expected + app.load_preview(a, false).units());
     }
 
     #[test]

@@ -39,8 +39,8 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   nothing fits; terms and articles in any language go to the matching category.
 - **Feed default category and feeds in groups**: a feed can have a default category (set in its edit
   form) that files its articles when its terms give none, before AI; a feed can also sit in a
-  category group, so all its articles show under that group. Both are set on the Categories
-  screen and the feed edit form.
+  category group, so all its articles show under that group. The default is set in the feed edit
+  form (Organise shows it read-only); the group is set in the feed edit form or in Organise.
 
 ### Changed
 

@@ -24,22 +24,16 @@ pub fn describe(c: &ArticleCategory) -> (String, Option<String>) {
         return (m.name.clone(), Some("set by you".into()));
     }
     if let Some(f) = &c.from_feed {
-        return (f.category.name.clone(), Some(format!("From feed {}", f.feed_title)));
+        return (f.category.name.clone(), Some(format!("default of feed {}", f.feed_title)));
     }
-    let mut names: Vec<&str> = c.from_terms.iter().map(|t| t.name.as_str()).collect();
-    let ai_new = c.ai.as_ref().filter(|a| !c.from_terms.iter().any(|t| t.id == a.id));
-    if let Some(a) = ai_new {
-        names.push(&a.name);
+    if !c.from_terms.is_empty() {
+        let names: Vec<&str> = c.from_terms.iter().map(|t| t.name.as_str()).collect();
+        return (names.join(", "), Some("from the feed".into()));
     }
-    if names.is_empty() {
-        return ("None".into(), None);
+    match &c.ai {
+        Some(a) => (a.name.clone(), Some("from AI".into())),
+        None => ("None".into(), None),
     }
-    let origin = match (c.from_terms.is_empty(), c.ai.is_some()) {
-        (false, false) => "from the feed",
-        (true, _) => "from AI",
-        (false, true) => "from the feed and AI",
-    };
-    (names.join(", "), Some(origin.into()))
 }
 
 /// The pick list's entries: "Automatic" first when a manual choice exists, then
@@ -103,12 +97,11 @@ mod tests {
             manual: None,
             from_feed: None,
         };
-        assert_eq!(describe(&both), ("Sport, Tech".into(), Some("from the feed and AI".into())));
         let default = ArticleCategory {
             from_feed: Some(FeedDefault { category: cat(4, "Sport"), feed_title: "Yle Urheilu".into() }),
             ..Default::default()
         };
-        assert_eq!(describe(&default), ("Sport".into(), Some("From feed Yle Urheilu".into())));
+        assert_eq!(describe(&default), ("Sport".into(), Some("default of feed Yle Urheilu".into())));
         let manual = ArticleCategory { manual: Some(cat(3, "Local")), ..both };
         assert_eq!(describe(&manual), ("Local".into(), Some("set by you".into())));
     }

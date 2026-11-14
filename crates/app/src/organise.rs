@@ -181,9 +181,9 @@ impl Op {
                 })
             }
             Op::RenameGroup(id, name) => s.rename_group(id, &name).map(|_| format!("Renamed to “{name}”.")),
-            Op::DeleteGroup(id, name) => {
-                s.delete_group(id).map(|_| format!("Deleted group “{name}”. Its categories are now Ungrouped."))
-            }
+            Op::DeleteGroup(id, name) => s.delete_group(id).map(|_| {
+                format!("Deleted group “{name}”. Its categories are now Ungrouped and its feeds are in no group.")
+            }),
             Op::MoveGroup(id, index) => s.move_group(id, index).map(|_| String::new()),
             Op::MoveCategory(id, group, index) => s.move_category(id, group, index).map(|_| String::new()),
             Op::SetFeedGroup(feed, group) => s.set_feed_group(feed, group).map(|_| String::new()),
