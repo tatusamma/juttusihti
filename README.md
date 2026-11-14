@@ -37,8 +37,10 @@ after showing what it will send and what it will cost. Written in Rust with
 - **Categories**: a sidebar next to the article list picks a group or a category (with counts,
   your ★ Favourites and a "Find category…" box; hide it with « or **c**). The Categories screen
   groups them, files the section names publishers give their articles (publisher categories)
-  and sets aside the ones you do not want. "✨ Suggest categories" proposes a grouping as an
-  editable draft; nothing is saved until you press Approve.
+  and sets aside the ones you do not want. A feed that sends no categories but stays on one
+  theme can have a default category, and a feed can sit in a group so all its articles show
+  there. "✨ Suggest categories" proposes a grouping as an editable draft; nothing is saved until
+  you press Approve.
 - **Review**: everything AI produces is a suggestion until you confirm it, except the ✨ on
   Uncategorized, which saves the categories it finds directly.
 - **Reports**: volume per source, topics, labels, co-occurring entities, relevance and AI cost,
@@ -145,7 +147,7 @@ offline.
   protects it from the retention clean-up; **Open in browser** opens the original page.
 - The **⋯** menu marks the list read, hides articles you have dismissed as irrelevant,
   switches between AI-rewritten and original headlines and, for a single feed, renames it,
-  moves it to a folder or unsubscribes.
+  moves it to a folder, sets its default category and category group, or unsubscribes.
 - Add labels to an article from its preview. The **Labels** screen renames, merges and deletes
   them. The article's **Category** row shows its category and lets you change it; see
   [Categories](#categories).
@@ -156,16 +158,19 @@ offline.
 ### Categories
 
 The sidebar between the rail and the article list picks a group or a category: All articles, your
-★ Favourites, Uncategorized, then the groups and Ungrouped. The numbers follow All / Unread and the feed menu.
-"Find category…" finds a name (Esc or ✕ clears it), right-click or the star on hover adds a row
+★ Favourites, Uncategorized, then the groups and Ungrouped. Feeds you put in a group are listed under it
+after its categories, with a feed icon; click one to see that feed's articles. The numbers follow All / Unread
+and the feed menu. "Find category…" finds a category, group or feed by name (Esc or ✕ clears it), right-click or the star on hover adds a row
 to Favourites, and drag reorders. **«** hides the sidebar and **»** (or **c**) shows it again;
 **Organise…** opens the Categories screen.
 
-**Uncategorized** lists the articles in no category. Its ✨ has AI find categories for the next 100
-uncategorized articles whose feed gave no categories (or only ones you ignored): a small panel
-shows what is sent (their headlines and descriptions and your category names), the estimate and
-the per-run limit before anything is sent. The AI gives each article one main category and may
-create new ones (they go under Ungrouped); the results are saved directly, without Review.
+**Uncategorized** lists the articles in no category; an article that is in a group only through
+its feed is still uncategorized. Its ✨ has AI find categories for the next 100 uncategorized
+articles whose feed gave no categories (or only ones you ignored) and has no default category: a
+small panel shows what is sent (their headlines and descriptions and your group and category
+names), the estimate and the per-run limit before anything is sent. The AI gives each article one
+main category and may create new ones, filed under one of your groups (Ungrouped when none fits;
+it never creates groups); the results are saved directly, without Review.
 Articles it has checked are not sent again, and each press handles the next newest ones.
 
 On the Categories screen, **+ New group** and **+ New category** add them; drag a category onto
@@ -174,9 +179,23 @@ articles, are collected as terms: file one under a category with **Move to…**,
 **Unsorted**, or **Ignore** it. Publisher categories are collected from now on; articles fetched
 earlier get them only if they are still in the feed at the next refresh.
 
+**Feed defaults and feeds in groups.** Some feeds send no publisher categories but stay on one
+theme. Give such a feed a **default category** in its edit form (**Edit feed**, in the feed menu
+or the **⋯** menu): it files the feed's articles whose publisher categories give no category,
+old articles too, and those articles are never sent to the ✨. Clearing the default brings back
+any category AI had given them. A feed can also sit in one **group**, so all of its articles show
+under that group whatever their categories. Pick the group in the edit form, or type a name in
+"or new group" to create the group and file the feed in one step. On the Categories screen,
+**Add feed…** in a group files a feed there; drag a feed row to another group or to Ungrouped,
+or use **Remove from group**. A category lists the feeds it is the default for (**Default for:**).
+
+An article's categories are worked out in this order: the one you set wins; otherwise the
+categories its publisher categories are filed under; if none, its feed's default category; if
+none, the category AI gave it.
+
 Categories are separate from labels: labels serve search and analytics, categories a quick short
 list for filtering. In the article view, the **Category** row shows the article's category and
-where it came from (from the feed, from AI, or set by you); pick another to change it, or
+where it came from (from the feed, the default of its feed, from AI, or set by you); pick another to change it, or
 **Automatic** to clear your choice and return to the feed's or the AI's.
 
 **✨ Suggest categories** asks your AI to group your unsorted terms. It first shows what will be
