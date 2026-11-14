@@ -6,6 +6,7 @@
 
 mod ai_setup;
 mod app;
+mod article_category;
 mod categorize_ai;
 mod category_sidebar;
 mod crash_log;

@@ -172,6 +172,8 @@ pub struct Preview {
     feed_title: String,
     body: String,
     labels: Vec<ArticleLabel>,
+    category: juttusihti_core::categories::ArticleCategory,
+    all_categories: Vec<juttusihti_core::categories::Category>,
     headline: Option<juttusihti_core::headlines::Headline>,
     /// Text fetched from the article's page, if any.
     fulltext: Option<Fulltext>,
@@ -190,6 +192,15 @@ impl Preview {
         let text = if paywalled { self.body.strip_suffix(PAYWALL_NOTE).unwrap_or(&self.body) } else { &self.body };
         crate::fact_check::can_check(self.fulltext.is_some(), self.article.content.as_deref(), text.trim_end())
     }
+}
+
+/// Sets (or with `None` clears) an article's manual category.
+fn set_category(
+    s: &Store,
+    id: ArticleId,
+    choice: Option<juttusihti_core::categories::CategoryId>,
+) -> juttusihti_core::Result<ArticleId> {
+    s.set_article_category(id, choice).map(|_| id)
 }
 
 /// Reads an article for the reading pane. The fetched picture is decoded
@@ -212,6 +223,8 @@ fn read_preview(s: &Store, id: ArticleId) -> juttusihti_core::Result<Preview> {
     Ok(Preview {
         body,
         labels: s.article_labels(id)?,
+        category: s.article_category(id)?,
+        all_categories: s.categories()?,
         headline: s.headline(id)?,
         full: if fulltext.is_some() { FullState::Fetched } else { FullState::Idle },
         fact_check: s.fact_check(id)?,
@@ -373,6 +386,8 @@ pub enum Message {
     RemoveLabel(juttusihti_core::LabelId),
     DecideLabel(juttusihti_core::LabelId, juttusihti_core::Status),
     LabelsChanged(Result<Vec<ArticleLabel>, String>),
+    SetCategory(Option<juttusihti_core::categories::CategoryId>),
+    CategoryChanged(Result<ArticleId, String>),
     EditFeed(FeedId),
     FeedTitle(String),
     FeedFolder(FolderChoice),
@@ -1406,6 +1421,19 @@ impl App {
                 // Adding a label may have created a new one for the label filter.
                 self.load_feeds()
             }
+            Message::SetCategory(choice) => {
+                let Some(id) = self.preview.as_ref().map(|p| p.article.id) else { return Task::none() };
+                let db = self.db.clone();
+                Task::perform(
+                    async move { db.call(move |s| set_category(s, id, choice)).await },
+                    Message::CategoryChanged,
+                )
+            }
+            Message::CategoryChanged(Ok(id)) => {
+                let current = self.preview.as_ref().is_some_and(|p| p.article.id == id);
+                let reload = if current { self.load_preview(id, false) } else { Task::none() };
+                Task::batch([reload, self.load_categories(), self.load_list()])
+            }
             Message::EditFeed(id) => {
                 self.feeds_open = true;
                 self.confirm_unsubscribe = None;
@@ -1472,6 +1500,7 @@ impl App {
             | Message::Exported(Err(e))
             | Message::RetentionApplied(Err(e))
             | Message::LabelsChanged(Err(e))
+            | Message::CategoryChanged(Err(e))
             | Message::FeedSaved(Err(e)) => {
                 tracing::warn!(error = %e, "operation failed");
                 self.show_error(e);
@@ -2090,6 +2119,7 @@ impl App {
         let rest = rest
             .push(text(body).size(SIZE_BODY).line_height(1.6).style(style::body))
             .push(rule::horizontal(1))
+            .push(crate::article_category::view(&p.all_categories, &p.category, Message::SetCategory))
             .push(column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
         let width = READ_WIDTH + 2.0 * SPACE[4];
         let picture = p.picture.as_ref().filter(|_| self.settings.values.fulltext_pictures);
@@ -2793,6 +2823,31 @@ mod tests {
 
     fn fetched(text: &str, paywalled: bool) -> FetchOutcome {
         FetchOutcome::Fetched { text: text.into(), paywalled, picture: None }
+    }
+
+    #[test]
+    fn choosing_a_category_sets_the_manual_one() {
+        let (mut app, a, _) = app_with_articles();
+        let cat = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        app.show_preview(a);
+        set_category(&app.db.shared().lock().unwrap(), a, Some(cat)).unwrap();
+        app.show_preview(a);
+        assert_eq!(app.preview.as_ref().unwrap().category.manual.as_ref().map(|c| c.id), Some(cat));
+        let got = app.db.shared().lock().unwrap().article_category(a).unwrap();
+        assert_eq!(got.manual.map(|c| c.id), Some(cat));
+    }
+
+    #[test]
+    fn automatic_clears_the_manual_choice() {
+        let (mut app, a, _) = app_with_articles();
+        let cat = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        app.db.shared().lock().unwrap().set_article_category(a, Some(cat)).unwrap();
+        app.show_preview(a);
+        assert!(app.preview.as_ref().unwrap().category.manual.is_some());
+        set_category(&app.db.shared().lock().unwrap(), a, None).unwrap();
+        app.show_preview(a);
+        assert!(app.preview.as_ref().unwrap().category.manual.is_none());
+        assert!(app.db.shared().lock().unwrap().article_category(a).unwrap().manual.is_none());
     }
 
     #[test]
