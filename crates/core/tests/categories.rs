@@ -25,6 +25,19 @@ fn titled(s: &mut Store, title: &str) -> FeedId {
     s.add_feed(&NewFeed { url: format!("https://{title}/rss"), title: title.into(), ..Default::default() }).unwrap()
 }
 
+/// Ingests like a refresh, then undoes the automatic filing of the terms it added, for tests
+/// that start from terms still waiting in Unsorted.
+fn ingest_unsorted(s: &mut Store, feed: FeedId, entries: &[NewArticle]) -> Result<IngestStats> {
+    let max = |s: &Store, table: &str| -> i64 {
+        s.conn().query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| r.get(0)).unwrap()
+    };
+    let (terms, categories) = (max(s, "feed_terms"), max(s, "categories"));
+    let stats = s.ingest(feed, entries)?;
+    s.conn().execute("UPDATE feed_terms SET category_id = NULL WHERE id > ?1", [terms]).unwrap();
+    s.conn().execute("DELETE FROM categories WHERE id > ?1", [categories]).unwrap();
+    Ok(stats)
+}
+
 fn count(s: &Store, table: &str) -> i64 {
     s.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
 }
@@ -38,8 +51,8 @@ fn ingest_links_terms_idempotently() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let e = entry("1", &["AI", "Politiikka"]);
-    s.ingest(f, std::slice::from_ref(&e)).unwrap();
-    s.ingest(f, std::slice::from_ref(&e)).unwrap();
+    ingest_unsorted(&mut s, f, std::slice::from_ref(&e)).unwrap();
+    ingest_unsorted(&mut s, f, std::slice::from_ref(&e)).unwrap();
     assert_eq!(count(&s, "feed_terms"), 2);
     assert_eq!(count(&s, "article_terms"), 2);
 }
@@ -49,8 +62,8 @@ fn same_word_in_two_feeds_is_two_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f1 = feed(&mut s, "https://a.example/rss");
     let f2 = feed(&mut s, "https://b.example/rss");
-    s.ingest(f1, &[entry("1", &["AI"])]).unwrap();
-    s.ingest(f2, &[entry("2", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f1, &[entry("1", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f2, &[entry("2", &["AI"])]).unwrap();
     assert_eq!(count(&s, "feed_terms"), 2);
 }
 
@@ -58,30 +71,94 @@ fn same_word_in_two_feeds_is_two_terms() {
 fn unchanged_article_gains_terms_on_refresh() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &[])]).unwrap();
     assert_eq!(count(&s, "article_terms"), 0);
-    let st = s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    let st = ingest_unsorted(&mut s, f, &[entry("1", &["AI"])]).unwrap();
     assert_eq!(st.unchanged, 1);
     assert_eq!(count(&s, "article_terms"), 1);
 }
 
+/// The category a term is filed under, if any.
+fn filed_under(s: &Store, feed: FeedId, name: &str) -> Option<CategoryId> {
+    s.conn()
+        .query_row("SELECT category_id FROM feed_terms WHERE feed_id = ?1 AND name = ?2", (feed, name), |r| r.get(0))
+        .unwrap()
+}
+
 #[test]
-fn new_terms_start_unsorted() {
+fn new_terms_are_filed_under_a_category_of_the_same_name() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
-    let n: i64 = s
-        .conn()
-        .query_row("SELECT COUNT(*) FROM feed_terms WHERE category_id IS NULL AND ignored = 0", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1);
+    s.ingest(f, &[entry("1", &["Urheilu", "Jääkiekko"])]).unwrap();
+    let tree = s.category_tree().unwrap();
+    assert_eq!(names(&tree.ungrouped), ["Urheilu", "Jääkiekko"]);
+    assert!(s.unsorted_terms().unwrap().is_empty());
+    let urheilu = filed_under(&s, f, "Urheilu").unwrap();
+    assert_eq!(in_category(&s, urheilu), ["1"]);
+}
+
+#[test]
+fn the_same_publisher_category_from_two_feeds_shares_one_category() {
+    let mut s = Store::open_in_memory().unwrap();
+    let (yle, is) = (feed(&mut s, "https://yle.example/rss"), feed(&mut s, "https://is.example/rss"));
+    s.ingest(yle, &[entry("1", &["Kotimaa"])]).unwrap();
+    s.ingest(is, &[entry("2", &[" kotimaa "])]).unwrap();
+    assert_eq!(count(&s, "categories"), 1);
+    assert_eq!(filed_under(&s, yle, "Kotimaa"), filed_under(&s, is, " kotimaa "));
+}
+
+#[test]
+fn a_publisher_category_joins_an_existing_category_and_keeps_its_group() {
+    let mut s = Store::open_in_memory().unwrap();
+    let sports = s.create_group("Sports").unwrap();
+    let urheilu = s.create_category("Urheilu").unwrap();
+    s.move_category(urheilu, Some(sports), 0).unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["URHEILU"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 1);
+    assert_eq!(filed_under(&s, f, "URHEILU"), Some(urheilu));
+    assert_eq!(names(&s.category_tree().unwrap().groups[0].categories), ["Urheilu"]);
+}
+
+#[test]
+fn a_term_moved_back_to_unsorted_or_ignored_stays_so_on_refresh() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["Tilaajille", "Mielipide"])]).unwrap();
+    s.set_term_ignored(term_id(&s, "Tilaajille"), true).unwrap();
+    s.map_term(term_id(&s, "Mielipide"), None).unwrap();
+    s.ingest(f, &[entry("1", &["Tilaajille", "Mielipide"]), entry("2", &["Tilaajille", "Mielipide"])]).unwrap();
+    assert_eq!(filed_under(&s, f, "Tilaajille"), None);
+    assert_eq!(s.ignored_terms().unwrap().len(), 1);
+    let unsorted: Vec<String> = s.unsorted_terms().unwrap().into_iter().map(|t| t.name).collect();
+    assert_eq!(unsorted, ["Mielipide"]);
+}
+
+#[test]
+fn a_term_whose_category_was_deleted_stays_unsorted_on_refresh() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["Viihde"])]).unwrap();
+    s.delete_category(filed_under(&s, f, "Viihde").unwrap()).unwrap();
+    s.ingest(f, &[entry("2", &["Viihde"])]).unwrap();
+    assert_eq!(count(&s, "categories"), 0);
+    assert_eq!(s.unsorted_terms().unwrap().len(), 1);
+}
+
+#[test]
+fn a_term_without_letters_or_digits_stays_unsorted() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["—", "Talous"])]).unwrap();
+    assert_eq!(names(&s.category_tree().unwrap().ungrouped), ["Talous"]);
+    assert_eq!(filed_under(&s, f, "—"), None);
 }
 
 #[test]
 fn removing_feed_removes_its_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"])]).unwrap();
     s.remove_feed(f).unwrap();
     assert_eq!(count(&s, "feed_terms"), 0);
     assert_eq!(count(&s, "article_terms"), 0);
@@ -97,7 +174,7 @@ fn entry_scheme(guid: &str, name: &str, scheme: &str) -> NewArticle {
 fn term_identity_is_normalized() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[" ai "])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[" ai "])]).unwrap();
     assert_eq!(count(&s, "feed_terms"), 1);
     assert_eq!(count(&s, "article_terms"), 2);
 }
@@ -106,7 +183,7 @@ fn term_identity_is_normalized() {
 fn same_name_different_schemes_are_two_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry_scheme("1", "AI", ""), entry_scheme("2", "AI", "urn:x")]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry_scheme("1", "AI", ""), entry_scheme("2", "AI", "urn:x")]).unwrap();
     assert_eq!(count(&s, "feed_terms"), 2);
 }
 
@@ -189,7 +266,7 @@ fn creating_categories_normalizes_names() {
 fn mapped_term_puts_article_in_category() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &["Muu"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &["Muu"])]).unwrap();
     let c = s.create_category("Tekoäly").unwrap();
     assert_eq!(by_category(&s, c), 0);
     map_term(&s, "AI", c);
@@ -200,7 +277,7 @@ fn mapped_term_puts_article_in_category() {
 fn group_filter_returns_each_article_once() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI", "Robotit"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI", "Robotit"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
     let a = s.create_category("Tekoäly").unwrap();
     let b = s.create_category("Robotiikka").unwrap();
     let g = s.create_group("Aihe").unwrap();
@@ -220,7 +297,7 @@ fn group_filter_returns_each_article_once() {
 fn manual_category_overrides_terms_and_ai() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"])]).unwrap();
     let (a, b, c) = (s.create_category("A").unwrap(), s.create_category("B").unwrap(), s.create_category("C").unwrap());
     let art = article_id(&s, "1");
     map_term(&s, "AI", a);
@@ -245,7 +322,7 @@ fn manual_category_overrides_terms_and_ai() {
 fn clearing_manual_returns_to_automatic() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
     let (a, b, c) = (s.create_category("A").unwrap(), s.create_category("B").unwrap(), s.create_category("C").unwrap());
     let art = article_id(&s, "1");
     map_term(&s, "AI", a);
@@ -270,7 +347,7 @@ fn clearing_manual_returns_to_automatic() {
 fn deleting_category_clears_article_choices_and_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
     let x = s.create_category("X").unwrap();
     map_term(&s, "AI", x);
     s.set_article_category(article_id(&s, "2"), Some(x)).unwrap();
@@ -289,7 +366,7 @@ fn deleting_category_clears_article_choices_and_terms() {
 fn merge_moves_terms_and_article_choices() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
     let from = s.create_category("Tekoäly").unwrap();
     let into = s.create_category("Teknologia").unwrap();
     let g = s.create_group("G").unwrap();
@@ -314,7 +391,7 @@ fn merge_moves_terms_and_article_choices() {
 fn label_filter_ignores_categories() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
     let l = s.create_label("Tekoäly").unwrap();
     let c = s.create_category("Tekoäly").unwrap();
     assert_eq!(l, c, "same id in both tables makes a leak visible");
@@ -432,7 +509,7 @@ fn move_category_between_groups_renumbers_both() {
 fn mapping_and_ignoring_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI", "Sports", "Misc"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI", "Sports", "Misc"])]).unwrap();
     let l = s.create_category("Tech").unwrap();
     assert_eq!(s.unsorted_terms().unwrap().len(), 3);
     let ai = term_id(&s, "AI");
@@ -461,9 +538,13 @@ fn mapping_and_ignoring_terms() {
 fn unsorted_terms_come_most_frequent_first() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["Aa", "Harvinainen"]), entry("2", &["Yleinen", "Bb"]), entry("3", &["Yleinen", "Bb"])])
-        .unwrap();
-    s.ingest(f, &[entry("4", &["Yleinen"])]).unwrap();
+    ingest_unsorted(
+        &mut s,
+        f,
+        &[entry("1", &["Aa", "Harvinainen"]), entry("2", &["Yleinen", "Bb"]), entry("3", &["Yleinen", "Bb"])],
+    )
+    .unwrap();
+    ingest_unsorted(&mut s, f, &[entry("4", &["Yleinen"])]).unwrap();
     let names: Vec<String> = s.unsorted_terms().unwrap().into_iter().map(|t| t.name).collect();
     assert_eq!(names, ["Yleinen", "Bb", "Aa", "Harvinainen"], "by article count, then by name");
 }
@@ -488,7 +569,7 @@ fn counts_are_distinct_and_follow_view_and_feed() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let f2 = feed(&mut s, "https://b.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
     let g = s.create_group("G").unwrap();
     let a = s.create_category("A").unwrap();
     let b = s.create_category("B").unwrap();
@@ -517,7 +598,7 @@ fn counts_are_distinct_and_follow_view_and_feed() {
 fn counts_follow_manual_choices() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &["AI"])]).unwrap();
     let g = s.create_group("G").unwrap();
     let l = s.create_category("L").unwrap();
     let other = s.create_category("Other").unwrap();
@@ -548,8 +629,8 @@ fn counts_follow_folder_and_saved_view() {
         })
         .unwrap();
     let f2 = feed(&mut s, "https://b.example/rss");
-    s.ingest(f1, &[entry("1", &["AI"])]).unwrap();
-    s.ingest(f2, &[entry("2", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f1, &[entry("1", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f2, &[entry("2", &["AI"])]).unwrap();
     let g = s.create_group("G").unwrap();
     let l = s.create_category("L").unwrap();
     s.move_category(l, Some(g), 0).unwrap();
@@ -572,7 +653,7 @@ fn counts_follow_folder_and_saved_view() {
 fn marking_a_category_read_leaves_other_articles_unread() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
     let l = s.create_category("Tekoäly").unwrap();
     map_term(&s, "AI", l);
     s.set_article_category(article_id(&s, "3"), Some(l)).unwrap();
@@ -600,7 +681,7 @@ mod draft {
     fn setup(names: &[&str]) -> Store {
         let mut s = Store::open_in_memory().unwrap();
         let f = feed(&mut s, "https://a.example/rss");
-        s.ingest(f, &[entry("1", names)]).unwrap();
+        ingest_unsorted(&mut s, f, &[entry("1", names)]).unwrap();
         s
     }
 
@@ -644,8 +725,9 @@ mod draft {
         let mut s = Store::open_in_memory().unwrap();
         let f = feed(&mut s, "https://a.example/rss");
         // "Vanha" is seen first but in one article; "Uusi" later but in three. Ties go by name.
-        s.ingest(f, &[entry("1", &["Vanha"])]).unwrap();
-        s.ingest(f, &[entry("2", &["Uusi"]), entry("3", &["Uusi"]), entry("4", &["Uusi", "Toinen"])]).unwrap();
+        ingest_unsorted(&mut s, f, &[entry("1", &["Vanha"])]).unwrap();
+        ingest_unsorted(&mut s, f, &[entry("2", &["Uusi"]), entry("3", &["Uusi"]), entry("4", &["Uusi", "Toinen"])])
+            .unwrap();
         let input = s.category_plan_input(2).unwrap();
         let names: Vec<&str> = input.terms.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Uusi", "Toinen"]);
@@ -868,7 +950,8 @@ fn draft_is_empty_only_without_proposals() {
 fn uncategorized_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(
+    ingest_unsorted(
+        &mut s,
         f,
         &[
             entry("a", &[]),
@@ -912,7 +995,8 @@ fn counts_include_uncategorized_and_follow_the_view() {
 fn without_terms_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(
+    ingest_unsorted(
+        &mut s,
         f,
         &[entry("a", &["Odd"]), entry("b", &["AI"]), entry("c", &["Tilaajille"]), entry("d", &[]), entry("e", &[])],
     )
@@ -944,7 +1028,8 @@ fn dated(guid: &str, published_at: i64, terms: &[&str]) -> NewArticle {
 fn to_categorize_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(
+    ingest_unsorted(
+        &mut s,
         f,
         &[
             dated("old", 1_000, &[]),
@@ -981,7 +1066,8 @@ fn articles_to_categorize_are_uncategorized_without_terms_and_newest_first() {
 fn ai_eligibility_skips_unsorted_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(
+    ingest_unsorted(
+        &mut s,
         f,
         &[
             dated("none", 1_000, &[]),
@@ -1013,7 +1099,7 @@ fn articles_to_categorize_skip_checked_ones_and_follow_the_filter() {
     assert_eq!(guids(&s, &s.articles_to_categorize(unread, 100).unwrap().0), ["old"]);
 
     let other = feed(&mut s, "https://b.example/rss");
-    s.ingest(other, &[dated("elsewhere", 9_000, &[])]).unwrap();
+    ingest_unsorted(&mut s, other, &[dated("elsewhere", 9_000, &[])]).unwrap();
     let only_other = ListFilter { feed_id: Some(other), ..Default::default() };
     let (items, eligible) = s.articles_to_categorize(only_other, 100).unwrap();
     assert_eq!((guids(&s, &items), eligible), (vec!["elsewhere".to_string()], 1));
@@ -1024,7 +1110,7 @@ fn articles_to_categorize_fall_back_to_the_start_of_the_content() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let long = "word ".repeat(200);
-    s.ingest(f, &[NewArticle { summary: None, content: Some(long), ..entry("a", &[]) }]).unwrap();
+    ingest_unsorted(&mut s, f, &[NewArticle { summary: None, content: Some(long), ..entry("a", &[]) }]).unwrap();
     let (items, _) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
     assert!(items[0].text.starts_with("word word"));
     assert!(items[0].text.chars().count() <= 300);
@@ -1145,7 +1231,7 @@ fn create_category_checked_says_whether_it_was_created() {
 fn default_data() -> (Store, FeedId, CategoryId, CategoryId) {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"])]).unwrap();
     let sport = s.create_category("Sport").unwrap();
     let tech = s.create_category("Tech").unwrap();
     map_term(&s, "AI", tech);
@@ -1180,7 +1266,7 @@ fn feed_default_beats_ai_and_clearing_it_brings_ai_back() {
 fn mapped_terms_drop_the_ai_category() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["AI"])]).unwrap();
     let tech = s.create_category("Tech").unwrap();
     let local = s.create_category("Local").unwrap();
     map_term(&s, "AI", tech);
@@ -1205,8 +1291,8 @@ fn feed_default_articles_are_not_offered_to_ai() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let g = feed(&mut s, "https://b.example/rss");
-    s.ingest(f, &[entry("1", &[])]).unwrap();
-    s.ingest(g, &[entry("2", &[])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &[])]).unwrap();
+    ingest_unsorted(&mut s, g, &[entry("2", &[])]).unwrap();
     let sport = s.create_category("Sport").unwrap();
     s.set_feed_default_category(f, Some(sport)).unwrap();
     let (offered, eligible) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
@@ -1249,9 +1335,13 @@ fn list_and_counts_agree_on_every_category() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let g = feed(&mut s, "https://b.example/rss");
-    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])])
-        .unwrap();
-    s.ingest(g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[])]).unwrap();
+    ingest_unsorted(
+        &mut s,
+        f,
+        &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])],
+    )
+    .unwrap();
+    ingest_unsorted(&mut s, g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[])]).unwrap();
     let sport = s.create_category("Sport").unwrap();
     let tech = s.create_category("Tech").unwrap();
     let local = s.create_category("Local").unwrap();
@@ -1281,8 +1371,8 @@ fn group_data() -> (Store, FeedId, FeedId, GroupId, CategoryId, CategoryId) {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://f.example/rss");
     let g = feed(&mut s, "https://g.example/rss");
-    s.ingest(f, &[entry("1", &["Pol"]), entry("2", &[])]).unwrap();
-    s.ingest(g, &[entry("3", &["Foot"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("1", &["Pol"]), entry("2", &[])]).unwrap();
+    ingest_unsorted(&mut s, g, &[entry("3", &["Foot"])]).unwrap();
     let sports = s.create_group("Sports").unwrap();
     let football = s.create_category("Football").unwrap();
     let politics = s.create_category("Politics").unwrap();
@@ -1312,7 +1402,7 @@ fn a_group_counts_an_article_once_via_feed_and_category() {
     let hockey = s.create_category("Hockey").unwrap();
     s.move_category(hockey, Some(sports), 1).unwrap();
     s.set_article_category(article_id(&s, "2"), Some(football)).unwrap();
-    s.ingest(f, &[entry("4", &["Pol", "Puck"])]).unwrap();
+    ingest_unsorted(&mut s, f, &[entry("4", &["Pol", "Puck"])]).unwrap();
     map_term(&s, "Puck", hockey);
     let c = s.category_counts(ListFilter::default()).unwrap();
     assert_eq!(c.groups.get(&sports), Some(&4)); // 1, 2, 4 via feed f; 3 via football
@@ -1387,10 +1477,15 @@ fn counts_match_the_list_under_every_scope() {
     let f = feed(&mut s, "https://a.example/rss");
     let g = feed(&mut s, "https://b.example/rss");
     let h = feed(&mut s, "https://c.example/rss");
-    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])])
+    ingest_unsorted(
+        &mut s,
+        f,
+        &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])],
+    )
+    .unwrap();
+    ingest_unsorted(&mut s, g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[]), entry("9", &["AI", "Foot"])])
         .unwrap();
-    s.ingest(g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[]), entry("9", &["AI", "Foot"])]).unwrap();
-    s.ingest(h, &[entry("10", &["Foot"]), entry("11", &[])]).unwrap();
+    ingest_unsorted(&mut s, h, &[entry("10", &["Foot"]), entry("11", &[])]).unwrap();
     let news = s.create_group("News").unwrap();
     let sports = s.create_group("Sports").unwrap();
     let sport = s.create_category("Sport").unwrap();

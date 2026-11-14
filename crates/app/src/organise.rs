@@ -776,9 +776,8 @@ impl State {
         let kind = self.drag.dragging().map(|d| d.item);
         let mut body = column![].spacing(SPACE[4]);
         if self.loaded && self.categories().next().is_none() {
-            body = body.push(style::note(
-                "No categories yet. Publisher categories appear under Unsorted terms after the next refresh.",
-            ));
+            body = body
+                .push(style::note("No categories yet. Publisher categories become categories at the next refresh."));
         }
         for g in &self.snap.groups {
             body = body.push(self.view_group(g, kind));
@@ -1255,9 +1254,15 @@ mod tests {
         })
     }
 
-    /// One feed with an article carrying the publisher terms `terms`.
+    /// One feed with an article carrying the publisher terms `terms`, left in Unsorted (a
+    /// refresh files new terms automatically; these tests start from terms the user has not
+    /// filed).
     fn add_terms(st: &State, terms: &[&str]) {
         with(st, |s| {
+            let max = |s: &Store, table: &str| -> i64 {
+                s.conn().query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| r.get(0)).unwrap()
+            };
+            let (old_terms, old_categories) = (max(s, "feed_terms"), max(s, "categories"));
             let f = s
                 .add_feed(&NewFeed {
                     url: "https://a.example/rss".into(),
@@ -1276,6 +1281,8 @@ mod tests {
                 terms: terms.iter().map(|t| NewTerm { name: (*t).into(), scheme: String::new() }).collect(),
             };
             s.ingest(f, &[a]).unwrap();
+            s.conn().execute("UPDATE feed_terms SET category_id = NULL WHERE id > ?1", [old_terms]).unwrap();
+            s.conn().execute("DELETE FROM categories WHERE id > ?1", [old_categories]).unwrap();
         });
     }
 

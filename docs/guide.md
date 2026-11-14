@@ -53,9 +53,11 @@ Articles it has checked are not sent again, and each press handles the next newe
 
 On the Categories screen, **+ New group** and **+ New category** add them; drag a category onto
 a group (or use **Move to…**) to file it. Publisher categories, the section names a feed gives its
-articles, are collected as terms: file one under a category with **Move to…**, leave it in
-**Unsorted**, or **Ignore** it. Publisher categories are collected from now on; articles fetched
-earlier get them only if they are still in the feed at the next refresh.
+articles, are collected as terms, and each new one is filed under the category with the same name,
+created in Ungrouped when there is none: "Kotimaa" from two feeds lands in one category. Move a
+term to another category with **Move to…**, or to **Unsorted**, or **Ignore** it; your choice stays
+at later refreshes. Publisher categories are collected from now on; articles fetched earlier get
+them only if they are still in the feed at the next refresh.
 
 ![The Categories screen: groups, categories, a feed in a group and feed defaults](screenshots/categories.png)
 

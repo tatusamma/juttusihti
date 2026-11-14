@@ -246,8 +246,11 @@ impl Store {
                 if let Some(article_id) = article_id {
                     for t in &e.terms {
                         let normalized = normalize_text(&t.name);
-                        insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])?;
+                        let new = insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])? > 0;
                         let tid: i64 = term_id.query_row(params![feed_id, normalized, t.scheme], |r| r.get(0))?;
+                        if new {
+                            file_new_term(&tx, tid, &t.name)?;
+                        }
                         link_term.execute(params![article_id, tid])?;
                     }
                 }
@@ -433,6 +436,20 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         default_category_id: r.get(9)?,
         category_group_id: r.get(10)?,
     })
+}
+
+/// Files a publisher category seen for the first time under the category with the same name,
+/// creating it in Ungrouped when there is none. Only new terms are filed, so a term the user
+/// moved back to Unsorted, ignored or whose category they deleted stays as they left it. A name
+/// that cannot be a category (no letters or digits) leaves the term unsorted.
+fn file_new_term(conn: &Connection, term: i64, name: &str) -> Result<()> {
+    let category = match crate::categories::insert_category(conn, name, None) {
+        Ok((id, _)) => id,
+        Err(Error::Invalid(_)) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    conn.execute("UPDATE feed_terms SET category_id = ?1 WHERE id = ?2", params![category, term])?;
+    Ok(())
 }
 
 fn non_empty<'a>(s: &'a str, what: &str) -> Result<&'a str> {

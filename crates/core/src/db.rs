@@ -20,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_factcheck.sql"),
     include_str!("../migrations/0008_categories.sql"),
     include_str!("../migrations/0009_feed_categories.sql"),
+    include_str!("../migrations/0010_file_publisher_terms.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -140,7 +141,7 @@ mod tests {
         let store = crate::store::Store::open(&path).unwrap();
         let conn = store.conn();
         let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!((v, SCHEMA_VERSION), (9, 9));
+        assert_eq!((v, SCHEMA_VERSION), (10, 10));
         let labels: Vec<(i64, String, Option<String>)> = conn
             .prepare("SELECT id, name, color FROM labels ORDER BY id")
             .unwrap()
@@ -180,6 +181,53 @@ mod tests {
         let tree = store.category_tree().unwrap();
         assert!(tree.groups.is_empty() && tree.ungrouped.is_empty(), "labels are not categories");
         assert!(store.unsorted_terms().unwrap().is_empty());
+    }
+
+    #[test]
+    fn publisher_terms_waiting_in_unsorted_are_filed_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        for (i, sql) in MIGRATIONS[..9].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        // Feeds 1 and 2 both send "Kotimaa" (in different case). "Urheilu" is already a
+        // category in a group; "Talous" is filed elsewhere, "Tilaajille" ignored and "—" has
+        // no letters. Kotimaa is on three articles, Ulkomaat on one.
+        conn.execute_batch(
+            "INSERT INTO feeds(id, url, title, created_at) VALUES (1, 'https://a/rss', 'A', 0), (2, 'https://b/rss', 'B', 0);
+             INSERT INTO articles(id, feed_id, guid, title, fetched_at, effective_at, dedup_key, content_hash)
+             VALUES (1, 1, 'a1', 'T', 0, 0, 'k1', 'h'), (2, 1, 'a2', 'T', 0, 0, 'k2', 'h'), (3, 2, 'b1', 'T', 0, 0, 'k3', 'h');
+             INSERT INTO category_groups(id, name, normalized, position, created_at) VALUES (1, 'Sports', 'sports', 0, 0);
+             INSERT INTO categories(id, name, normalized, group_id, position, created_at)
+             VALUES (1, 'Urheilu', 'urheilu', 1, 0, 0), (2, 'Economy', 'economy', NULL, 0, 0);
+             INSERT INTO feed_terms(id, feed_id, name, normalized, scheme, category_id, ignored, first_seen_at) VALUES
+               (1, 1, 'Kotimaa', 'kotimaa', '', NULL, 0, 0), (2, 2, 'KOTIMAA', 'kotimaa', '', NULL, 0, 0),
+               (3, 1, 'Ulkomaat', 'ulkomaat', '', NULL, 0, 0), (4, 1, 'urheilu', 'urheilu', '', NULL, 0, 0),
+               (5, 1, 'Talous', 'talous', '', 2, 0, 0), (6, 1, 'Tilaajille', 'tilaajille', '', NULL, 1, 0),
+               (7, 1, '—', '', '', NULL, 0, 0);
+             INSERT INTO article_terms(article_id, term_id) VALUES (1, 1), (2, 1), (3, 2), (1, 3);",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let filed = |id: i64| -> Option<i64> {
+            conn.query_row("SELECT category_id FROM feed_terms WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        let category = |name: &str| -> (i64, Option<i64>, i64) {
+            conn.query_row("SELECT id, group_id, position FROM categories WHERE name = ?1", [name], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+        };
+        let (kotimaa, ulkomaat) = (category("Kotimaa"), category("Ulkomaat"));
+        assert_eq!((kotimaa.1, kotimaa.2), (None, 1), "Ungrouped, after Economy, most used first");
+        assert_eq!((ulkomaat.1, ulkomaat.2), (None, 2));
+        assert_eq!((filed(1), filed(2)), (Some(kotimaa.0), Some(kotimaa.0)), "one category for both feeds");
+        assert_eq!(filed(3), Some(ulkomaat.0));
+        assert_eq!(filed(4), Some(1), "joins the existing category in its group");
+        assert_eq!((filed(5), filed(6), filed(7)), (Some(2), None, None), "filed, ignored and nameless stay");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 4);
     }
 
     #[test]
