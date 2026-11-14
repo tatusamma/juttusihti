@@ -345,6 +345,13 @@ impl State {
         self.drag.dragging().filter(|d| d.active).map(|d| (d.label.as_str(), d.cursor))
     }
 
+    /// The row being dragged, once the pointer has moved past the drag threshold.
+    /// Every click presses a row, so the drop zones must not appear on a mere press
+    /// (they would make the tree jump on each selection).
+    pub(crate) fn dragged(&self) -> Option<Item> {
+        self.drag.dragging().filter(|d| d.active).map(|d| d.item)
+    }
+
     fn group(&self, id: GroupId) -> Option<&GroupNode> {
         self.tree.groups.iter().find(|g| g.group.id == id)
     }
@@ -510,7 +517,7 @@ impl State {
     }
 
     fn view_tree(&self, selected: Selection) -> Element<'_, Msg> {
-        let dragged = self.drag.dragging().map(|d| d.item);
+        let dragged = self.dragged();
         let mut col = column![plain_row(
             text("All articles").size(SIZE_BODY).into(),
             None,

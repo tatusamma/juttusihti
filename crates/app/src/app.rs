@@ -2246,6 +2246,19 @@ mod tests {
     }
 
     #[test]
+    fn drop_zones_appear_only_once_a_drag_starts() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Press(SidebarItem::Group(c.tech), "Tech".into(), nan)));
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 0.0))));
+        assert_eq!(app.categories.dragged(), None, "a press (a click) keeps the calm layout");
+        let _ = app.categories.handle(SidebarMsg::Drag(DragMsg::Move(Point::new(0.0, 40.0))));
+        assert_eq!(app.categories.dragged(), Some(SidebarItem::Group(c.tech)));
+        let _ = app.categories.handle(SidebarMsg::Escape);
+        assert_eq!(app.categories.dragged(), None);
+    }
+
+    #[test]
     fn favourites_toggle_from_the_menu() {
         let (mut app, c) = app_with_categories();
         let fav = Favourite::Category(c.politics);
