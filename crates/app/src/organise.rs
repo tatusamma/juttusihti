@@ -583,23 +583,17 @@ impl State {
             (OrgItem::Group(id), OrgTarget::GroupSlot(before, _)) => {
                 let index = |g: GroupId| self.snap.groups.iter().position(|x| x.group.id == g);
                 let from = index(id)?;
-                let to = match before {
-                    Some(b) => {
-                        let to = index(b)?;
-                        if from < to { to - 1 } else { to }
-                    }
-                    None => self.snap.groups.len() - 1,
+                let before = match before {
+                    Some(b) => index(b)?,
+                    None => self.snap.groups.len(),
                 };
-                (to != from).then_some(Op::MoveGroup(id, to))
+                drag::reorder(from, before).map(|to| Op::MoveGroup(id, to))
             }
             (OrgItem::Category(id), OrgTarget::GroupSlot(group, index)) => {
                 self.category(id)?;
                 match self.members(group).iter().position(|c| c.label.id == id) {
                     // Within its own group the row leaves its old place first.
-                    Some(from) => {
-                        let to = if from < index { index - 1 } else { index };
-                        (to != from).then_some(Op::MoveCategory(id, group, to))
-                    }
+                    Some(from) => drag::reorder(from, index).map(|to| Op::MoveCategory(id, group, to)),
                     None => Some(Op::MoveCategory(id, group, index)),
                 }
             }

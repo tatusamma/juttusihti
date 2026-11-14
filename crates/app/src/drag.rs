@@ -14,6 +14,14 @@ pub const DRAG_THRESHOLD: f32 = 4.0;
 
 const OUTLINE_RADIUS: f32 = 6.0;
 
+/// The index to pass to a store `move_*` (which removes the row, then inserts
+/// it) for dropping the row at `from` before the row at `before` of the same
+/// list (`before == len` for the end); `None` when it would not move.
+pub fn reorder(from: usize, before: usize) -> Option<usize> {
+    let to = if from < before { before - 1 } else { before };
+    (to != from).then_some(to)
+}
+
 /// What is being dragged and where it may land; generic over the screen's item and target types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Drag<I, T> {
@@ -177,6 +185,15 @@ mod tests {
         let mut s = S::default();
         s.update(DragMsg::Press(7, "Seven".into(), p(10.0, 10.0)));
         s
+    }
+
+    #[test]
+    fn reorder_accounts_for_the_row_leaving_first() {
+        assert_eq!(reorder(0, 2), Some(1));
+        assert_eq!(reorder(2, 0), Some(0));
+        assert_eq!(reorder(1, 3), Some(2), "to the end of three");
+        assert_eq!(reorder(1, 1), None, "before itself");
+        assert_eq!(reorder(1, 2), None, "before the next row");
     }
 
     #[test]

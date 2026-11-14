@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use iced::keyboard::{self, Key};
 use iced::widget::{
-    Space, button, column, container, operation, pick_list, pin, responsive, rich_text, row, rule, scrollable, span,
-    stack, text, text_input, tooltip,
+    Space, button, column, container, operation, pin, responsive, rich_text, row, rule, scrollable, span, stack, text,
+    text_input, tooltip,
 };
 use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, Vector, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
@@ -16,12 +16,12 @@ use juttusihti_core::fulltext::Fulltext;
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::{ListFilter, Store};
 use juttusihti_core::{
-    Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, Label, LabelId, NewFeed, Page,
-    View,
+    Article, ArticleId, ArticleLabel, ArticleSummary, Feed, FeedId, Folder, FolderId, NewFeed, Page, View,
 };
 use juttusihti_fetch::{Fetcher, Policy};
 use tokio::sync::Semaphore;
 
+use crate::category_sidebar::{self, Selection};
 use crate::db::Db;
 use crate::icons::{Icon, icon};
 use crate::style::{self, READ_WIDTH, SEMIBOLD, SIZE_ARTICLE_TITLE, SIZE_BODY, SIZE_SMALL, SIZE_TITLE, SPACE};
@@ -37,8 +37,6 @@ const LIST_HEADER_HEIGHT: f32 = 44.0;
 const STATUS_BAR_HEIGHT: f32 = 36.0;
 /// Left padding of the list header.
 const LIST_HEADER_PAD: f32 = 12.0;
-/// Width of the label filter by the search box, so long label names cannot squeeze the search.
-const LABEL_FILTER_WIDTH: f32 = 200.0;
 /// Width of the ⋯ menu above the article list.
 const LIST_MENU_WIDTH: f32 = 280.0;
 /// Diameter of the unread dot in the article list.
@@ -92,18 +90,6 @@ pub struct Sidebar {
     pub(crate) feeds: Vec<Feed>,
     pub(crate) folders: Vec<Folder>,
     pub(crate) unread: Vec<(FeedId, u64)>,
-    /// Every label, for the label filter by the search box.
-    pub(crate) labels: Vec<Label>,
-}
-
-/// An entry in the label filter: a label, or `None` for "Any label".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabelChoice(pub Option<LabelId>, pub String);
-
-impl std::fmt::Display for LabelChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.1)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -316,8 +302,8 @@ pub enum Message {
     SearchSubmit,
     ClearSearch,
     FocusSearch,
-    /// Shows only articles with this confirmed label, or any label.
-    FilterLabel(LabelChoice),
+    /// The categories sidebar.
+    Categories(category_sidebar::Msg),
     PrevPage,
     NextPage,
     AddFeedInput(String),
@@ -395,8 +381,9 @@ pub struct App {
     screen: Screen,
     search: String,
     active_search: String,
-    /// The label the list is filtered by.
-    label_filter: Option<LabelId>,
+    /// The group or category the list is narrowed to (the categories sidebar).
+    category: Selection,
+    categories: category_sidebar::State,
     page: Page,
     /// Incremented for every list request, so stale responses are dropped.
     list_generation: u64,
@@ -443,6 +430,7 @@ impl App {
         let mut app = Self {
             research: crate::research::State::new(db.clone()),
             organise: crate::organise::State::new(db.clone()),
+            categories: category_sidebar::State::new(db.clone()),
             review: crate::review::State::new(db.clone()),
             graph: crate::graph_view::State::new(db.clone()),
             timeline: crate::timeline_view::State::new(db.clone()),
@@ -461,14 +449,14 @@ impl App {
             db,
             fetcher,
             fetch_slots: Arc::new(Semaphore::new(MAX_PARALLEL_FETCHES)),
-            sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![], labels: vec![] },
+            sidebar: Sidebar { feeds: vec![], folders: vec![], unread: vec![] },
             place: Place::News,
             scope: Scope::All,
             unread_only: false,
             screen: Screen::Reader,
             search: String::new(),
             active_search: String::new(),
-            label_filter: None,
+            category: Selection::All,
             page: Page::first(PAGE_SIZE),
             list_generation: 0,
             listing: Listing {
@@ -493,7 +481,12 @@ impl App {
             confirm_unsubscribe: None,
             reports: crate::reports::State::new(analytics.clone()),
         };
-        let task = Task::batch([app.load_sidebar(), app.load_list(), app.settings.load().map(Message::Settings)]);
+        let task = Task::batch([
+            app.categories.load_open().map(Message::Categories),
+            app.load_sidebar(),
+            app.load_list(),
+            app.settings.load().map(Message::Settings),
+        ]);
         (app, task)
     }
 
@@ -519,30 +512,32 @@ impl App {
         } else {
             iced::time::every(Duration::from_secs(u64::from(minutes) * 60)).map(|_| Message::AutoRefresh)
         };
-        let organise = if self.screen == Screen::Organise {
-            self.organise.subscription().map(Message::Organise)
-        } else {
-            Subscription::none()
+        let organise = match self.screen {
+            Screen::Organise => self.organise.subscription().map(Message::Organise),
+            Screen::Reader => self.categories.subscription().map(Message::Categories),
+            _ => Subscription::none(),
         };
         Subscription::batch([keys, refresh, organise])
     }
 
-    fn load_sidebar(&self) -> Task<Message> {
+    /// Reloads the feeds and unread counts, and the categories with their counts.
+    fn load_sidebar(&mut self) -> Task<Message> {
         let db = self.db.clone();
-        Task::perform(
+        let feeds = Task::perform(
             async move {
                 db.call(|s| -> juttusihti_core::Result<_> {
-                    Ok(Sidebar {
-                        feeds: s.feeds()?,
-                        folders: s.folders()?,
-                        unread: s.unread_counts()?,
-                        labels: s.labels()?,
-                    })
+                    Ok(Sidebar { feeds: s.feeds()?, folders: s.folders()?, unread: s.unread_counts()? })
                 })
                 .await
             },
             Message::SidebarLoaded,
-        )
+        );
+        Task::batch([feeds, self.load_categories()])
+    }
+
+    /// Reloads the categories sidebar with counts for the list's All/Unread and feed picker.
+    fn load_categories(&mut self) -> Task<Message> {
+        self.categories.load(self.list_filter()).map(Message::Categories)
     }
 
     /// What the article list shows: Saved is one fixed list, News combines
@@ -577,26 +572,21 @@ impl App {
         }
     }
 
-    /// The AI popover title: the scope, plus the label and search when active.
+    /// The AI popover title: the scope, plus the category and search when active.
     fn quick_label(&self) -> String {
         let mut scope = self.scope_label();
         if self.unread_only && self.place == Place::News {
             scope = format!("Unread in {scope}");
         }
-        if let Some(name) = self.label_filter_name() {
-            scope = format!("{scope} labelled “{name}”");
+        if let Some(name) = self.categories.name(self.category) {
+            scope = format!("{scope} in “{name}”");
         }
         if self.active_search.is_empty() { scope } else { format!("{scope} matching “{}”", self.active_search) }
     }
 
-    fn label_filter_name(&self) -> Option<&str> {
-        let id = self.label_filter?;
-        self.sidebar.labels.iter().find(|l| l.id == id).map(|l| l.name.as_str())
-    }
-
-    /// Whether search text or a label narrows the list.
+    /// Whether search text or a category narrows the list.
     fn is_filtered(&self) -> bool {
-        !self.active_search.is_empty() || self.label_filter.is_some()
+        !self.active_search.is_empty() || self.category != Selection::All
     }
 
     /// Replaces the status bar line.
@@ -620,7 +610,14 @@ impl App {
             view: filter.view,
             feed_ids: filter.feed_id.into_iter().collect(),
             folder_ids: filter.folder_id.into_iter().collect(),
-            label_ids: self.label_filter.into_iter().collect(),
+            group_ids: match self.category {
+                Selection::Group(g) => vec![g],
+                _ => vec![],
+            },
+            label_ids: match self.category {
+                Selection::Category(c) => vec![c],
+                _ => vec![],
+            },
             hide_dismissed: self.hide_dismissed,
             ..Default::default()
         }
@@ -728,26 +725,54 @@ impl App {
         self.sidebar.unread.iter().filter(|(f, _)| in_scope(*f)).map(|(_, n)| n).sum()
     }
 
-    /// Back to the first page of the reader list after a place/scope change.
+    /// Back to the first page of the reader list after a place/scope change;
+    /// the category counts follow the new All/Unread and feed choice.
     fn show_list(&mut self) -> Task<Message> {
         self.screen = Screen::Reader;
         self.page = Page::first(PAGE_SIZE);
         self.preview = None;
-        self.load_list()
+        Task::batch([self.load_list(), self.load_categories()])
+    }
+
+    /// Handles the categories sidebar and what it asks of the app.
+    fn on_categories(&mut self, msg: category_sidebar::Msg) -> Task<Message> {
+        let (task, event) = self.categories.update(msg);
+        let task = task.map(Message::Categories);
+        let follow = match event {
+            None => Task::none(),
+            Some(category_sidebar::Event::Select(s)) => {
+                self.category = s;
+                self.page = Page::first(PAGE_SIZE);
+                self.screen = Screen::Reader;
+                self.load_list()
+            }
+            Some(category_sidebar::Event::Organise) => self.update(Message::ShowScreen(Screen::Organise)),
+            // A group's articles change when categories move in or out of it.
+            Some(category_sidebar::Event::Changed) if matches!(self.category, Selection::Group(_)) => self.load_list(),
+            Some(category_sidebar::Event::Changed) => Task::none(),
+            // The selection was deleted or merged away (e.g. on the Organise screen).
+            Some(category_sidebar::Event::Loaded) if !self.categories.contains(self.category) => {
+                self.category = Selection::All;
+                self.page = Page::first(PAGE_SIZE);
+                self.load_list()
+            }
+            Some(category_sidebar::Event::Loaded) => Task::none(),
+            Some(category_sidebar::Event::Failed(e)) => {
+                tracing::warn!(error = %e, "categories sidebar failed");
+                self.show_error(e);
+                Task::none()
+            }
+        };
+        Task::batch([task, follow])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SidebarLoaded(Ok(sidebar)) => {
                 self.sidebar = sidebar;
-                // The label was deleted or merged away on the Categories screen.
-                if self.label_filter.is_some_and(|id| !self.sidebar.labels.iter().any(|l| l.id == id)) {
-                    self.label_filter = None;
-                    self.page = Page::first(PAGE_SIZE);
-                    return self.load_list();
-                }
                 Task::none()
             }
+            Message::Categories(msg) => self.on_categories(msg),
             Message::GoPlace(place) => {
                 self.close_overlays();
                 self.place = place;
@@ -887,14 +912,7 @@ impl App {
             Message::ClearSearch => {
                 self.search.clear();
                 self.active_search.clear();
-                self.label_filter = None;
                 self.page = Page::first(PAGE_SIZE);
-                self.load_list()
-            }
-            Message::FilterLabel(LabelChoice(id, _)) => {
-                self.label_filter = id;
-                self.page = Page::first(PAGE_SIZE);
-                self.screen = Screen::Reader;
                 self.load_list()
             }
             Message::FocusSearch => operation::focus(SEARCH_ID),
@@ -1115,7 +1133,7 @@ impl App {
             }
             Message::Research(msg) => self.research.update(msg).map(Message::Research),
             Message::Organise(msg) => {
-                // Renames, merges and deletes change the label filter's choices.
+                // Renames, merges, deletes and moves change the categories sidebar.
                 let changed = matches!(msg, crate::organise::Msg::Done(_));
                 let task = self.organise.update(msg).map(Message::Organise);
                 if changed { Task::batch([task, self.load_sidebar()]) } else { task }
@@ -1415,6 +1433,7 @@ impl App {
             Key::Character("/") => self.update(Message::FocusSearch),
             Key::Character("n") => self.update(Message::NextPage),
             Key::Character("p") => self.update(Message::PrevPage),
+            Key::Character("c") => self.update(Message::Categories(category_sidebar::Msg::Toggle)),
             Key::Named(keyboard::key::Named::Escape) => self.update(Message::CloseOverlays),
             Key::Named(keyboard::key::Named::F1) => self.update(Message::ShowScreen(Screen::Help)),
             _ => Task::none(),
@@ -1429,17 +1448,26 @@ impl App {
 
     /// The whole window; `size` places the ⋯ menu at the right edge of the article list.
     fn view_sized(&self, size: Size) -> Element<'_, Message> {
+        // The categories sidebar (and its 1px rule) sits between the rail and the list in the reader.
+        let sidebar = self.screen == Screen::Reader && self.categories.open;
+        let side = if sidebar { category_sidebar::WIDTH + 1.0 } else { 0.0 };
         // The list takes 2 of 5 parts (a 2:3 split with the reading pane) of what is left
-        // after the rail (`rail::WIDTH`) and the two 1px vertical rules (rail | list | pane).
-        let list_width = ((size.width - rail::WIDTH - 2.0) * 2.0 / 5.0).floor().max(0.0);
+        // after the rail (`rail::WIDTH`), the sidebar and the two 1px vertical rules (rail | list | pane).
+        let list_width = ((size.width - rail::WIDTH - side - 2.0) * 2.0 / 5.0).floor().max(0.0);
         let main: Element<'_, Message> = match self.screen {
-            Screen::Reader => row![
-                container(self.view_list()).width(list_width),
-                rule::vertical(1),
-                container(self.view_preview()).width(Fill),
-            ]
-            .height(Fill)
-            .into(),
+            Screen::Reader => {
+                let mut reader = row![].height(Fill);
+                if sidebar {
+                    reader = reader
+                        .push(self.categories.view(self.category).map(Message::Categories))
+                        .push(rule::vertical(1));
+                }
+                reader
+                    .push(container(self.view_list()).width(list_width))
+                    .push(rule::vertical(1))
+                    .push(container(self.view_preview()).width(Fill))
+                    .into()
+            }
             Screen::Reports => self.reports.view().map(Message::Reports),
             Screen::Research => self.research.view().map(Message::Research),
             Screen::Organise => self.organise.view().map(Message::Organise),
@@ -1479,7 +1507,7 @@ impl App {
         let below_header = TOP_BAR_HEIGHT + 1.0 + LIST_HEADER_HEIGHT;
         if self.feeds_open && self.screen == Screen::Reader && self.place == Place::News {
             // Under the dropdown button at the left of the list header.
-            let anchor = Point::new(rail::WIDTH + 1.0 + LIST_HEADER_PAD, below_header);
+            let anchor = Point::new(rail::WIDTH + 1.0 + side + LIST_HEADER_PAD, below_header);
             let panel = feeds_menu::panel(
                 &self.sidebar,
                 self.scope,
@@ -1497,21 +1525,22 @@ impl App {
         }
         if self.list_menu_open && self.screen == Screen::Reader {
             // Right-aligned under the ⋯ button at the right of the list header.
-            let left = rail::WIDTH + 1.0;
+            let left = rail::WIDTH + 1.0 + side;
             let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
             return style::overlay(layout, self.view_list_menu(), Point::new(x, below_header), Message::CloseOverlays);
         }
         if self.quick.open && self.screen == Screen::Reader {
             // Right-aligned under the ✨ button, like the ⋯ menu.
-            let left = rail::WIDTH + 1.0;
+            let left = rail::WIDTH + 1.0 + side;
             let x = (left + list_width - LIST_HEADER_PAD - crate::quick::WIDTH).max(left);
             let panel = self.quick.view().map(Message::Quick);
             return style::overlay(layout, panel, Point::new(x, below_header), Message::CloseOverlays);
         }
-        if self.screen == Screen::Organise {
+        if matches!(self.screen, Screen::Organise | Screen::Reader) {
             // The dragged row's chip follows the pointer (window coordinates). The stack stays
             // while no drag runs so the screen's widget state survives the drag starting.
-            let ghost: Element<'_, Message> = match self.organise.ghost() {
+            let dragged = if self.screen == Screen::Organise { self.organise.ghost() } else { self.categories.ghost() };
+            let ghost: Element<'_, Message> = match dragged {
                 Some((label, at)) => pin(crate::drag::ghost(label)).position(at + Vector::new(12.0, 8.0)).into(),
                 None => Space::new().into(),
             };
@@ -1535,20 +1564,9 @@ impl App {
             style::tip("Search: words, \"phrases\", OR, -exclude, prefix*, title:…"),
             tooltip::Position::Bottom,
         );
-        let label_filter = (!self.sidebar.labels.is_empty()).then(|| {
-            let any = LabelChoice(None, "Any label".into());
-            let mut choices = vec![any.clone()];
-            choices.extend(self.sidebar.labels.iter().map(|l| LabelChoice(Some(l.id), l.name.clone())));
-            let selected = choices.iter().find(|c| c.0 == self.label_filter).cloned().unwrap_or(any);
-            pick_list(choices, Some(selected), Message::FilterLabel)
-                .style(style::pick_list)
-                .menu_style(style::menu)
-                .text_size(SIZE_BODY)
-                .padding(SPACE[1])
-                .width(LABEL_FILTER_WIDTH)
-        });
-        let clear =
-            self.is_filtered().then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
+        // Clear clears the search only; the category stays picked in the sidebar.
+        let clear = (!self.active_search.is_empty())
+            .then(|| style::quiet_button(None, "Clear", style::quiet, Some(Message::ClearSearch)));
         let refresh_tip =
             if self.refreshing > 0 { format!("Refreshing {}", self.refreshing) } else { "Refresh all feeds".into() };
         let refresh = tooltip(
@@ -1568,13 +1586,7 @@ impl App {
             tooltip::Position::Bottom,
         );
         container(
-            row![brand, search, help]
-                .push(label_filter)
-                .push(clear)
-                .push(refresh)
-                .push(settings)
-                .spacing(SPACE[2])
-                .align_y(iced::Center),
+            row![brand, search, help].push(clear).push(refresh).push(settings).spacing(SPACE[2]).align_y(iced::Center),
         )
         .padding([0.0, SPACE[2]])
         .center_y(TOP_BAR_HEIGHT)
@@ -1604,6 +1616,20 @@ impl App {
         }
 
         let mut header = row![].spacing(SPACE[1]).align_y(Center);
+        // Hidden sidebar: » brings it back, and the picked category is named here.
+        if !self.categories.open {
+            header = header.push(tooltip(
+                button(text("»").size(SIZE_BODY))
+                    .padding([0.0, SPACE[1]])
+                    .style(style::icon)
+                    .on_press(Message::Categories(category_sidebar::Msg::Toggle)),
+                style::tip("Show categories (c)"),
+                tooltip::Position::Bottom,
+            ));
+            if let Some(name) = self.categories.name(self.category) {
+                header = header.push(text(name).size(SIZE_BODY).font(SEMIBOLD));
+            }
+        }
         header = match self.place {
             Place::News => header
                 .push(feeds_menu::button(self.scope_label(), self.scope_unread(), self.feeds_open))
@@ -2009,9 +2035,15 @@ fn header_icon<'a>(i: Icon, tip: &'a str, open: bool, target: Message) -> Elemen
 
 #[cfg(test)]
 mod tests {
+    use juttusihti_core::LabelId;
+    use juttusihti_core::categories::{Favourite, GroupId};
     use juttusihti_core::store::Store;
 
     use super::*;
+    use crate::category_sidebar::{
+        self, Effect as SidebarEffect, Item as SidebarItem, Msg as SidebarMsg, Op as SidebarOp, Target as SidebarTarget,
+    };
+    use crate::drag::DragMsg;
 
     fn app_with_feed() -> (App, FeedId) {
         let store = Store::open_in_memory().unwrap();
@@ -2118,43 +2150,182 @@ mod tests {
         assert!(!app.quick.open);
     }
 
-    /// The app with one label, "Sää", loaded into the sidebar as a reload would.
-    fn app_with_label() -> (App, LabelId) {
+    /// Ids of the categories set up by [`app_with_categories`].
+    struct Cats {
+        tech: GroupId,
+        local: GroupId,
+        ai: LabelId,
+        local_politics: LabelId,
+        politics: LabelId,
+    }
+
+    /// Reloads the categories sidebar from the store, as a reload would.
+    fn reload_categories(app: &mut App) {
+        let filter = app.list_filter();
+        let tree = app.db.shared().lock().unwrap().category_tree().unwrap();
+        let counts = app.db.shared().lock().unwrap().category_counts(filter).unwrap();
+        let _ = app.update(Message::Categories(SidebarMsg::Loaded(filter, Ok(Box::new((tree, counts))))));
+    }
+
+    /// Groups "Tech" (Artificial Intelligence, Space) and "Local" (Local politics),
+    /// and the ungrouped "Politics", loaded into the sidebar.
+    fn app_with_categories() -> (App, Cats) {
         let (mut app, _) = app_with_feed();
-        let id = app.db.shared().lock().unwrap().create_label("Sää").unwrap();
-        let labels = app.db.shared().lock().unwrap().labels().unwrap();
-        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { labels, ..app.sidebar.clone() })));
-        (app, id)
+        let cats = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let tech = s.create_group("Tech").unwrap();
+            let local = s.create_group("Local").unwrap();
+            let ai = s.create_label("Artificial Intelligence").unwrap();
+            let space = s.create_label("Space").unwrap();
+            let local_politics = s.create_label("Local politics").unwrap();
+            let politics = s.create_label("Politics").unwrap();
+            s.move_category(ai, Some(tech), 0).unwrap();
+            s.move_category(space, Some(tech), 1).unwrap();
+            s.move_category(local_politics, Some(local), 0).unwrap();
+            Cats { tech, local, ai, local_politics, politics }
+        };
+        reload_categories(&mut app);
+        (app, cats)
+    }
+
+    fn select(app: &mut App, s: Selection) {
+        let _ = app.update(Message::Categories(SidebarMsg::Select(s)));
     }
 
     #[test]
-    fn label_filter_narrows_the_list() {
-        let (mut app, label) = app_with_label();
+    fn selecting_group_filters_by_group() {
+        let (mut app, c) = app_with_categories();
+        assert_eq!(app.category, Selection::All);
+        assert!(app.list_query().group_ids.is_empty());
+        select(&mut app, Selection::Group(c.tech));
+        assert_eq!(app.list_query().group_ids, vec![c.tech]);
         assert!(app.list_query().label_ids.is_empty());
-        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
-        assert_eq!(app.list_query().label_ids, vec![label]);
+        assert_eq!(app.quick_label(), "All feeds in “Tech”");
+        select(&mut app, Selection::All);
+        assert!(app.list_query().group_ids.is_empty());
+    }
+
+    #[test]
+    fn selecting_category_filters_by_category() {
+        let (mut app, c) = app_with_categories();
+        select(&mut app, Selection::Category(c.ai));
+        assert_eq!(app.list_query().label_ids, vec![c.ai]);
+        assert!(app.list_query().group_ids.is_empty());
         assert!(!app.list_query().include_suggested, "only confirmed labels");
-        assert_eq!(app.quick_label(), "All feeds labelled “Sää”");
-        let _ = app.update(Message::FilterLabel(LabelChoice(None, "Any label".into())));
-        assert!(app.list_query().label_ids.is_empty());
-    }
-
-    #[test]
-    fn clear_also_clears_the_label_filter() {
-        let (mut app, label) = app_with_label();
-        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
         assert!(app.is_filtered());
+        // Clear clears the search, not the category.
+        app.active_search = "vaalit".into();
         let _ = app.update(Message::ClearSearch);
-        assert_eq!(app.label_filter, None);
-        assert!(!app.is_filtered());
+        assert!(app.active_search.is_empty());
+        assert_eq!(app.category, Selection::Category(c.ai));
     }
 
     #[test]
-    fn label_filter_drops_a_deleted_label() {
-        let (mut app, label) = app_with_label();
-        let _ = app.update(Message::FilterLabel(LabelChoice(Some(label), "Sää".into())));
-        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { labels: vec![], ..app.sidebar.clone() })));
-        assert_eq!(app.label_filter, None);
+    fn clicking_a_row_selects_it_and_dragging_moves_it() {
+        let (mut app, c) = app_with_categories();
+        let nan = Point::new(f32::NAN, f32::NAN);
+        // A press and release without movement is a click.
+        for m in [DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan), DragMsg::Release] {
+            let _ = app.update(Message::Categories(SidebarMsg::Drag(m)));
+        }
+        assert_eq!(app.category, Selection::Group(c.local));
+        // Dragging Local before Tech moves it to the top.
+        let drag = [
+            DragMsg::Press(SidebarItem::Group(c.local), "Local".into(), nan),
+            DragMsg::Move(Point::new(0.0, 0.0)),
+            DragMsg::Move(Point::new(0.0, 40.0)),
+            DragMsg::Enter(SidebarTarget::GroupSlot(Some(c.tech), 0)),
+        ];
+        for m in drag {
+            let _ = app.categories.handle(SidebarMsg::Drag(m));
+        }
+        let effect = app.categories.handle(SidebarMsg::Drag(DragMsg::Release));
+        assert_eq!(effect, SidebarEffect::Run(SidebarOp::MoveGroup(c.local, 0)));
+        assert_eq!(app.category, Selection::Group(c.local), "a drag does not select");
+    }
+
+    #[test]
+    fn favourites_toggle_from_the_menu() {
+        let (mut app, c) = app_with_categories();
+        let fav = Favourite::Category(c.politics);
+        let effect = app.categories.handle(SidebarMsg::SetFavourite(fav, true));
+        assert_eq!(effect, SidebarEffect::Run(SidebarOp::Favourite(fav, true)));
+        let SidebarEffect::Run(op) = effect else { unreachable!() };
+        op.apply(&mut app.db.shared().lock().unwrap()).unwrap();
+        reload_categories(&mut app);
+        assert!(app.categories.is_favourite(fav));
+        assert_eq!(app.categories.menu_label(fav), "Remove from favourites");
+        assert_eq!(app.categories.menu_label(Favourite::Group(c.tech)), "Add to favourites");
+    }
+
+    #[test]
+    fn deleted_selection_falls_back_to_all() {
+        let (mut app, c) = app_with_categories();
+        select(&mut app, Selection::Category(c.ai));
+        app.db.shared().lock().unwrap().delete_label(c.ai).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+        select(&mut app, Selection::Group(c.local));
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::Group(c.local), "still there");
+        app.db.shared().lock().unwrap().delete_group(c.local).unwrap();
+        reload_categories(&mut app);
+        assert_eq!(app.category, Selection::All);
+    }
+
+    #[test]
+    fn sidebar_open_state_is_remembered() {
+        let (mut app, _) = app_with_feed();
+        assert!(category_sidebar::read_open(&app.db.shared().lock().unwrap()).unwrap(), "open by default");
+        assert!(app.categories.open);
+        let effect = app.categories.handle(SidebarMsg::Toggle);
+        assert!(!app.categories.open);
+        let SidebarEffect::Run(op) = effect else { panic!("toggling saves the setting") };
+        op.apply(&mut app.db.shared().lock().unwrap()).unwrap();
+        let shared = app.db.shared();
+        let store = shared.lock().unwrap();
+        assert_eq!(store.setting(category_sidebar::OPEN_KEY).unwrap().as_deref(), Some("0"));
+        assert!(!category_sidebar::read_open(&store).unwrap());
+        drop(store);
+        // The next start reads it back.
+        let mut fresh = category_sidebar::State::new(app.db.clone());
+        let _ = fresh.handle(SidebarMsg::OpenLoaded(Ok(false)));
+        assert!(!fresh.open);
+    }
+
+    #[test]
+    fn find_shows_flat_matches() {
+        let (mut app, c) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::Find("POL".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| (m.selection, m.name, m.group)).collect();
+        assert_eq!(
+            found,
+            vec![
+                (Selection::Category(c.local_politics), "Local politics", Some("Local")),
+                (Selection::Category(c.politics), "Politics", None),
+            ]
+        );
+        let _ = app.update(Message::Categories(SidebarMsg::Find("tech".into())));
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| m.selection).collect();
+        assert_eq!(found, vec![Selection::Group(c.tech)]);
+        let _ = app.update(Message::Categories(SidebarMsg::ClearFind));
+        assert!(app.categories.find.is_empty());
+        let _ = app.update(Message::Categories(SidebarMsg::Find("x".into())));
+        let _ = app.update(Message::Categories(SidebarMsg::Escape));
+        assert!(app.categories.find.is_empty(), "Esc clears");
+    }
+
+    #[test]
+    fn c_toggles_sidebar() {
+        let (mut app, _) = app_with_feed();
+        assert!(app.categories.open);
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(!app.categories.open);
+        let _ = app.view();
+        let _ = app.update(Message::Key(Key::Character("c".into()), Default::default()));
+        assert!(app.categories.open);
+        let _ = app.view();
     }
 
     #[test]

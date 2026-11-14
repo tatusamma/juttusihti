@@ -6,6 +6,7 @@
 
 mod ai_setup;
 mod app;
+mod category_sidebar;
 mod crash_log;
 mod db;
 mod drag;

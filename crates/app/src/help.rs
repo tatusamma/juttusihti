@@ -7,7 +7,7 @@ use crate::app::Message;
 use crate::style::{self, SIZE_BODY, SPACE};
 
 /// Keyboard shortcuts in the reader, as (keys, action).
-const SHORTCUTS: [(&str, &str); 11] = [
+const SHORTCUTS: [(&str, &str); 12] = [
     ("j / ↓", "Next article"),
     ("k / ↑", "Previous article"),
     ("o / Enter", "Open the article in the browser"),
@@ -16,6 +16,7 @@ const SHORTCUTS: [(&str, &str); 11] = [
     ("m", "Mark the article read or unread"),
     ("n / p", "Next or previous page of the list"),
     ("/ or Ctrl+F", "Search"),
+    ("c", "Show or hide the categories sidebar"),
     ("Ctrl+R", "Refresh all feeds"),
     ("Esc", "Close menus and panels"),
     ("F1", "This help"),
@@ -49,7 +50,7 @@ const SECTIONS: [(&str, &[&str]); 11] = [
             "The ⋯ menu marks the whole list read, hides articles you have dismissed as irrelevant, switches between AI and original headlines and, for one feed, edits (rename, move to a folder) or unsubscribes it.",
             "Labels can be added to an article from its preview. The Categories screen renames, merges, deletes and groups them.",
             "When a feed only gives a teaser, \"Read full article\" (or press a) loads the whole article; see Full articles below.",
-            "The label menu next to the search box shows only articles with that label (labels you added or accepted, not pending AI suggestions). It combines with the search, the feed menu and All / Unread; Clear removes both the search and the label.",
+            "The categories sidebar between the rail and the list picks a group or a category: All articles, your ★ Favourites, then the groups (click the arrow to fold one) and Ungrouped. The numbers count articles and follow All / Unread and the feed menu. \"Find category…\" finds a name; Esc or ✕ shows the whole list again. Right-click a row, or press the star that appears on hover, to add it to or remove it from Favourites; drag rows to reorder them. « hides the sidebar and » (or c) shows it again; the pick stays applied. Organise… opens the Categories screen. Clear removes the search but keeps the category.",
         ],
     ),
     (
