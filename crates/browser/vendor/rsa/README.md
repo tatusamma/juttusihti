@@ -1,0 +1,124 @@
+# [RustCrypto]: RSA
+
+[![crates.io][crate-image]][crate-link]
+[![Documentation][doc-image]][doc-link]
+[![Build Status][build-image]][build-link]
+[![codecov][coverage-image]][coverage-link]
+![Apache2/MIT licensed][license-image]
+![MSRV][msrv-image]
+[![Project Chat][chat-image]][chat-link]
+
+A portable RSA implementation in pure Rust, with encryption and signature schemes
+specified in [PKCS#1 v2.2 (RFC8017)][RFC8017].
+
+| Scheme | Purpose | Specification |
+| --- | --- | --- |
+| RSAES-OAEP | Encryption | [RFC8017 §7.1][RSAES-OAEP] |
+| RSAES-PKCS1-v1_5 | Encryption | [RFC8017 §7.2][RSAES-PKCS1-v1_5] |
+| RSASSA-PSS | Signatures | [RFC8017 §8.1][RSASSA-PSS] |
+| RSASSA-PKCS1-v1_5 | Signatures | [RFC8017 §8.2][RSASSA-PKCS1-v1_5] |
+
+PKCS#1 v1.5 is provided as opt-in through feature `pkcs1v15` for compatibility
+ with legacy applications only. Prefer OAEP and PSS for new applications.
+
+See the security warning below for known implementation vulnerabilities.
+
+## Example
+
+```rust
+use rsa::{Generate, PrivateKey, sha2::Sha256};
+
+let private_key = PrivateKey::generate();
+let public_key = private_key.to_public_key();
+
+// Encrypt
+let data = b"hello world";
+let enc_data = public_key.oaep_encrypt::<Sha256>(data).expect("failed to encrypt");
+assert_ne!(&data[..], &enc_data[..]);
+
+// Decrypt
+let dec_data = private_key.oaep_decrypt::<Sha256>(&enc_data).expect("failed to decrypt");
+assert_eq!(&data[..], &dec_data[..]);
+```
+
+> **Note:** If you encounter unusually slow key generation time while using `RsaPrivateKey::new` you can try to compile in release mode or add the following to your `Cargo.toml`. Key generation is much faster when building with higher optimization levels, but this will increase the compile time a bit.
+> ```toml
+> [profile.debug]
+> opt-level = 3
+> ```
+
+## ⚠️Security Warning
+
+Though this crate has been [previously audited][audit] the implementation has
+diverged significantly since then, and several security issues have been
+discovered which have been resolved in the 0.10 release.
+
+See the [open security issues] on our issue tracker for other known problems.
+This crate was previously vulnerable to the [Marvin Attack] which could enable
+ private key recovery by a network attacker (see [RUSTSEC-2023-0071]).
+
+You can follow our work on constant-time hardening in [#711].
+
+Users are advised to migrate to 0.10 in order to avoid the discovered side channels.
+
+## ⚠️ PCKS#1 1.5 Warning
+
+Additionally legacy PKCS#1 1.5 implementations, including the implementation of
+it within this crate, has seen a long running source of Bleichenbacher and
+[Marvin Attacks](https://eprint.iacr.org/2023/1442) related vulnerabilities.
+
+For this reason, users who require the use of this legacy padding scheme i.e.
+ in legacy protocols must explicitly enable the `pkcs1v15` feature to use it.
+
+## Minimum Supported Rust Version (MSRV) Policy
+
+MSRV increases are not considered breaking changes and can happen in patch
+releases.
+
+The crate MSRV accounts for all supported targets and crate feature
+combinations.
+
+## License
+
+Licensed under either of
+
+ * [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
+ * [MIT license](http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+[//]: # (badges)
+
+[crate-image]: https://img.shields.io/crates/v/rsa?logo=rust
+[crate-link]: https://crates.io/crates/rsa
+[doc-image]: https://docs.rs/rsa/badge.svg
+[doc-link]: https://docs.rs/rsa
+[build-image]: https://github.com/RustCrypto/RSA/actions/workflows/ci.yml/badge.svg
+[build-link]: https://github.com/RustCrypto/RSA/actions/workflows/ci.yml
+[coverage-image]: https://codecov.io/gh/RustCrypto/RSA/graph/badge.svg?token=2HyUy96elu
+[coverage-link]: https://codecov.io/gh/RustCrypto/RSA
+[license-image]: https://img.shields.io/badge/license-Apache2.0/MIT-blue.svg
+[msrv-image]: https://img.shields.io/badge/rustc-1.87+-blue.svg
+[chat-image]: https://img.shields.io/badge/zulip-join_chat-blue.svg
+[chat-link]: https://rustcrypto.zulipchat.com/#narrow/stream/260047-RSA
+
+[//]: # (links)
+
+[RustCrypto]: https://github.com/RustCrypto/
+[audit]: https://public.opentech.fund/documents/1907_OTF_DeltaChat_RPGP_RustRSA_GB_Report_v1.pdf
+[open security issues]: https://github.com/RustCrypto/RSA/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity
+[Marvin Attack]: https://people.redhat.com/~hkario/marvin/
+[RUSTSEC-2023-0071]: https://rustsec.org/advisories/RUSTSEC-2023-0071.html
+[#711]: https://github.com/RustCrypto/RSA/issues/711
+
+[RFC8017]: https://www.rfc-editor.org/rfc/rfc8017.html
+[RSAES-OAEP]: https://www.rfc-editor.org/rfc/rfc8017.html#section-7.1
+[RSAES-PKCS1-v1_5]: https://www.rfc-editor.org/rfc/rfc8017.html#section-7.2
+[RSASSA-PSS]: https://www.rfc-editor.org/rfc/rfc8017.html#section-8.1
+[RSASSA-PKCS1-v1_5]: https://www.rfc-editor.org/rfc/rfc8017.html#section-8.2

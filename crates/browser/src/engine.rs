@@ -136,14 +136,17 @@ impl Delegate {
         let kind = resource_kind(request.destination);
         if request.is_for_main_frame && kind == ResourceKind::Document {
             // The page the reader asked for.
-            *self.page_url.borrow_mut() = Some(request.url.clone());
+            *self.page_url.borrow_mut() = Some(request.url.as_url().clone());
             return false;
         }
         if kind == ResourceKind::Media || (self.block_images && kind == ResourceKind::Image) {
             return true;
         }
         let page = self.page_url.borrow();
-        let source = request.referrer_url.as_ref().or(page.as_ref()).map(Url::as_str).unwrap_or("");
+        let source = match &request.referrer_url {
+            Some(referrer) => referrer.as_str(),
+            None => page.as_ref().map_or("", Url::as_str),
+        };
         self.blocker.should_block(request.url.as_str(), source, kind)
     }
 }
@@ -156,7 +159,8 @@ impl WebViewDelegate for Delegate {
                 self.load_complete.set(false);
             }
             LoadStatus::HeadParsed => {}
-            LoadStatus::Complete => self.load_complete.set(true),
+            // Stopped (by `window.stop()` or the embedder): nothing more will load either.
+            LoadStatus::Complete | LoadStatus::Stopped => self.load_complete.set(true),
         }
     }
 
@@ -198,7 +202,7 @@ impl ServoDelegate for BlockEverythingElse {
 
 /// Answers a load with an empty 204 instead of letting it reach the network.
 fn block(load: WebResourceLoad) {
-    let response = WebResourceResponse::new(load.request().url.clone())
+    let response = WebResourceResponse::new(load.request().url.as_url().clone())
         .status_code(http::StatusCode::NO_CONTENT)
         .status_message(b"No Content".to_vec());
     load.intercept(response).finish();
