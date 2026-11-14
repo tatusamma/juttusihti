@@ -9,6 +9,24 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Security
+
+- Both advisories that 0.6.0 listed as not fixable yet are fixed in the full-article browser
+  engine. Servo pins the affected versions, so the engine builds patched copies:
+  - The SQLite inside the engine is 3.54.1 (CVE-2026-119375, RUSTSEC-2026-0459).
+  - Its WebCrypto uses the released, constant-time `rsa` 0.10.0 (Marvin attack,
+    RUSTSEC-2023-0071).
+
+  The [dependency audit](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md) lists no
+  vulnerabilities, and CI now audits the engine's lock file too.
+
+### Changed
+
+- The full-article browser engine is Servo 0.8. Iltalehti, Ilta-Sanomat, Helsingin Sanomat and
+  Yle articles were checked against 0.6.0's engine: the text is the same or more complete, and
+  Yle articles now get their picture.
+- Dependencies were updated, including `async-executor` 1.14.1 (1.14.0 was yanked).
+
 ## [0.6.0] - 2026-11-14
 
 ### Added

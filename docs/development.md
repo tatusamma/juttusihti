@@ -263,7 +263,7 @@ tokenizer, or AI-assisted query expansion.
     - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
       tiles are clipped to the map area with the CPU renderer too.
 - **Full articles**: done on Windows. The built-in browser engine (`juttusihti-browser`, Servo
-  0.7 with no window) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
+  0.8 with no window) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
   DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
   articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
   public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no

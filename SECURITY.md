@@ -85,7 +85,10 @@ Valuables:
    address.
 5. **Dependency advisories:** see the next section.
 
-### Dependency audit (`cargo audit`, RustSec database of 2026-11-14)
+### Dependency audit (`cargo audit`, RustSec database of 2026-11-15)
+
+CI audits both lock files. Re-run `cargo audit` and `cargo audit --file crates/browser/Cargo.lock`
+before each release.
 
 **App workspace** (`Cargo.lock`, 654 crates): no vulnerabilities. `arrow` was updated to 60.1.0
 for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays), and `rustix` to
@@ -94,21 +97,29 @@ for RUSTSEC-2026-0442 (out-of-bounds read on malformed RunEndEncoded arrays), an
 | Advisory | Crate | Kind | Path | Assessment |
 |---|---|---|---|---|
 | RUSTSEC-2026-0253 | lru 0.16.4 | unsound (use-after-free if a panic happens inside `LruCache::pop`) | iced_wgpu → cryoglyph | Fixed only in lru ≥ 0.18.2, which Iced 0.14 cannot use without a fork. It is reachable only through the GPU text cache and is not attacker-triggerable. Track Iced releases; the CPU renderer setting avoids this path entirely. |
-| — | async-executor 1.14.0 | yanked | iced_winit → mundy → zbus | Linux D-Bus stack only. Picked up when Iced or zbus updates. |
 | RUSTSEC-2026-0192 | ttf-parser 0.25.1 | unmaintained | cosmic-text → fontdb | Parses only bundled and system fonts. No replacement available. |
 | RUSTSEC-2026-0370/0371/0372 | zvariant, zbus_names, zvariant_derive | unmaintained | Linux D-Bus stack (winit/keyring/rfd) | No replacement available. Re-check when the zbus ecosystem moves. |
-| RUSTSEC-2026-0441 | pin-utils 0.1.1 | unmaintained | iced_futures → wasmtimer | Compile-time macros only. Goes away when Iced drops it. |
 | RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | build-time proc macro | No runtime exposure. |
 
-**Full-article helper** (`crates/browser/Cargo.lock`, 840 crates, mostly Servo 0.7). Not part of
-the CI audit job, because of the findings below; re-run it by hand in `crates/browser`.
+**Full-article helper** (`crates/browser/Cargo.lock`, 847 crates, mostly Servo 0.8): no
+vulnerabilities. Servo pins exact versions of two crates with advisories, so the helper builds
+patched copies of them instead (details and upkeep in
+[`crates/browser/vendor/README.md`](crates/browser/vendor/README.md)):
+
+- **RUSTSEC-2026-0459** (CVE-2026-119375, SQLite before 3.54.0: a crafted database file with a
+  mismatched `-wal` file can make queries return stale process memory). Servo's `rusqlite 0.38`
+  needs `libsqlite3-sys 0.36`, so its copy bundles SQLite 3.54.1 from `libsqlite3-sys 0.39.1`.
+- **RUSTSEC-2023-0071** (Marvin attack, timing side channel in RSA decryption). Servo's WebCrypto
+  pins `rsa 0.10.0-rc.19`, so its copy is the released, constant-time `rsa 0.10.0`. WebCrypto
+  stays on because Iltalehti hides the free opening paragraphs of its paid articles without
+  `crypto.subtle`.
+
+`cargo audit` skips path crates and does not see these copies, so advisories for `rsa`, SQLite
+or Servo's WebCrypto are checked against them by hand. Warnings:
 
 | Advisory | Crate | Kind | Path | Assessment |
 |---|---|---|---|---|
-| RUSTSEC-2026-0459 | libsqlite3-sys 0.36.0 (bundled SQLite before 3.54.0) | **vulnerability** (CVE-2026-119375: a crafted database file with a mismatched `-wal` file can make queries return stale process memory; local, medium) | servo-net, servo-storage → rusqlite 0.38 | Servo 0.7 pins rusqlite 0.38, so the fixed libsqlite3-sys 0.39 cannot be used yet. The attack needs someone to place crafted database files where the helper opens them. The helper's databases live in a brand-new profile folder that it creates for one fetch and deletes afterwards, and web pages cannot write raw database files there. The app itself uses rusqlite 0.41 with the fixed SQLite. Re-check when Servo updates. |
-| RUSTSEC-2023-0071 | rsa 0.10.0-rc.18 | **vulnerability** (Marvin attack: timing side channel in RSA decryption, medium) | servo-script (WebCrypto) | No fixed version exists. Only web pages use it, through WebCrypto, with keys they make themselves in a throwaway profile that is deleted after one fetch. Juttusihti holds no RSA keys and the helper never decrypts anything of the user's. WebCrypto stays on because the news sites tested do not render without it. Re-check when Servo updates. |
 | RUSTSEC-2025-0141 | bincode 1.3.3 | unmaintained | Servo internals | No runtime exposure to page input beyond Servo's own IPC. |
 | RUSTSEC-2025-0075/0080/0081/0098/0100 | unic-* 0.9.0 | unmaintained | Servo (Unicode tables) | Static Unicode data. |
 | RUSTSEC-2024-0436 | paste 1.0.15 | unmaintained | build-time proc macro | No runtime exposure. |
 
-Re-run `cargo audit` before each release.
