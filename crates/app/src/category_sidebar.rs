@@ -525,7 +525,7 @@ impl State {
         }
     }
 
-    /// Groups and categories whose names contain the "Find category…" text
+    /// Groups, categories and group feeds whose names contain the "Find category…" text
     /// (ignoring case and punctuation), in tree order.
     pub fn matches(&self) -> Vec<Match<'_>> {
         let q = normalize_text(&self.find);
@@ -637,7 +637,7 @@ impl State {
     fn view_matches(&self, selected: Selection) -> Element<'_, Msg> {
         let found = self.matches();
         if found.is_empty() {
-            return container(style::note("No categories match.")).padding([SPACE[1], SPACE[1]]).into();
+            return container(style::note("Nothing matches.")).padding([SPACE[1], SPACE[1]]).into();
         }
         let mut col = column![].spacing(1);
         for m in found {

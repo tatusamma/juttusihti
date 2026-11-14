@@ -82,6 +82,23 @@ impl std::fmt::Display for FeedPick {
     }
 }
 
+/// The "Add feed..." entries. Feeds that share a title also show their site,
+/// so they can be told apart.
+fn feed_picks(feeds: &[GroupFeed]) -> Vec<FeedPick> {
+    let shared = |f: &GroupFeed| feeds.iter().filter(|o| o.title.eq_ignore_ascii_case(&f.title)).count() > 1;
+    let site = |url: &str| {
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        rest.split('/').next().unwrap_or(rest).to_string()
+    };
+    feeds
+        .iter()
+        .map(|f| {
+            let label = if shared(f) { format!("{} ({})", f.title, site(&f.url)) } else { f.title.clone() };
+            FeedPick(f.id, label)
+        })
+        .collect()
+}
+
 /// "Default for: ..." under a category that is the default of some feeds.
 fn default_line(c: &CategoryNode) -> Option<String> {
     (!c.default_for.is_empty()).then(|| format!("Default for: {}", c.default_for.join(", ")))
@@ -1020,7 +1037,7 @@ impl State {
         if self.snap.ungrouped_feeds.is_empty() {
             return None;
         }
-        let feeds: Vec<FeedPick> = self.snap.ungrouped_feeds.iter().map(|f| FeedPick(f.id, f.title.clone())).collect();
+        let feeds = feed_picks(&self.snap.ungrouped_feeds);
         Some(
             container(
                 pick_list(feeds, None::<FeedPick>, move |p| Msg::AddFeed(group, p.0))
@@ -1277,6 +1294,18 @@ mod tests {
             })
             .unwrap()
         })
+    }
+
+    #[test]
+    fn add_feed_tells_feeds_with_the_same_title_apart() {
+        let feed = |id, title: &str, url: &str| GroupFeed { id, title: title.into(), url: url.into() };
+        let feeds = [
+            feed(1, "News", "https://a.example/rss"),
+            feed(2, "news", "http://b.example/feed/all.xml"),
+            feed(3, "Sport", "https://c.example/rss"),
+        ];
+        let labels: Vec<String> = feed_picks(&feeds).into_iter().map(|p| p.1).collect();
+        assert_eq!(labels, ["News (a.example)", "news (b.example)", "Sport"]);
     }
 
     fn feed_group(st: &State, feed: juttusihti_core::FeedId) -> Option<GroupId> {

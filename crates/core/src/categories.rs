@@ -42,6 +42,7 @@ pub struct CategoryNode {
 pub struct GroupFeed {
     pub id: FeedId,
     pub title: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,9 +289,11 @@ impl Store {
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut stmt =
-            conn.prepare("SELECT id, title, category_group_id FROM feeds ORDER BY title COLLATE NOCASE, id")?;
+            conn.prepare("SELECT id, title, url, category_group_id FROM feeds ORDER BY title COLLATE NOCASE, id")?;
         let feeds = stmt
-            .query_map([], |r| Ok((GroupFeed { id: r.get(0)?, title: r.get(1)? }, r.get::<_, Option<GroupId>>(2)?)))?
+            .query_map([], |r| {
+                Ok((GroupFeed { id: r.get(0)?, title: r.get(1)?, url: r.get(2)? }, r.get::<_, Option<GroupId>>(3)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut ungrouped_feeds = Vec::new();
         for (feed, group) in feeds {
