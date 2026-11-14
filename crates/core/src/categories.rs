@@ -143,6 +143,12 @@ pub struct Vocabulary {
     pub categories: Vec<VocabCategory>,
 }
 
+/// Row kinds of the [`Store::category_counts`] statement.
+const CATEGORY: i64 = 0;
+const GROUP: i64 = 1;
+const UNCATEGORIZED: i64 = 2;
+const FEED: i64 = 3;
+
 /// Characters of content sent when an article has no description.
 const CONTENT_START: usize = 300;
 
@@ -234,11 +240,6 @@ fn column(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Vec<
     Ok(stmt.query_map(p, |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
-fn column_text(conn: &Connection, sql: &str, id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(sql)?;
-    Ok(stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
-}
-
 fn exists(conn: &Connection, sql: &str, id: i64) -> Result<bool> {
     Ok(conn.query_row(sql, [id], |_| Ok(())).optional()?.is_some())
 }
@@ -260,12 +261,18 @@ impl Store {
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut ungrouped = Vec::new();
+        // Feed titles per default category, by title.
+        let mut default_for: HashMap<CategoryId, Vec<String>> = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT default_category_id, title FROM feeds WHERE default_category_id IS NOT NULL
+             ORDER BY title COLLATE NOCASE, id",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (category, title) = row?;
+            default_for.entry(category).or_default().push(title);
+        }
         for mut n in nodes {
-            n.default_for = column_text(
-                conn,
-                "SELECT title FROM feeds WHERE default_category_id = ?1 ORDER BY title COLLATE NOCASE, id",
-                n.category.id,
-            )?;
+            n.default_for = default_for.remove(&n.category.id).unwrap_or_default();
             match n.group_id.and_then(|g| groups.iter_mut().find(|x| x.group.id == g)) {
                 Some(g) => g.categories.push(n),
                 None => ungrouped.push(n),
@@ -678,80 +685,113 @@ impl Store {
 
     // ---- counts and AI -----------------------------------------------------
 
-    /// Distinct article counts per category and per group, restricted like a
-    /// list. Membership: the manual category; otherwise mapped publisher
-    /// terms; with none, the feed's default category; with neither, the AI
-    /// category. One statement: the memberships are worked
-    /// out once and the counts read them.
+    /// Distinct article counts per category, per group and per feed in a
+    /// group, restricted like a list. Category membership: the manual
+    /// category; otherwise mapped publisher terms; with none, the feed's
+    /// default category; with neither, the AI category. A group also holds
+    /// every article of its feeds.
+    ///
+    /// One statement. The memberships are built from the small tables
+    /// (`article_terms`, `article_categories`) and the feed index, so the
+    /// wide `articles` rows are read only to apply a view (unread, saved).
     pub fn category_counts(&self, filter: ListFilter) -> Result<CategoryCounts> {
+        // Feed and folder ids are integers, written into the statement.
+        let feed_is = |col: &str| {
+            let mut sql = String::new();
+            if let Some(feed) = filter.feed_id {
+                sql.push_str(&format!(" AND {col} = {feed}"));
+            }
+            if let Some(folder) = filter.folder_id {
+                sql.push_str(&format!(" AND {col} IN (SELECT id FROM feeds WHERE folder_id = {folder})"));
+            }
+            sql
+        };
         let view = match filter.view {
             View::All => "",
             View::Unread => " AND a.is_read = 0",
             View::Saved => " AND a.is_saved = 1",
         };
+        let feeds = feed_is("a.feed_id");
+        let filtered = !feeds.is_empty() || !view.is_empty();
+        // The articles in scope, when the list is narrowed at all.
+        let (scope, total) = if filtered {
+            (
+                format!("scope_ids(id) AS MATERIALIZED (SELECT a.id FROM articles a WHERE 1{feeds}{view}),"),
+                "(SELECT COUNT(*) FROM scope_ids)",
+            )
+        } else {
+            (String::new(), "(SELECT COUNT(*) FROM articles)")
+        };
+        let in_scope =
+            |col: &str| if filtered { format!(" AND {col} IN (SELECT id FROM scope_ids)") } else { String::new() };
         let sql = format!(
-            "WITH m(article_id, category_id) AS (
+            "WITH {scope}
+             manual(article_id, category_id) AS MATERIALIZED (
                SELECT article_id, user_category_id FROM article_categories WHERE user_category_id IS NOT NULL
-               UNION
-               SELECT t.article_id, ft.category_id FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-               WHERE ft.category_id IS NOT NULL AND NOT EXISTS (
-                 SELECT 1 FROM article_categories x
-                 WHERE x.article_id = t.article_id AND x.user_category_id IS NOT NULL)
-               UNION
-               SELECT a.id, f.default_category_id FROM articles a JOIN feeds f ON f.id = a.feed_id
-               WHERE f.default_category_id IS NOT NULL
-                 AND NOT EXISTS (SELECT 1 FROM article_categories x
-                                 WHERE x.article_id = a.id AND x.user_category_id IS NOT NULL)
-                 AND NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                                 WHERE t.article_id = a.id AND ft.category_id IS NOT NULL)
-               UNION
-               SELECT ac.article_id, ac.ai_category_id FROM article_categories ac
-               JOIN articles a ON a.id = ac.article_id JOIN feeds f ON f.id = a.feed_id
-               WHERE ac.user_category_id IS NULL AND ac.ai_category_id IS NOT NULL
-                 AND f.default_category_id IS NULL
-                 AND NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                                 WHERE t.article_id = ac.article_id AND ft.category_id IS NOT NULL)
+             ),
+             termed(article_id, category_id) AS MATERIALIZED (
+               SELECT DISTINCT t.article_id, ft.category_id FROM feed_terms ft
+               JOIN article_terms t ON t.term_id = ft.id
+               WHERE ft.category_id IS NOT NULL{term_feeds}
+             ),
+             defaulted(article_id, category_id) AS MATERIALIZED (
+               SELECT a.id, f.default_category_id FROM feeds f JOIN articles a ON a.feed_id = f.id
+               WHERE f.default_category_id IS NOT NULL{own_feeds}
+             ),
+             member(article_id, category_id) AS (
+               SELECT article_id, category_id FROM manual
+               UNION ALL
+               SELECT article_id, category_id FROM termed
+               WHERE article_id NOT IN (SELECT article_id FROM manual)
+               UNION ALL
+               SELECT article_id, category_id FROM defaulted
+               WHERE article_id NOT IN (SELECT article_id FROM manual)
+                 AND article_id NOT IN (SELECT article_id FROM termed)
+               UNION ALL
+               SELECT article_id, ai_category_id FROM article_categories
+               WHERE user_category_id IS NULL AND ai_category_id IS NOT NULL
+                 AND article_id NOT IN (SELECT article_id FROM termed)
+                 AND article_id NOT IN (SELECT article_id FROM defaulted)
              ),
              scoped(article_id, category_id) AS MATERIALIZED (
-               SELECT m.article_id, m.category_id FROM m
-               JOIN articles a ON a.id = m.article_id JOIN feeds f ON f.id = a.feed_id
-               WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
+               SELECT article_id, category_id FROM member WHERE 1{scoped}
+             ),
+             group_feed(article_id, group_id, feed_id) AS MATERIALIZED (
+               SELECT a.id, f.category_group_id, f.id FROM feeds f JOIN articles a ON a.feed_id = f.id
+               WHERE f.category_group_id IS NOT NULL{own_feeds}{group_scoped}
              ),
              in_group(article_id, group_id) AS (
                SELECT s.article_id, c.group_id FROM scoped s
                JOIN categories c ON c.id = s.category_id WHERE c.group_id IS NOT NULL
                UNION
-               SELECT a.id, f.category_group_id FROM articles a JOIN feeds f ON f.id = a.feed_id
-               WHERE f.category_group_id IS NOT NULL
-                 AND (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
+               SELECT article_id, group_id FROM group_feed
              )
-             SELECT 0, category_id, COUNT(*) FROM scoped GROUP BY category_id
+             SELECT {CATEGORY}, category_id, COUNT(*) FROM scoped GROUP BY category_id
              UNION ALL
-             SELECT 1, group_id, COUNT(*) FROM in_group GROUP BY group_id
+             SELECT {GROUP}, group_id, COUNT(*) FROM in_group GROUP BY group_id
              UNION ALL
-             SELECT 2, 0, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
-             WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
-               AND a.id NOT IN (SELECT article_id FROM scoped)
+             SELECT {UNCATEGORIZED}, 0, {total} - (SELECT COUNT(DISTINCT article_id) FROM scoped)
              UNION ALL
-             SELECT 3, a.feed_id, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
-             WHERE f.category_group_id IS NOT NULL
-               AND (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
-             GROUP BY a.feed_id"
+             SELECT {FEED}, feed_id, COUNT(*) FROM group_feed GROUP BY feed_id",
+            term_feeds = feed_is("ft.feed_id"),
+            own_feeds = feed_is("f.id"),
+            scoped = in_scope("article_id"),
+            group_scoped = in_scope("a.id"),
         );
         let mut out = CategoryCounts::default();
         let mut stmt = self.conn().prepare(&sql)?;
-        let rows = stmt.query_map(params![filter.feed_id, filter.folder_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? as u64))
-        })?;
+        let rows =
+            stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?.max(0) as u64)))?;
         for r in rows {
             match r? {
-                (0, id, n) => out.categories.insert(id, n),
-                (1, id, n) => out.groups.insert(id, n),
-                (3, id, n) => out.feeds.insert(id, n),
-                (_, _, n) => {
+                (CATEGORY, id, n) => out.categories.insert(id, n),
+                (GROUP, id, n) => out.groups.insert(id, n),
+                (FEED, id, n) => out.feeds.insert(id, n),
+                (UNCATEGORIZED, _, n) => {
                     out.uncategorized = n;
                     None
                 }
+                (kind, ..) => unreachable!("unknown count row kind {kind}"),
             };
         }
         Ok(out)

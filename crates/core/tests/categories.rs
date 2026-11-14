@@ -1377,3 +1377,84 @@ fn category_feed_id_intersects_with_the_feed_scope() {
     let q = SearchQuery { category_feed_id: Some(f), ..Default::default() };
     assert_eq!(matching(&s, &q), ["1", "2"]);
 }
+
+/// Counts are built by their own statement; under every scope they must match
+/// what the list finds for each category, each group, each group feed and
+/// Uncategorized.
+#[test]
+fn counts_match_the_list_under_every_scope() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    let g = feed(&mut s, "https://b.example/rss");
+    let h = feed(&mut s, "https://c.example/rss");
+    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])])
+        .unwrap();
+    s.ingest(g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[]), entry("9", &["AI", "Foot"])]).unwrap();
+    s.ingest(h, &[entry("10", &["Foot"]), entry("11", &[])]).unwrap();
+    let news = s.create_group("News").unwrap();
+    let sports = s.create_group("Sports").unwrap();
+    let sport = s.create_category("Sport").unwrap();
+    let tech = s.create_category("Tech").unwrap();
+    let local = s.create_category("Local").unwrap();
+    let football = s.create_category("Football").unwrap();
+    s.move_category(tech, Some(news), 0).unwrap();
+    s.move_category(local, Some(news), 1).unwrap();
+    s.move_category(football, Some(sports), 0).unwrap();
+    map_term(&s, "AI", tech);
+    map_term(&s, "Foot", football);
+    s.set_feed_default_category(f, Some(sport)).unwrap();
+    s.set_feed_default_category(h, Some(local)).unwrap();
+    s.set_feed_group(g, Some(sports)).unwrap();
+    s.set_feed_group(h, Some(news)).unwrap();
+    s.set_article_category(article_id(&s, "4"), Some(local)).unwrap();
+    for (guid, c) in [("5", local), ("6", local), ("7", tech), ("11", sport)] {
+        set_ai(&s, article_id(&s, guid), c);
+    }
+    let folder = s.create_folder("Folder").unwrap();
+    s.update_feed(g, "b", Some(folder)).unwrap();
+    s.update_feed(h, "c", Some(folder)).unwrap();
+    for guid in ["2", "6", "9", "10"] {
+        s.set_read(article_id(&s, guid), true).unwrap();
+    }
+    for guid in ["3", "7", "11"] {
+        s.set_saved(article_id(&s, guid), true).unwrap();
+    }
+
+    let scopes = [(None, None), (Some(f), None), (Some(g), None), (None, Some(folder)), (Some(h), Some(folder))];
+    for view in [View::All, View::Unread, View::Saved] {
+        for (feed_id, folder_id) in scopes {
+            let filter = ListFilter { view, feed_id, folder_id };
+            let counts = s.category_counts(filter).unwrap();
+            let total = |q: SearchQuery| {
+                let q = SearchQuery {
+                    view,
+                    feed_ids: feed_id.into_iter().collect(),
+                    folder_ids: folder_id.into_iter().collect(),
+                    ..q
+                };
+                s.search(&q, page()).unwrap().total
+            };
+            let at = format!("{view:?} feed {feed_id:?} folder {folder_id:?}");
+            for c in s.categories().unwrap() {
+                let listed = total(SearchQuery { category_ids: vec![c.id], ..Default::default() });
+                assert_eq!(counts.categories.get(&c.id).copied().unwrap_or(0), listed, "{} at {at}", c.name);
+            }
+            for group in [news, sports] {
+                let listed = total(SearchQuery { group_ids: vec![group], ..Default::default() });
+                assert_eq!(counts.groups.get(&group).copied().unwrap_or(0), listed, "group {group} at {at}");
+            }
+            for group_feed in [g, h] {
+                let listed = total(SearchQuery { category_feed_id: Some(group_feed), ..Default::default() });
+                assert_eq!(counts.feeds.get(&group_feed).copied().unwrap_or(0), listed, "feed {group_feed} at {at}");
+            }
+            let listed = total(SearchQuery { uncategorized: true, ..Default::default() });
+            assert_eq!(counts.uncategorized, listed, "uncategorized at {at}");
+        }
+    }
+    // The fixture exercises every source: nothing above is vacuous.
+    let all = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(all.categories.get(&sport), Some(&2), "f's default: 1 and 2");
+    assert_eq!(all.categories.get(&local), Some(&3), "manual 4, AI 6, h's default 11");
+    assert_eq!(all.categories.get(&tech), Some(&4), "mapped 3, 5 and 9; AI 7");
+    assert_eq!(all.uncategorized, 1, "only article 8");
+}

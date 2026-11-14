@@ -17,6 +17,9 @@ pub const WIDTH: f32 = 340.0;
 const LIST_MAX_HEIGHT: f32 = 420.0;
 /// Least height the feed list keeps, so a few rows stay visible.
 const LIST_MIN_HEIGHT: f32 = 80.0;
+/// Least height beside the edit form, which is tall: one row and a half, so
+/// the panel still fits the smallest window.
+const LIST_MIN_HEIGHT_EDITING: f32 = 48.0;
 /// Height of the Add / Import / Export block, its rule and the panel padding.
 const FOOTER_HEIGHT: f32 = 130.0;
 /// Height of the pinned edit form and of the pinned unsubscribe question.
@@ -33,7 +36,8 @@ pub fn list_max_height(available: f32, editing: bool, confirming: bool) -> f32 {
     if confirming {
         pinned += CONFIRM_HEIGHT;
     }
-    (available - FOOTER_HEIGHT - pinned).clamp(LIST_MIN_HEIGHT, LIST_MAX_HEIGHT)
+    let least = if editing { LIST_MIN_HEIGHT_EDITING } else { LIST_MIN_HEIGHT };
+    (available - FOOTER_HEIGHT - pinned).clamp(least, LIST_MAX_HEIGHT)
 }
 /// Longest scope name the dropdown button shows before cutting it with "…".
 const BUTTON_MAX_CHARS: usize = 28;
@@ -280,10 +284,11 @@ mod tests {
         assert_eq!(list_max_height(2000.0, false, false), LIST_MAX_HEIGHT);
         // 560px window: 97px header leaves 463; the footer takes its share.
         assert_eq!(list_max_height(463.0, false, false), 463.0 - FOOTER_HEIGHT);
-        // A taller window, as the edit form is tall.
-        assert_eq!(list_max_height(600.0, true, false), 600.0 - FOOTER_HEIGHT - EDIT_HEIGHT);
+        // The edit form is tall: the list gives way so the panel still fits the smallest window.
+        assert_eq!(list_max_height(463.0, true, false), 463.0 - FOOTER_HEIGHT - EDIT_HEIGHT);
         assert_eq!(list_max_height(463.0, false, true), 463.0 - FOOTER_HEIGHT - CONFIRM_HEIGHT);
-        assert_eq!(list_max_height(100.0, true, true), LIST_MIN_HEIGHT);
+        assert_eq!(list_max_height(100.0, true, true), LIST_MIN_HEIGHT_EDITING);
+        assert_eq!(list_max_height(100.0, false, true), LIST_MIN_HEIGHT);
     }
 
     #[test]
