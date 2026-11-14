@@ -4,9 +4,10 @@
 use iced::widget::button::Button;
 use iced::widget::{Space, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip};
 use iced::{Center, Element, Fill, Padding};
+use juttusihti_core::categories::CategoryTree;
 use juttusihti_core::{Feed, FeedId};
 
-use crate::app::{FeedEdit, FolderChoice, Message, Scope, Sidebar};
+use crate::app::{CategoryChoice, FeedEdit, FolderChoice, GroupChoice, Message, Scope, Sidebar};
 use crate::icons::{Icon, icon};
 use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 
@@ -19,7 +20,7 @@ const LIST_MIN_HEIGHT: f32 = 80.0;
 /// Height of the Add / Import / Export block, its rule and the panel padding.
 const FOOTER_HEIGHT: f32 = 130.0;
 /// Height of the pinned edit form and of the pinned unsubscribe question.
-const EDIT_HEIGHT: f32 = 190.0;
+const EDIT_HEIGHT: f32 = 270.0;
 const CONFIRM_HEIGHT: f32 = 90.0;
 
 /// Height for the scrolling feed list when `available` pixels are free below the list
@@ -64,8 +65,10 @@ fn shorten(label: &str, max: usize) -> String {
 /// The dropdown panel. `edit` is the feed whose edit form is open; `confirm` the feed
 /// waiting for an "Unsubscribe from …?" answer (both pinned above the list); `can_add` is
 /// false without networking; `list_height` caps the scrolling list (see [`list_max_height`]).
+#[allow(clippy::too_many_arguments)]
 pub fn panel<'a>(
     sidebar: &'a Sidebar,
+    tree: &CategoryTree,
     scope: Scope,
     add_feed: &'a str,
     edit: Option<&'a FeedEdit>,
@@ -137,7 +140,7 @@ pub fn panel<'a>(
     // The edit form and the unsubscribe question sit above the list, always in view.
     let mut body = column![].spacing(SPACE[1]);
     if let Some((e, f)) = edit.and_then(|e| sidebar.feeds.iter().find(|f| f.id == e.id).map(|f| (e, f))) {
-        body = body.push(edit_form(sidebar, f, e));
+        body = body.push(edit_form(sidebar, tree, f, e));
     }
     if let Some(f) = confirm.and_then(|id| sidebar.feeds.iter().find(|f| f.id == id)) {
         body = body.push(confirm_unsubscribe(f));
@@ -175,10 +178,24 @@ fn quiet<'a>(label: &'a str, target: Message) -> Element<'a, Message> {
 }
 
 /// Title, folder and Unsubscribe for one feed, pinned above the list.
-fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> Element<'a, Message> {
+fn edit_form<'a>(
+    sidebar: &'a Sidebar,
+    tree: &CategoryTree,
+    feed: &'a Feed,
+    edit: &'a FeedEdit,
+) -> Element<'a, Message> {
     let mut choices = vec![FolderChoice(None, "No folder".into())];
     choices.extend(sidebar.folders.iter().map(|f| FolderChoice(Some(f.id), f.name.clone())));
     let selected = choices.iter().find(|c| c.0 == edit.folder).cloned();
+    let mut categories: Vec<_> =
+        tree.groups.iter().flat_map(|g| &g.categories).chain(&tree.ungrouped).map(|n| &n.category).collect();
+    categories.sort_by_cached_key(|c| c.name.to_lowercase());
+    let mut category_choices = vec![CategoryChoice(None, "No default category".into())];
+    category_choices.extend(categories.into_iter().map(|c| CategoryChoice(Some(c.id), c.name.clone())));
+    let category_selected = category_choices.iter().find(|c| c.0 == edit.default_category).cloned();
+    let mut group_choices = vec![GroupChoice(None, "No group".into())];
+    group_choices.extend(tree.groups.iter().map(|g| GroupChoice(Some(g.group.id), g.group.name.clone())));
+    let group_selected = group_choices.iter().find(|c| c.0 == edit.group).cloned();
     container(
         column![
             text(&feed.url).size(SIZE_SMALL).style(style::faint),
@@ -197,6 +214,26 @@ fn edit_form<'a>(sidebar: &'a Sidebar, feed: &'a Feed, edit: &'a FeedEdit) -> El
                 text_input("or new folder", &edit.new_folder)
                     .style(style::text_input)
                     .on_input(Message::NewFolder)
+                    .size(SIZE_SMALL)
+                    .padding(SPACE[1])
+                    .width(Fill),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+            pick_list(category_choices, category_selected, Message::FeedDefaultCategory)
+                .style(style::pick_list)
+                .menu_style(style::menu)
+                .text_size(SIZE_SMALL)
+                .width(Fill),
+            row![
+                pick_list(group_choices, group_selected, Message::FeedGroup)
+                    .style(style::pick_list)
+                    .menu_style(style::menu)
+                    .text_size(SIZE_SMALL)
+                    .width(Fill),
+                text_input("or new group", &edit.new_group)
+                    .style(style::text_input)
+                    .on_input(Message::NewGroup)
                     .size(SIZE_SMALL)
                     .padding(SPACE[1])
                     .width(Fill),
@@ -243,7 +280,8 @@ mod tests {
         assert_eq!(list_max_height(2000.0, false, false), LIST_MAX_HEIGHT);
         // 560px window: 97px header leaves 463; the footer takes its share.
         assert_eq!(list_max_height(463.0, false, false), 463.0 - FOOTER_HEIGHT);
-        assert_eq!(list_max_height(463.0, true, false), 463.0 - FOOTER_HEIGHT - EDIT_HEIGHT);
+        // A taller window, as the edit form is tall.
+        assert_eq!(list_max_height(600.0, true, false), 600.0 - FOOTER_HEIGHT - EDIT_HEIGHT);
         assert_eq!(list_max_height(463.0, false, true), 463.0 - FOOTER_HEIGHT - CONFIRM_HEIGHT);
         assert_eq!(list_max_height(100.0, true, true), LIST_MIN_HEIGHT);
     }

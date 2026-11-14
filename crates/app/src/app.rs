@@ -143,6 +143,11 @@ pub struct FeedEdit {
     pub(crate) title: String,
     pub(crate) folder: Option<FolderId>,
     pub(crate) new_folder: String,
+    /// Category given to the feed's articles that no term maps.
+    pub(crate) default_category: Option<juttusihti_core::categories::CategoryId>,
+    /// Category group the feed belongs to.
+    pub(crate) group: Option<juttusihti_core::categories::GroupId>,
+    pub(crate) new_group: String,
 }
 
 /// Pick-list entry for a feed's folder.
@@ -153,6 +158,42 @@ impl std::fmt::Display for FolderChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.1)
     }
+}
+
+/// Pick-list entry for a feed's default category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryChoice(pub(crate) Option<juttusihti_core::categories::CategoryId>, pub(crate) String);
+
+impl std::fmt::Display for CategoryChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+/// Pick-list entry for a feed's category group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupChoice(pub(crate) Option<juttusihti_core::categories::GroupId>, pub(crate) String);
+
+impl std::fmt::Display for GroupChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+/// Saves an edited feed: folder, title, default category and group, in that order.
+/// A typed new folder or group wins over the picked one.
+fn save_feed_edit(s: &Store, edit: FeedEdit) -> juttusihti_core::Result<()> {
+    let folder = match edit.new_folder.trim() {
+        "" => edit.folder,
+        name => Some(s.create_folder(name)?),
+    };
+    s.update_feed(edit.id, &edit.title, folder)?;
+    s.set_feed_default_category(edit.id, edit.default_category)?;
+    let group = match edit.new_group.trim() {
+        "" => edit.group,
+        name => Some(s.find_or_create_group(name)?),
+    };
+    s.set_feed_group(edit.id, group)
 }
 
 /// The "Read full article" action of the article being read.
@@ -392,6 +433,9 @@ pub enum Message {
     FeedTitle(String),
     FeedFolder(FolderChoice),
     NewFolder(String),
+    FeedDefaultCategory(CategoryChoice),
+    FeedGroup(GroupChoice),
+    NewGroup(String),
     SaveFeed,
     CancelEditFeed,
     FeedSaved(Result<(), String>),
@@ -1440,8 +1484,15 @@ impl App {
                 self.feeds_open = true;
                 self.confirm_unsubscribe = None;
                 if let Some(f) = self.sidebar.feeds.iter().find(|f| f.id == id) {
-                    self.feed_edit =
-                        Some(FeedEdit { id, title: f.title.clone(), folder: f.folder_id, new_folder: String::new() });
+                    self.feed_edit = Some(FeedEdit {
+                        id,
+                        title: f.title.clone(),
+                        folder: f.folder_id,
+                        new_folder: String::new(),
+                        default_category: f.default_category_id,
+                        group: f.category_group_id,
+                        new_group: String::new(),
+                    });
                 }
                 Task::none()
             }
@@ -1464,6 +1515,25 @@ impl App {
                 }
                 Task::none()
             }
+            Message::FeedDefaultCategory(CategoryChoice(category, _)) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.default_category = category;
+                }
+                Task::none()
+            }
+            Message::FeedGroup(GroupChoice(group, _)) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.group = group;
+                    e.new_group.clear();
+                }
+                Task::none()
+            }
+            Message::NewGroup(s) => {
+                if let Some(e) = self.feed_edit.as_mut() {
+                    e.new_group = s;
+                }
+                Task::none()
+            }
             Message::CancelEditFeed => {
                 self.feed_edit = None;
                 Task::none()
@@ -1471,21 +1541,9 @@ impl App {
             Message::SaveFeed => {
                 let Some(edit) = self.feed_edit.take() else { return Task::none() };
                 let db = self.db.clone();
-                Task::perform(
-                    async move {
-                        db.call(move |s| -> juttusihti_core::Result<()> {
-                            let folder = match edit.new_folder.trim() {
-                                "" => edit.folder,
-                                name => Some(s.create_folder(name)?),
-                            };
-                            s.update_feed(edit.id, &edit.title, folder)
-                        })
-                        .await
-                    },
-                    Message::FeedSaved,
-                )
+                Task::perform(async move { db.call(move |s| save_feed_edit(s, edit)).await }, Message::FeedSaved)
             }
-            Message::FeedSaved(Ok(())) => self.load_sidebar(),
+            Message::FeedSaved(Ok(())) => Task::batch([self.load_sidebar(), self.load_categories()]),
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
             Message::DismissStatus => {
                 self.status = None;
@@ -1631,6 +1689,7 @@ impl App {
             let anchor = Point::new(rail::WIDTH + 1.0 + side + LIST_HEADER_PAD, below_header);
             let panel = feeds_menu::panel(
                 &self.sidebar,
+                self.categories.tree(),
                 self.scope,
                 &self.add_feed,
                 self.feed_edit.as_ref(),
@@ -2229,6 +2288,86 @@ mod tests {
         assert!(app.db_has_feed(feed));
         let _ = app.update(Message::CancelUnsubscribe);
         assert_eq!(app.confirm_unsubscribe, None);
+    }
+
+    /// Loads the store's feeds into the sidebar, as a reload would.
+    fn reload_feeds(app: &mut App) {
+        let feeds = app.db.shared().lock().unwrap().feeds().unwrap();
+        let _ = app.update(Message::SidebarLoaded(Ok(Sidebar { feeds, ..app.sidebar.clone() })));
+    }
+
+    /// Runs the save of a feed edit against the app's store, as the save task does.
+    fn save_edit(app: &App, edit: FeedEdit) {
+        save_feed_edit(&app.db.shared().lock().unwrap(), edit).unwrap();
+    }
+
+    #[test]
+    fn saving_a_feed_sets_its_default_category_and_a_new_group() {
+        let (mut app, feed) = app_with_feed();
+        let sport = app.db.shared().lock().unwrap().create_category("Sport").unwrap();
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::NewGroup("Urheilu".into()));
+        let edit = app.feed_edit.clone().unwrap();
+        save_edit(&app, edit);
+        let s = app.db.shared();
+        let s = s.lock().unwrap();
+        let f = s.feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_eq!(f.default_category_id, Some(sport));
+        let g = f.category_group_id.unwrap();
+        let tree = s.category_tree().unwrap();
+        assert_eq!(tree.groups.iter().find(|x| x.group.id == g).unwrap().group.name, "Urheilu");
+    }
+
+    #[test]
+    fn a_new_group_wins_over_the_picked_one_and_none_clears_them() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, picked) = {
+            let s = app.db.shared();
+            let s = s.lock().unwrap();
+            (s.create_category("Sport").unwrap(), s.create_group("Picked").unwrap())
+        };
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(Some(sport), "Sport".into())));
+        let _ = app.update(Message::FeedGroup(GroupChoice(Some(picked), "Picked".into())));
+        let _ = app.update(Message::NewGroup("Typed".into()));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        let f =
+            |app: &App| app.db.shared().lock().unwrap().feeds().unwrap().into_iter().find(|f| f.id == feed).unwrap();
+        assert_ne!(f(&app).category_group_id, Some(picked));
+        assert!(f(&app).category_group_id.is_some());
+        // Picking a group clears the typed name; "No ..." clears both settings.
+        reload_feeds(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let _ = app.update(Message::FeedGroup(GroupChoice(Some(picked), "Picked".into())));
+        assert!(app.feed_edit.as_ref().unwrap().new_group.is_empty());
+        let _ = app.update(Message::FeedGroup(GroupChoice(None, "No group".into())));
+        let _ = app.update(Message::FeedDefaultCategory(CategoryChoice(None, "No default category".into())));
+        save_edit(&app, app.feed_edit.clone().unwrap());
+        assert_eq!((f(&app).default_category_id, f(&app).category_group_id), (None, None));
+    }
+
+    #[test]
+    fn opening_the_edit_form_preselects_default_category_and_group() {
+        let (mut app, feed) = app_with_feed();
+        let (sport, g) = {
+            let s = app.db.shared();
+            let s = s.lock().unwrap();
+            let sport = s.create_category("Sport").unwrap();
+            let g = s.create_group("Urheilu").unwrap();
+            s.set_feed_default_category(feed, Some(sport)).unwrap();
+            s.set_feed_group(feed, Some(g)).unwrap();
+            (sport, g)
+        };
+        reload_feeds(&mut app);
+        reload_categories(&mut app);
+        let _ = app.update(Message::EditFeed(feed));
+        let e = app.feed_edit.as_ref().unwrap();
+        assert_eq!((e.default_category, e.group), (Some(sport), Some(g)));
+        app.feeds_open = true;
+        let _ = app.view();
     }
 
     #[test]

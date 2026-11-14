@@ -258,6 +258,11 @@ impl State {
         })
     }
 
+    /// The loaded tree of groups and categories.
+    pub fn tree(&self) -> &CategoryTree {
+        &self.tree
+    }
+
     /// The "find categories with AI" panel, when open.
     #[cfg(test)]
     pub fn ai_panel(&self) -> Option<&Panel> {
