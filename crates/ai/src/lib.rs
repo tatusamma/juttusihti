@@ -8,6 +8,7 @@
 //! stored, and nothing in a response is ever executed.
 
 pub mod categorize;
+pub mod categorize_articles;
 pub mod chatgpt;
 pub mod decisions;
 pub mod factcheck;
@@ -133,6 +134,16 @@ pub struct WebSource {
 /// option, so the caller may retry with the default search context.
 pub fn is_context_size_rejected(e: &AiError) -> bool {
     matches!(e, AiError::Status { status: 400, message } if message.contains("search_context_size"))
+}
+
+/// Whether a failed request was rejected because its input is too long for
+/// the model's context window (OpenAI, Anthropic and Gemini wordings).
+pub fn is_context_window_exceeded(e: &AiError) -> bool {
+    let AiError::Status { status: 400 | 413, message } = e else { return false };
+    let m = message.to_ascii_lowercase();
+    ["context length", "context_length", "context window", "prompt is too long", "input token count", "too many tokens"]
+        .iter()
+        .any(|k| m.contains(k))
 }
 
 /// Whether a failed request means the model or credential cannot use the
