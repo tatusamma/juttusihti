@@ -459,19 +459,29 @@ pub struct SearchResults {
     pub interpreted: Option<String>,
 }
 
-/// Whether article `a` is in the category (or categories) `target` picks:
-/// its manual category; otherwise its mapped publisher terms or its AI
-/// category. `target` is a condition on a category id (`= ?`, `IN (...)`,
-/// `IS NOT NULL`); it appears three times, so a parameter is bound three times.
+/// Whether article `a` (joined with its feed `f`) is in the category (or
+/// categories) `target` picks: its manual category; otherwise its mapped
+/// publisher terms; with none mapped, its feed's default category; with
+/// neither, its AI category. `target` is a condition on a category id (`= ?`,
+/// `IN (...)`, `IS NOT NULL`); it appears [`MEMBERSHIP_TARGETS`] times, so a
+/// parameter is bound that many times.
 pub(crate) fn category_membership(target: &str) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM article_categories ac WHERE ac.article_id = a.id
-                 AND (ac.user_category_id {target} OR (ac.user_category_id IS NULL AND ac.ai_category_id {target})))
+        "EXISTS (SELECT 1 FROM article_categories ac WHERE ac.article_id = a.id AND ac.user_category_id {target})
          OR (NOT EXISTS (SELECT 1 FROM article_categories m WHERE m.article_id = a.id AND m.user_category_id IS NOT NULL)
-             AND EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                         WHERE t.article_id = a.id AND ft.category_id {target}))"
+             AND (EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                          WHERE t.article_id = a.id AND ft.category_id {target})
+                  OR (NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                                  WHERE t.article_id = a.id AND ft.category_id IS NOT NULL)
+                      AND (f.default_category_id {target}
+                           OR (f.default_category_id IS NULL
+                               AND EXISTS (SELECT 1 FROM article_categories ac
+                                           WHERE ac.article_id = a.id AND ac.ai_category_id {target}))))))"
     )
 }
+
+/// How many times [`category_membership`] uses its `target`.
+pub(crate) const MEMBERSHIP_TARGETS: usize = 4;
 
 /// Builds the WHERE clause shared by search, counting and analysis scoping.
 /// Returns (`FROM ... WHERE ...` SQL, parameters, has_fts).
@@ -527,11 +537,11 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     }
     for id in &q.category_ids {
         sql.push_str(&format!(" AND ({})", category_membership("= ?")));
-        params.extend(std::iter::repeat_n(Value::Integer(*id), 3));
+        params.extend(std::iter::repeat_n(Value::Integer(*id), MEMBERSHIP_TARGETS));
     }
     for id in &q.group_ids {
         sql.push_str(&format!(" AND ({})", category_membership("IN (SELECT id FROM categories WHERE group_id = ?)")));
-        params.extend(std::iter::repeat_n(Value::Integer(*id), 3));
+        params.extend(std::iter::repeat_n(Value::Integer(*id), MEMBERSHIP_TARGETS));
     }
     if q.uncategorized {
         sql.push_str(&format!(" AND NOT ({})", category_membership("IS NOT NULL")));

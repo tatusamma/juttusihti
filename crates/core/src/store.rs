@@ -416,7 +416,8 @@ impl Store {
     }
 }
 
-const FEED_COLS: &str = "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error";
+const FEED_COLS: &str = "id, url, title, site_url, folder_id, etag, last_modified, last_fetched_at, last_error,
+                         default_category_id, category_group_id";
 
 fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
     Ok(Feed {
@@ -429,6 +430,8 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         last_modified: r.get(6)?,
         last_fetched_at: r.get(7)?,
         last_error: r.get(8)?,
+        default_category_id: r.get(9)?,
+        category_group_id: r.get(10)?,
     })
 }
 

@@ -19,9 +19,12 @@ impl std::fmt::Display for Choice {
 
 /// The effective category names ("None" when there are none) and a muted note
 /// on where they came from.
-pub fn describe(c: &ArticleCategory) -> (String, Option<&'static str>) {
+pub fn describe(c: &ArticleCategory) -> (String, Option<String>) {
     if let Some(m) = &c.manual {
-        return (m.name.clone(), Some("set by you"));
+        return (m.name.clone(), Some("set by you".into()));
+    }
+    if let Some(f) = &c.from_feed {
+        return (f.category.name.clone(), Some(format!("From feed {}", f.feed_title)));
     }
     let mut names: Vec<&str> = c.from_terms.iter().map(|t| t.name.as_str()).collect();
     let ai_new = c.ai.as_ref().filter(|a| !c.from_terms.iter().any(|t| t.id == a.id));
@@ -36,7 +39,7 @@ pub fn describe(c: &ArticleCategory) -> (String, Option<&'static str>) {
         (true, _) => "from AI",
         (false, true) => "from the feed and AI",
     };
-    (names.join(", "), Some(origin))
+    (names.join(", "), Some(origin.into()))
 }
 
 /// The pick list's entries: "Automatic" first when a manual choice exists, then
@@ -80,6 +83,7 @@ pub fn view<'a, M: Clone + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use juttusihti_core::categories::FeedDefault;
 
     fn cat(id: i64, name: &str) -> Category {
         Category { id, name: name.into() }
@@ -90,13 +94,23 @@ mod tests {
         let none = ArticleCategory::default();
         assert_eq!(describe(&none), ("None".into(), None));
         let feed = ArticleCategory { from_terms: vec![cat(1, "Sport")], ..Default::default() };
-        assert_eq!(describe(&feed), ("Sport".into(), Some("from the feed")));
+        assert_eq!(describe(&feed), ("Sport".into(), Some("from the feed".into())));
         let ai = ArticleCategory { ai: Some(cat(2, "Tech")), ..Default::default() };
-        assert_eq!(describe(&ai), ("Tech".into(), Some("from AI")));
-        let both = ArticleCategory { from_terms: vec![cat(1, "Sport")], ai: Some(cat(2, "Tech")), manual: None };
-        assert_eq!(describe(&both), ("Sport, Tech".into(), Some("from the feed and AI")));
+        assert_eq!(describe(&ai), ("Tech".into(), Some("from AI".into())));
+        let both = ArticleCategory {
+            from_terms: vec![cat(1, "Sport")],
+            ai: Some(cat(2, "Tech")),
+            manual: None,
+            from_feed: None,
+        };
+        assert_eq!(describe(&both), ("Sport, Tech".into(), Some("from the feed and AI".into())));
+        let default = ArticleCategory {
+            from_feed: Some(FeedDefault { category: cat(4, "Sport"), feed_title: "Yle Urheilu".into() }),
+            ..Default::default()
+        };
+        assert_eq!(describe(&default), ("Sport".into(), Some("From feed Yle Urheilu".into())));
         let manual = ArticleCategory { manual: Some(cat(3, "Local")), ..both };
-        assert_eq!(describe(&manual), ("Local".into(), Some("set by you")));
+        assert_eq!(describe(&manual), ("Local".into(), Some("set by you".into())));
     }
 
     #[test]

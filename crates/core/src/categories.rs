@@ -10,7 +10,7 @@ use crate::normalize::normalize_text;
 use crate::research::similar_labels;
 use crate::search::{SearchQuery, build_where};
 use crate::store::{ListFilter, Store};
-use crate::{ArticleId, Error, Result, View, now};
+use crate::{ArticleId, Error, FeedId, Result, View, now};
 
 pub type GroupId = i64;
 pub type TermId = i64;
@@ -69,14 +69,24 @@ pub struct CategoryCounts {
     pub uncategorized: u64,
 }
 
-/// Where an article's categories come from. The manual one, when set, is the
-/// article's only category; otherwise it is in each of `from_terms` and `ai`.
+/// A feed's default category, in effect for an article of that feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedDefault {
+    pub category: Category,
+    pub feed_title: String,
+}
+
+/// Where an article's categories come from, only the sources in effect. The
+/// manual one, when set, is the article's only category; otherwise
+/// `from_terms` (mapped publisher terms); with none, `from_feed` (the feed's
+/// default); with neither, `ai`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArticleCategory {
     pub manual: Option<Category>,
     pub ai: Option<Category>,
     /// Categories its publisher terms are mapped to, by name.
     pub from_terms: Vec<Category>,
+    pub from_feed: Option<FeedDefault>,
 }
 
 /// An article offered to AI for categories: its headline and a short text.
@@ -315,6 +325,7 @@ impl Store {
             params![from, into],
         )?;
         tx.execute("UPDATE article_categories SET ai_category_id = ?2 WHERE ai_category_id = ?1", params![from, into])?;
+        tx.execute("UPDATE feeds SET default_category_id = ?2 WHERE default_category_id = ?1", params![from, into])?;
         tx.execute("DELETE FROM categories WHERE id = ?1", [from])?;
         tx.commit()?;
         Ok(())
@@ -371,7 +382,21 @@ impl Store {
         Ok(())
     }
 
-    /// An article's manual, AI and publisher-term categories.
+    /// Sets (or with `None` clears) the category given to a feed's articles that
+    /// have no mapped publisher term.
+    pub fn set_feed_default_category(&self, feed: FeedId, category: Option<CategoryId>) -> Result<()> {
+        if let Some(c) = category
+            && !exists(self.conn(), "SELECT 1 FROM categories WHERE id = ?1", c)?
+        {
+            return Err(Error::NotFound);
+        }
+        match self.conn().execute("UPDATE feeds SET default_category_id = ?1 WHERE id = ?2", params![category, feed])? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
+        }
+    }
+
+    /// An article's categories, only the sources in effect.
     pub fn article_category(&self, article: ArticleId) -> Result<ArticleCategory> {
         let conn = self.conn();
         let one = |col: &str| -> Result<Option<Category>> {
@@ -387,14 +412,26 @@ impl Store {
                 .optional()?)
         };
         let manual = one("user_category_id")?;
-        let ai = one("ai_category_id")?;
         let mut stmt = conn.prepare(
             "SELECT DISTINCT c.id, c.name FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
              JOIN categories c ON c.id = ft.category_id WHERE t.article_id = ?1
              ORDER BY c.name COLLATE NOCASE, c.id",
         )?;
-        let from_terms = stmt.query_map([article], category_from_row)?.collect::<rusqlite::Result<_>>()?;
-        Ok(ArticleCategory { manual, ai, from_terms })
+        let from_terms: Vec<Category> =
+            stmt.query_map([article], category_from_row)?.collect::<rusqlite::Result<_>>()?;
+        let from_feed = if manual.is_some() || !from_terms.is_empty() {
+            None
+        } else {
+            conn.query_row(
+                "SELECT c.id, c.name, f.title FROM articles a JOIN feeds f ON f.id = a.feed_id
+                 JOIN categories c ON c.id = f.default_category_id WHERE a.id = ?1",
+                [article],
+                |r| Ok(FeedDefault { category: category_from_row(r)?, feed_title: r.get(2)? }),
+            )
+            .optional()?
+        };
+        let ai = if from_terms.is_empty() && from_feed.is_none() { one("ai_category_id")? } else { None };
+        Ok(ArticleCategory { manual, ai, from_terms, from_feed })
     }
 
     // ---- groups ------------------------------------------------------------
@@ -572,7 +609,8 @@ impl Store {
 
     /// Distinct article counts per category and per group, restricted like a
     /// list. Membership: the manual category; otherwise mapped publisher
-    /// terms and the AI category. One statement: the memberships are worked
+    /// terms; with none, the feed's default category; with neither, the AI
+    /// category. One statement: the memberships are worked
     /// out once and the counts read them.
     pub fn category_counts(&self, filter: ListFilter) -> Result<CategoryCounts> {
         let view = match filter.view {
@@ -584,13 +622,24 @@ impl Store {
             "WITH m(article_id, category_id) AS (
                SELECT article_id, user_category_id FROM article_categories WHERE user_category_id IS NOT NULL
                UNION
-               SELECT article_id, ai_category_id FROM article_categories
-               WHERE user_category_id IS NULL AND ai_category_id IS NOT NULL
-               UNION
                SELECT t.article_id, ft.category_id FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
                WHERE ft.category_id IS NOT NULL AND NOT EXISTS (
                  SELECT 1 FROM article_categories x
                  WHERE x.article_id = t.article_id AND x.user_category_id IS NOT NULL)
+               UNION
+               SELECT a.id, f.default_category_id FROM articles a JOIN feeds f ON f.id = a.feed_id
+               WHERE f.default_category_id IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM article_categories x
+                                 WHERE x.article_id = a.id AND x.user_category_id IS NOT NULL)
+                 AND NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                                 WHERE t.article_id = a.id AND ft.category_id IS NOT NULL)
+               UNION
+               SELECT ac.article_id, ac.ai_category_id FROM article_categories ac
+               JOIN articles a ON a.id = ac.article_id JOIN feeds f ON f.id = a.feed_id
+               WHERE ac.user_category_id IS NULL AND ac.ai_category_id IS NOT NULL
+                 AND f.default_category_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                                 WHERE t.article_id = ac.article_id AND ft.category_id IS NOT NULL)
              ),
              scoped(article_id, category_id) AS MATERIALIZED (
                SELECT m.article_id, m.category_id FROM m

@@ -26,6 +26,8 @@ pub struct Feed {
     pub last_modified: Option<String>,
     pub last_fetched_at: Option<i64>,
     pub last_error: Option<String>,
+    pub default_category_id: Option<i64>,
+    pub category_group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

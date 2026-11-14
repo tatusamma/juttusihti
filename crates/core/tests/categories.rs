@@ -220,7 +220,11 @@ fn manual_category_overrides_terms_and_ai() {
     let art = article_id(&s, "1");
     map_term(&s, "AI", a);
     set_ai(&s, art, b);
-    assert_eq!((by_category(&s, a), by_category(&s, b), by_category(&s, c)), (1, 1, 0), "RSS and AI both apply");
+    assert_eq!(
+        (by_category(&s, a), by_category(&s, b), by_category(&s, c)),
+        (1, 0, 0),
+        "mapped terms drop the AI category"
+    );
     s.set_article_category(art, Some(c)).unwrap();
     assert_eq!((by_category(&s, a), by_category(&s, b), by_category(&s, c)), (0, 0, 1));
     let counts = s.category_counts(ListFilter::default()).unwrap();
@@ -228,7 +232,7 @@ fn manual_category_overrides_terms_and_ai() {
     assert!(!counts.categories.contains_key(&a) && !counts.categories.contains_key(&b));
     let got = s.article_category(art).unwrap();
     assert_eq!(got.manual.map(|x| x.id), Some(c));
-    assert_eq!(got.ai.map(|x| x.id), Some(b));
+    assert_eq!(got.ai, None, "the AI category is not in effect");
     assert_eq!(got.from_terms.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a]);
 }
 
@@ -243,10 +247,10 @@ fn clearing_manual_returns_to_automatic() {
     set_ai(&s, art, b);
     s.set_article_category(art, Some(c)).unwrap();
     s.set_article_category(art, None).unwrap();
-    assert_eq!((in_category(&s, a), in_category(&s, b)), (vec!["1".to_string()], vec!["1".to_string()]));
+    assert_eq!((in_category(&s, a), in_category(&s, b)), (vec!["1".to_string()], Vec::<String>::new()));
     assert_eq!(by_category(&s, c), 0);
     let got = s.article_category(art).unwrap();
-    assert_eq!((got.manual, got.ai.map(|x| x.id)), (None, Some(b)));
+    assert_eq!((got.manual, got.ai), (None, None), "the mapped term wins over AI");
     // A manual choice alone, cleared, leaves no row behind.
     let other = article_id(&s, "2");
     s.set_article_category(other, Some(c)).unwrap();
@@ -479,7 +483,7 @@ fn counts_are_distinct_and_follow_view_and_feed() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     let f2 = feed(&mut s, "https://b.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
     let g = s.create_group("G").unwrap();
     let a = s.create_category("A").unwrap();
     let b = s.create_category("B").unwrap();
@@ -487,19 +491,21 @@ fn counts_are_distinct_and_follow_view_and_feed() {
     s.move_category(b, Some(g), 1).unwrap();
     let art = article_id(&s, "1");
     set_ai(&s, art, a);
+    set_ai(&s, article_id(&s, "2"), a);
     s.map_term(term_id(&s, "AI"), Some(b)).unwrap();
     let c = s.category_counts(ListFilter::default()).unwrap();
-    assert_eq!(c.groups[&g], 1);
+    assert_eq!(c.groups[&g], 2, "articles 1 (term) and 2 (AI)");
     assert_eq!((c.categories[&a], c.categories[&b]), (1, 1));
     assert_eq!(c.uncategorized, 0);
     s.set_read(art, true).unwrap();
+    s.set_read(article_id(&s, "2"), true).unwrap();
     let unread = ListFilter { view: View::Unread, ..Default::default() };
     let c = s.category_counts(unread).unwrap();
     assert_eq!(c.groups.get(&g).copied().unwrap_or(0), 0);
     let other = ListFilter { feed_id: Some(f2), ..Default::default() };
     assert!(s.category_counts(other).unwrap().groups.is_empty());
     let own = ListFilter { feed_id: Some(f), ..Default::default() };
-    assert_eq!(s.category_counts(own).unwrap().groups[&g], 1);
+    assert_eq!(s.category_counts(own).unwrap().groups[&g], 2);
 }
 
 #[test]
@@ -1125,4 +1131,138 @@ fn create_category_checked_says_whether_it_was_created() {
     let (a, created) = s.create_category_checked("Tekoäly").unwrap();
     assert!(created);
     assert_eq!(s.create_category_checked("  tekoäly ").unwrap(), (a, false));
+}
+
+// ---- feed default category ---------------------------------------------------
+
+/// A feed `f` with a default category sport: articles "1" (no terms), "2" (an
+/// unsorted term) and "3" (a term mapped to tech).
+fn default_data() -> (Store, FeedId, CategoryId, CategoryId) {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"])]).unwrap();
+    let sport = s.create_category("Sport").unwrap();
+    let tech = s.create_category("Tech").unwrap();
+    map_term(&s, "AI", tech);
+    s.set_feed_default_category(f, Some(sport)).unwrap();
+    (s, f, sport, tech)
+}
+
+#[test]
+fn feed_default_covers_articles_without_mapped_terms() {
+    let (s, _, sport, tech) = default_data();
+    assert_eq!(in_category(&s, sport), ["1", "2"]);
+    assert_eq!(in_category(&s, tech), ["3"]);
+    assert_eq!(by_category(&s, sport), 2);
+    let counts = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(counts.categories.get(&sport), Some(&2));
+    assert_eq!(counts.categories.get(&tech), Some(&1));
+    assert_eq!(counts.uncategorized, 0);
+}
+
+#[test]
+fn feed_default_beats_ai_and_clearing_it_brings_ai_back() {
+    let (s, f, sport, tech) = default_data();
+    set_ai(&s, article_id(&s, "1"), tech);
+    assert_eq!(in_category(&s, sport), ["1", "2"]);
+    assert_eq!(in_category(&s, tech), ["3"]);
+    s.set_feed_default_category(f, None).unwrap();
+    assert_eq!(in_category(&s, tech), ["1", "3"]);
+    assert!(in_category(&s, sport).is_empty());
+}
+
+#[test]
+fn mapped_terms_drop_the_ai_category() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    let tech = s.create_category("Tech").unwrap();
+    let local = s.create_category("Local").unwrap();
+    map_term(&s, "AI", tech);
+    set_ai(&s, article_id(&s, "1"), local);
+    assert_eq!(in_category(&s, tech), ["1"]);
+    assert!(in_category(&s, local).is_empty());
+    let counts = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(counts.categories.get(&local), None);
+}
+
+#[test]
+fn manual_category_beats_feed_default() {
+    let (s, _, sport, _) = default_data();
+    let local = s.create_category("Local").unwrap();
+    s.set_article_category(article_id(&s, "1"), Some(local)).unwrap();
+    assert_eq!(in_category(&s, local), ["1"]);
+    assert_eq!(in_category(&s, sport), ["2"]);
+}
+
+#[test]
+fn feed_default_articles_are_not_offered_to_ai() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    let g = feed(&mut s, "https://b.example/rss");
+    s.ingest(f, &[entry("1", &[])]).unwrap();
+    s.ingest(g, &[entry("2", &[])]).unwrap();
+    let sport = s.create_category("Sport").unwrap();
+    s.set_feed_default_category(f, Some(sport)).unwrap();
+    let (offered, eligible) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
+    assert_eq!(eligible, 1);
+    assert!(offered.iter().all(|a| s.article(a.id).unwrap().feed_id == g));
+}
+
+#[test]
+fn setting_a_default_needs_an_existing_feed() {
+    let s = Store::open_in_memory().unwrap();
+    assert!(matches!(s.set_feed_default_category(99, None), Err(Error::NotFound)));
+}
+
+#[test]
+fn deleting_or_merging_the_default_category() {
+    let (mut s, f, sport, tech) = default_data();
+    s.merge_categories(sport, tech).unwrap();
+    assert_eq!(s.feed(f).unwrap().default_category_id, Some(tech));
+    s.delete_category(tech).unwrap();
+    assert_eq!(s.feed(f).unwrap().default_category_id, None);
+}
+
+#[test]
+fn article_category_reports_the_feed_default() {
+    let (s, _, sport, tech) = default_data();
+    set_ai(&s, article_id(&s, "1"), tech);
+    let one = s.article_category(article_id(&s, "1")).unwrap();
+    let from_feed = one.from_feed.unwrap();
+    assert_eq!((from_feed.category.id, from_feed.feed_title.as_str()), (sport, "https://a.example/rss"));
+    assert_eq!(one.ai, None, "the AI category is not in effect");
+    let three = s.article_category(article_id(&s, "3")).unwrap();
+    assert_eq!(three.from_feed, None);
+    assert_eq!(three.from_terms.len(), 1);
+    s.set_article_category(article_id(&s, "1"), Some(tech)).unwrap();
+    assert_eq!(s.article_category(article_id(&s, "1")).unwrap().from_feed, None);
+}
+
+#[test]
+fn list_and_counts_agree_on_every_category() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    let g = feed(&mut s, "https://b.example/rss");
+    s.ingest(f, &[entry("1", &[]), entry("2", &["Misc"]), entry("3", &["AI"]), entry("4", &[]), entry("5", &["AI"])])
+        .unwrap();
+    s.ingest(g, &[entry("6", &[]), entry("7", &["Misc"]), entry("8", &[])]).unwrap();
+    let sport = s.create_category("Sport").unwrap();
+    let tech = s.create_category("Tech").unwrap();
+    let local = s.create_category("Local").unwrap();
+    s.create_category("Empty").unwrap();
+    map_term(&s, "AI", tech);
+    s.set_feed_default_category(f, Some(sport)).unwrap();
+    s.set_article_category(article_id(&s, "4"), Some(local)).unwrap();
+    set_ai(&s, article_id(&s, "5"), local);
+    set_ai(&s, article_id(&s, "6"), local);
+    set_ai(&s, article_id(&s, "7"), tech);
+    let counts = s.category_counts(ListFilter::default()).unwrap();
+    for c in s.categories().unwrap() {
+        let counted = counts.categories.get(&c.id).copied().unwrap_or(0);
+        assert_eq!(by_category(&s, c.id), counted, "{}", c.name);
+    }
+    assert_eq!(in_category(&s, local), ["4", "6"]);
+    assert_eq!(in_category(&s, tech), ["3", "5", "7"]);
+    assert_eq!(counts.uncategorized, 1, "only article 8");
 }

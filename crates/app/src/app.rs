@@ -1059,6 +1059,8 @@ impl App {
                     last_modified: None,
                     last_fetched_at: None,
                     last_error: None,
+                    default_category_id: None,
+                    category_group_id: None,
                 };
                 let fetch = self.refresh_feed(&feed).unwrap_or_else(Task::none);
                 self.refreshing += 1;
