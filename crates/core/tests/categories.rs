@@ -1,3 +1,4 @@
+use juttusihti_core::categories::*;
 use juttusihti_core::search::SearchQuery;
 use juttusihti_core::store::{ListFilter, Store};
 use juttusihti_core::*;
@@ -21,6 +22,10 @@ fn feed(s: &mut Store, url: &str) -> FeedId {
 
 fn count(s: &Store, table: &str) -> i64 {
     s.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+}
+
+fn page() -> Page {
+    Page { limit: 50, offset: 0 }
 }
 
 #[test]
@@ -62,7 +67,7 @@ fn new_terms_start_unsorted() {
     s.ingest(f, &[entry("1", &["AI"])]).unwrap();
     let n: i64 = s
         .conn()
-        .query_row("SELECT COUNT(*) FROM feed_terms WHERE label_id IS NULL AND ignored = 0", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feed_terms WHERE category_id IS NULL AND ignored = 0", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 1);
 }
@@ -100,24 +105,79 @@ fn same_name_different_schemes_are_two_terms() {
     assert_eq!(count(&s, "feed_terms"), 2);
 }
 
-fn map_term(s: &Store, name: &str, label: LabelId) {
-    s.conn().execute("UPDATE feed_terms SET label_id = ?1 WHERE name = ?2", rusqlite::params![label, name]).unwrap();
+fn map_term(s: &Store, name: &str, c: CategoryId) {
+    s.conn().execute("UPDATE feed_terms SET category_id = ?1 WHERE name = ?2", rusqlite::params![c, name]).unwrap();
 }
 
 fn article_id(s: &Store, guid: &str) -> ArticleId {
     s.conn().query_row("SELECT id FROM articles WHERE guid = ?1", [guid], |r| r.get(0)).unwrap()
 }
 
-fn by_label(s: &Store, l: LabelId) -> u64 {
-    let q = SearchQuery { label_ids: vec![l], ..Default::default() };
-    s.search(&q, Page { limit: 50, offset: 0 }).unwrap().total
+fn matching(s: &Store, q: &SearchQuery) -> Vec<String> {
+    let r = s.search(q, page()).unwrap();
+    let mut guids: Vec<String> = r.items.iter().map(|i| s.article(i.id).unwrap().guid).collect();
+    guids.sort();
+    guids
 }
 
-fn group(s: &Store) -> i64 {
+fn in_category(s: &Store, c: CategoryId) -> Vec<String> {
+    matching(s, &SearchQuery { category_ids: vec![c], ..Default::default() })
+}
+
+fn by_category(s: &Store, c: CategoryId) -> u64 {
+    let q = SearchQuery { category_ids: vec![c], ..Default::default() };
+    s.search(&q, page()).unwrap().total
+}
+
+fn set_ai(s: &Store, article: ArticleId, c: CategoryId) {
     s.conn()
-        .execute("INSERT INTO category_groups(name, normalized, position, created_at) VALUES ('Aihe','aihe',0,0)", [])
+        .execute(
+            "INSERT INTO article_categories(article_id, ai_category_id, updated_at) VALUES (?1, ?2, 0)
+             ON CONFLICT(article_id) DO UPDATE SET ai_category_id = excluded.ai_category_id",
+            [article, c],
+        )
         .unwrap();
-    s.conn().last_insert_rowid()
+}
+
+fn term_id(s: &Store, name: &str) -> TermId {
+    s.conn().query_row("SELECT id FROM feed_terms WHERE name = ?1", [name], |r| r.get(0)).unwrap()
+}
+
+fn names(nodes: &[CategoryNode]) -> Vec<String> {
+    nodes.iter().map(|n| n.category.name.clone()).collect()
+}
+
+#[test]
+fn labels_table_is_untouched_by_migration() {
+    let s = Store::open_in_memory().unwrap();
+    let cols = |table: &str| -> Vec<String> {
+        let mut st = s.conn().prepare(&format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid")).unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(cols("labels"), ["id", "name", "normalized", "color", "created_at"]);
+    assert_eq!(cols("article_labels"), ["article_id", "label_id", "origin", "status", "suggestion_id", "created_at"]);
+    assert_eq!(cols("categories"), ["id", "name", "normalized", "group_id", "position", "created_at"]);
+    assert_eq!(cols("article_categories"), ["article_id", "user_category_id", "ai_category_id", "updated_at"]);
+    assert!(cols("feed_terms").contains(&"category_id".to_string()));
+    assert!(!cols("feed_terms").contains(&"label_id".to_string()));
+    assert_eq!(cols("favourites"), ["id", "group_id", "category_id", "position"]);
+}
+
+#[test]
+fn creating_categories_normalizes_names() {
+    let s = Store::open_in_memory().unwrap();
+    let a = s.create_category("Tekoäly").unwrap();
+    assert_eq!(s.create_category("  tekoäly ").unwrap(), a);
+    assert!(matches!(s.create_category("  "), Err(Error::Invalid(_))));
+    let b = s.create_category("Sää").unwrap();
+    assert!(matches!(s.rename_category(b, " TEKOÄLY"), Err(Error::Invalid(_))));
+    s.rename_category(b, "Sää ja ilmasto").unwrap();
+    assert!(matches!(s.rename_category(999, "X"), Err(Error::NotFound)));
+    let got: Vec<String> = s.categories().unwrap().into_iter().map(|c| c.name).collect();
+    assert_eq!(got, ["Sää ja ilmasto", "Tekoäly"]);
+    assert_eq!(count(&s, "labels"), 0, "categories are not labels");
+    let similar: Vec<CategoryId> = s.similar_categories("tekoälyn").unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(similar, vec![a]);
 }
 
 #[test]
@@ -125,122 +185,150 @@ fn mapped_term_puts_article_in_category() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["AI"]), entry("2", &["Muu"])]).unwrap();
-    let l = s.create_label("Tekoäly").unwrap();
-    assert_eq!(by_label(&s, l), 0);
-    map_term(&s, "AI", l);
-    assert_eq!(by_label(&s, l), 1);
+    let c = s.create_category("Tekoäly").unwrap();
+    assert_eq!(by_category(&s, c), 0);
+    map_term(&s, "AI", c);
+    assert_eq!(by_category(&s, c), 1);
 }
 
 #[test]
 fn group_filter_returns_each_article_once() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI", "Robotit"]), entry("2", &["Muu"])]).unwrap();
-    let a = s.create_label("Tekoäly").unwrap();
-    let b = s.create_label("Robotiikka").unwrap();
-    let g = group(&s);
-    s.conn().execute("UPDATE labels SET group_id = ?1", [g]).unwrap();
+    s.ingest(f, &[entry("1", &["AI", "Robotit"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
+    let a = s.create_category("Tekoäly").unwrap();
+    let b = s.create_category("Robotiikka").unwrap();
+    let g = s.create_group("Aihe").unwrap();
+    s.move_category(a, Some(g), 0).unwrap();
+    s.move_category(b, Some(g), 1).unwrap();
     map_term(&s, "AI", a);
     map_term(&s, "Robotit", b);
-    s.tag_article(article_id(&s, "1"), a, Origin::User, None).unwrap();
+    set_ai(&s, article_id(&s, "1"), a);
+    set_ai(&s, article_id(&s, "3"), b);
     let q = SearchQuery { group_ids: vec![g], ..Default::default() };
-    let r = s.search(&q, Page { limit: 50, offset: 0 }).unwrap();
-    assert_eq!(r.total, 1);
-    assert_eq!(r.items.len(), 1);
+    let r = s.search(&q, page()).unwrap();
+    assert_eq!(r.total, 2);
+    assert_eq!(r.items.len(), 2);
 }
 
 #[test]
-fn rejection_beats_mapping() {
+fn manual_category_overrides_terms_and_ai() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["AI"])]).unwrap();
-    let l = s.create_label("Tekoäly").unwrap();
-    map_term(&s, "AI", l);
-    s.untag_article(article_id(&s, "1"), l).unwrap();
-    assert_eq!(by_label(&s, l), 0);
+    let (a, b, c) = (s.create_category("A").unwrap(), s.create_category("B").unwrap(), s.create_category("C").unwrap());
+    let art = article_id(&s, "1");
+    map_term(&s, "AI", a);
+    set_ai(&s, art, b);
+    assert_eq!((by_category(&s, a), by_category(&s, b), by_category(&s, c)), (1, 1, 0), "RSS and AI both apply");
+    s.set_article_category(art, Some(c)).unwrap();
+    assert_eq!((by_category(&s, a), by_category(&s, b), by_category(&s, c)), (0, 0, 1));
+    let counts = s.category_counts(ListFilter::default()).unwrap();
+    assert_eq!(counts.categories.get(&c), Some(&1));
+    assert!(!counts.categories.contains_key(&a) && !counts.categories.contains_key(&b));
+    let got = s.article_category(art).unwrap();
+    assert_eq!(got.manual.map(|x| x.id), Some(c));
+    assert_eq!(got.ai.map(|x| x.id), Some(b));
+    assert_eq!(got.from_terms.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a]);
 }
 
 #[test]
-fn rejection_survives_refresh() {
+fn clearing_manual_returns_to_automatic() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    let e = entry("1", &["AI"]);
-    s.ingest(f, std::slice::from_ref(&e)).unwrap();
-    let l = s.create_label("Tekoäly").unwrap();
-    map_term(&s, "AI", l);
-    s.untag_article(article_id(&s, "1"), l).unwrap();
-    s.ingest(f, std::slice::from_ref(&e)).unwrap();
-    assert_eq!(by_label(&s, l), 0);
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[])]).unwrap();
+    let (a, b, c) = (s.create_category("A").unwrap(), s.create_category("B").unwrap(), s.create_category("C").unwrap());
+    let art = article_id(&s, "1");
+    map_term(&s, "AI", a);
+    set_ai(&s, art, b);
+    s.set_article_category(art, Some(c)).unwrap();
+    s.set_article_category(art, None).unwrap();
+    assert_eq!((in_category(&s, a), in_category(&s, b)), (vec!["1".to_string()], vec!["1".to_string()]));
+    assert_eq!(by_category(&s, c), 0);
+    let got = s.article_category(art).unwrap();
+    assert_eq!((got.manual, got.ai.map(|x| x.id)), (None, Some(b)));
+    // A manual choice alone, cleared, leaves no row behind.
+    let other = article_id(&s, "2");
+    s.set_article_category(other, Some(c)).unwrap();
+    assert_eq!(by_category(&s, c), 1);
+    s.set_article_category(other, None).unwrap();
+    assert_eq!(count(&s, "article_categories"), 1);
+    assert!(matches!(s.set_article_category(other, Some(999)), Err(Error::NotFound)));
+    assert!(matches!(s.set_article_category(999, Some(c)), Err(Error::NotFound)));
 }
 
 #[test]
-fn article_labels_shows_term_derived() {
+fn deleting_category_clears_article_choices_and_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
-    let l = s.create_label("Tekoäly").unwrap();
-    map_term(&s, "AI", l);
-    let a = article_id(&s, "1");
-    let got = s.article_labels(a).unwrap();
-    assert_eq!(got.len(), 1);
-    assert!(got[0].via_terms);
-    assert_eq!(got[0].origin, Origin::User);
-    assert_eq!(got[0].status, Status::Confirmed);
-    s.untag_article(a, l).unwrap();
-    assert!(s.article_labels(a).unwrap().iter().all(|l| !l.via_terms && l.status == Status::Rejected));
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
+    let x = s.create_category("X").unwrap();
+    map_term(&s, "AI", x);
+    s.set_article_category(article_id(&s, "2"), Some(x)).unwrap();
+    set_ai(&s, article_id(&s, "3"), x);
+    s.add_favourite(Favourite::Category(x)).unwrap();
+    s.delete_category(x).unwrap();
+    let all = matching(&s, &SearchQuery { uncategorized: true, ..Default::default() });
+    assert_eq!(all, ["1", "2", "3"]);
+    assert_eq!(s.unsorted_terms().unwrap().len(), 1);
+    assert_eq!(count(&s, "article_categories"), 0);
+    assert!(s.category_tree().unwrap().favourites.is_empty());
+    assert!(matches!(s.delete_category(x), Err(Error::NotFound)));
 }
 
 #[test]
-fn merge_moves_term_mappings() {
+fn merge_moves_terms_and_article_choices() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
-    let from = s.create_label("Tekoäly").unwrap();
-    let into = s.create_label("Teknologia").unwrap();
-    let g = group(&s);
-    s.conn().execute("UPDATE labels SET group_id = ?1 WHERE id = ?2", rusqlite::params![g, into]).unwrap();
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
+    let from = s.create_category("Tekoäly").unwrap();
+    let into = s.create_category("Teknologia").unwrap();
+    let g = s.create_group("G").unwrap();
+    s.move_category(into, Some(g), 0).unwrap();
     map_term(&s, "AI", from);
-    s.merge_labels(from, into).unwrap();
-    let m: i64 = s.conn().query_row("SELECT label_id FROM feed_terms WHERE name = 'AI'", [], |r| r.get(0)).unwrap();
+    s.set_article_category(article_id(&s, "2"), Some(from)).unwrap();
+    set_ai(&s, article_id(&s, "3"), from);
+    s.add_favourite(Favourite::Category(from)).unwrap();
+    s.merge_categories(from, into).unwrap();
+    let m: i64 = s.conn().query_row("SELECT category_id FROM feed_terms WHERE name = 'AI'", [], |r| r.get(0)).unwrap();
     assert_eq!(m, into);
-    let gid: i64 = s.conn().query_row("SELECT group_id FROM labels WHERE id = ?1", [into], |r| r.get(0)).unwrap();
+    assert_eq!(in_category(&s, into), ["1", "2", "3"]);
+    let gid: i64 = s.conn().query_row("SELECT group_id FROM categories WHERE id = ?1", [into], |r| r.get(0)).unwrap();
     assert_eq!(gid, g);
+    assert_eq!(s.categories().unwrap().len(), 1);
+    assert!(s.category_tree().unwrap().favourites.is_empty());
+    s.merge_categories(into, into).unwrap();
+    assert!(matches!(s.merge_categories(from, into), Err(Error::NotFound)));
 }
 
 #[test]
-fn delete_category_returns_terms_to_unsorted() {
+fn label_filter_ignores_categories() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("1", &["AI"])]).unwrap();
+    s.ingest(f, &[entry("1", &["AI"]), entry("2", &[]), entry("3", &[])]).unwrap();
     let l = s.create_label("Tekoäly").unwrap();
-    map_term(&s, "AI", l);
-    s.delete_label(l).unwrap();
-    let n: i64 = s
-        .conn()
-        .query_row("SELECT COUNT(*) FROM feed_terms WHERE label_id IS NULL AND ignored = 0", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1);
+    let c = s.create_category("Tekoäly").unwrap();
+    assert_eq!(l, c, "same id in both tables makes a leak visible");
+    map_term(&s, "AI", c);
+    s.set_article_category(article_id(&s, "3"), Some(c)).unwrap();
+    s.tag_article(article_id(&s, "2"), l, Origin::User, None).unwrap();
+    s.tag_article(article_id(&s, "3"), l, Origin::Ai, None).unwrap();
+    assert_eq!(matching(&s, &SearchQuery { label_ids: vec![l], ..Default::default() }), ["2"]);
+    let with_suggested = SearchQuery { label_ids: vec![l], include_suggested: true, ..Default::default() };
+    assert_eq!(matching(&s, &with_suggested), ["2", "3"]);
+    assert_eq!(in_category(&s, c), ["1", "3"], "labels do not count for categories");
+    assert!(s.article_labels(article_id(&s, "1")).unwrap().is_empty());
 }
 
 // ---- organising API ----------------------------------------------------
-
-use juttusihti_core::categories::*;
-
-fn names(nodes: &[CategoryNode]) -> Vec<String> {
-    nodes.iter().map(|n| n.label.name.clone()).collect()
-}
-
-fn term_id(s: &Store, name: &str) -> TermId {
-    s.conn().query_row("SELECT id FROM feed_terms WHERE name = ?1", [name], |r| r.get(0)).unwrap()
-}
 
 #[test]
 fn tree_orders_groups_and_categories_by_position() {
     let mut s = Store::open_in_memory().unwrap();
     let g1 = s.create_group("Zeta").unwrap();
     let g2 = s.create_group("Alpha").unwrap();
-    let b = s.create_label("b").unwrap();
-    let a = s.create_label("a").unwrap();
+    let b = s.create_category("b").unwrap();
+    let a = s.create_category("a").unwrap();
     s.move_category(b, Some(g1), 0).unwrap();
     s.move_category(a, Some(g1), 1).unwrap();
     let t = s.category_tree().unwrap();
@@ -250,6 +338,14 @@ fn tree_orders_groups_and_categories_by_position() {
     let t = s.category_tree().unwrap();
     assert_eq!(t.groups[0].group.id, g2);
     assert!(t.ungrouped.is_empty());
+}
+
+#[test]
+fn tree_never_lists_labels() {
+    let s = Store::open_in_memory().unwrap();
+    s.create_label("Vain tunniste").unwrap();
+    let t = s.category_tree().unwrap();
+    assert!(t.ungrouped.is_empty() && t.groups.is_empty());
 }
 
 #[test]
@@ -267,7 +363,7 @@ fn group_names_are_unique_ignoring_case_and_spaces() {
 fn deleting_group_ungroups_categories_and_drops_favourite() {
     let mut s = Store::open_in_memory().unwrap();
     let g = s.create_group("G").unwrap();
-    let l = s.create_label("L").unwrap();
+    let l = s.create_category("L").unwrap();
     s.move_category(l, Some(g), 0).unwrap();
     s.add_favourite(Favourite::Group(g)).unwrap();
     s.delete_group(g).unwrap();
@@ -280,23 +376,23 @@ fn deleting_group_ungroups_categories_and_drops_favourite() {
 #[test]
 fn new_categories_go_last_and_a_deleted_group_appends_its_own() {
     let mut s = Store::open_in_memory().unwrap();
-    let b = s.create_label("b").unwrap();
-    s.create_label("a").unwrap();
+    let b = s.create_category("b").unwrap();
+    s.create_category("a").unwrap();
     assert_eq!(names(&s.category_tree().unwrap().ungrouped), vec!["b", "a"], "in the order made");
     let g = s.create_group("G").unwrap();
-    let d = s.create_label("d").unwrap();
-    let c = s.create_label("c").unwrap();
+    let d = s.create_category("d").unwrap();
+    let c = s.create_category("c").unwrap();
     s.move_category(d, Some(g), 0).unwrap();
     s.move_category(c, Some(g), 1).unwrap();
     s.delete_group(g).unwrap();
     let t = s.category_tree().unwrap();
     assert_eq!(names(&t.ungrouped), vec!["b", "a", "d", "c"], "after the Ungrouped ones, in group order");
     let positions: Vec<i64> = {
-        let mut st = s.conn().prepare("SELECT position FROM labels ORDER BY position").unwrap();
+        let mut st = s.conn().prepare("SELECT position FROM categories ORDER BY position").unwrap();
         st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
     };
     assert_eq!(positions, vec![0, 1, 2, 3], "no ties");
-    assert_eq!(s.create_label(" B ").unwrap(), b, "an existing name keeps its place");
+    assert_eq!(s.create_category(" B ").unwrap(), b, "an existing name keeps its place");
     assert!(matches!(s.delete_group(g), Err(Error::NotFound)));
 }
 
@@ -305,7 +401,7 @@ fn move_category_between_groups_renumbers_both() {
     let mut s = Store::open_in_memory().unwrap();
     let g1 = s.create_group("G1").unwrap();
     let g2 = s.create_group("G2").unwrap();
-    let ids: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| s.create_label(n).unwrap()).collect();
+    let ids: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| s.create_category(n).unwrap()).collect();
     for (i, l) in ids.iter().take(3).enumerate() {
         s.move_category(*l, Some(g1), i).unwrap();
     }
@@ -314,8 +410,8 @@ fn move_category_between_groups_renumbers_both() {
     let t = s.category_tree().unwrap();
     assert_eq!(names(&t.groups[0].categories), vec!["a", "c"]);
     assert_eq!(names(&t.groups[1].categories), vec!["b", "d"]);
-    let pos = |l: LabelId| -> i64 {
-        s.conn().query_row("SELECT position FROM labels WHERE id = ?1", [l], |r| r.get(0)).unwrap()
+    let pos = |l: CategoryId| -> i64 {
+        s.conn().query_row("SELECT position FROM categories WHERE id = ?1", [l], |r| r.get(0)).unwrap()
     };
     assert_eq!((pos(ids[0]), pos(ids[2])), (0, 1));
     assert_eq!((pos(ids[1]), pos(ids[3])), (0, 1));
@@ -328,7 +424,7 @@ fn mapping_and_ignoring_terms() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["AI", "Sports", "Misc"])]).unwrap();
-    let l = s.create_label("Tech").unwrap();
+    let l = s.create_category("Tech").unwrap();
     assert_eq!(s.unsorted_terms().unwrap().len(), 3);
     let ai = term_id(&s, "AI");
     let sp = term_id(&s, "Sports");
@@ -367,7 +463,7 @@ fn unsorted_terms_come_most_frequent_first() {
 fn favourites_keep_their_order() {
     let mut s = Store::open_in_memory().unwrap();
     let g = s.create_group("G").unwrap();
-    let l = s.create_label("L").unwrap();
+    let l = s.create_category("L").unwrap();
     s.add_favourite(Favourite::Category(l)).unwrap();
     s.add_favourite(Favourite::Group(g)).unwrap();
     s.add_favourite(Favourite::Category(l)).unwrap();
@@ -385,16 +481,17 @@ fn counts_are_distinct_and_follow_view_and_feed() {
     let f2 = feed(&mut s, "https://b.example/rss");
     s.ingest(f, &[entry("1", &["AI"])]).unwrap();
     let g = s.create_group("G").unwrap();
-    let a = s.create_label("A").unwrap();
-    let b = s.create_label("B").unwrap();
+    let a = s.create_category("A").unwrap();
+    let b = s.create_category("B").unwrap();
     s.move_category(a, Some(g), 0).unwrap();
     s.move_category(b, Some(g), 1).unwrap();
     let art = article_id(&s, "1");
-    s.tag_article(art, a, Origin::User, None).unwrap();
+    set_ai(&s, art, a);
     s.map_term(term_id(&s, "AI"), Some(b)).unwrap();
     let c = s.category_counts(ListFilter::default()).unwrap();
     assert_eq!(c.groups[&g], 1);
     assert_eq!((c.categories[&a], c.categories[&b]), (1, 1));
+    assert_eq!(c.uncategorized, 0);
     s.set_read(art, true).unwrap();
     let unread = ListFilter { view: View::Unread, ..Default::default() };
     let c = s.category_counts(unread).unwrap();
@@ -406,22 +503,24 @@ fn counts_are_distinct_and_follow_view_and_feed() {
 }
 
 #[test]
-fn counts_exclude_rejected_mapped_terms() {
+fn counts_follow_manual_choices() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["AI"]), entry("2", &["AI"])]).unwrap();
     let g = s.create_group("G").unwrap();
-    let l = s.create_label("L").unwrap();
+    let l = s.create_category("L").unwrap();
+    let other = s.create_category("Other").unwrap();
     s.move_category(l, Some(g), 0).unwrap();
     s.map_term(term_id(&s, "AI"), Some(l)).unwrap();
     let c = s.category_counts(ListFilter::default()).unwrap();
     assert_eq!((c.categories[&l], c.groups[&g]), (2, 2));
-    s.untag_article(article_id(&s, "1"), l).unwrap();
+    s.set_article_category(article_id(&s, "1"), Some(other)).unwrap();
     let c = s.category_counts(ListFilter::default()).unwrap();
-    assert_eq!((c.categories[&l], c.groups[&g]), (1, 1));
-    s.untag_article(article_id(&s, "2"), l).unwrap();
+    assert_eq!((c.categories[&l], c.groups[&g], c.categories[&other]), (1, 1, 1));
+    s.set_article_category(article_id(&s, "2"), Some(other)).unwrap();
     let c = s.category_counts(ListFilter::default()).unwrap();
     assert!(!c.categories.contains_key(&l) && !c.groups.contains_key(&g));
+    assert_eq!(c.categories[&other], 2);
 }
 
 #[test]
@@ -441,9 +540,9 @@ fn counts_follow_folder_and_saved_view() {
     s.ingest(f1, &[entry("1", &["AI"])]).unwrap();
     s.ingest(f2, &[entry("2", &["AI"])]).unwrap();
     let g = s.create_group("G").unwrap();
-    let l = s.create_label("L").unwrap();
+    let l = s.create_category("L").unwrap();
     s.move_category(l, Some(g), 0).unwrap();
-    s.conn().execute("UPDATE feed_terms SET label_id = ?1", [l]).unwrap();
+    s.conn().execute("UPDATE feed_terms SET category_id = ?1", [l]).unwrap();
     let all = s.category_counts(ListFilter::default()).unwrap();
     assert_eq!((all.categories[&l], all.groups[&g]), (2, 2));
     let in_folder = ListFilter { folder_id: Some(folder), ..Default::default() };
@@ -463,10 +562,10 @@ fn marking_a_category_read_leaves_other_articles_unread() {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
     s.ingest(f, &[entry("1", &["AI"]), entry("2", &["Muu"]), entry("3", &[])]).unwrap();
-    let l = s.create_label("Tekoäly").unwrap();
+    let l = s.create_category("Tekoäly").unwrap();
     map_term(&s, "AI", l);
-    s.tag_article(article_id(&s, "3"), l, Origin::User, None).unwrap();
-    let q = SearchQuery { label_ids: vec![l], feed_ids: vec![f], ..Default::default() };
+    s.set_article_category(article_id(&s, "3"), Some(l)).unwrap();
+    let q = SearchQuery { category_ids: vec![l], feed_ids: vec![f], ..Default::default() };
     assert_eq!(s.mark_query_read(&q).unwrap(), 2);
     let read = |guid: &str| s.article(article_id(&s, guid)).unwrap().is_read;
     assert!(read("1") && read("3"));
@@ -494,12 +593,12 @@ mod draft {
         s
     }
 
-    fn group_of(s: &Store, l: LabelId) -> Option<GroupId> {
-        s.conn().query_row("SELECT group_id FROM labels WHERE id = ?1", [l], |r| r.get(0)).unwrap()
+    fn group_of(s: &Store, c: CategoryId) -> Option<GroupId> {
+        s.conn().query_row("SELECT group_id FROM categories WHERE id = ?1", [c], |r| r.get(0)).unwrap()
     }
 
-    fn label_of(s: &Store, t: TermId) -> Option<LabelId> {
-        s.conn().query_row("SELECT label_id FROM feed_terms WHERE id = ?1", [t], |r| r.get(0)).unwrap()
+    fn category_of(s: &Store, t: TermId) -> Option<CategoryId> {
+        s.conn().query_row("SELECT category_id FROM feed_terms WHERE id = ?1", [t], |r| r.get(0)).unwrap()
     }
 
     fn ng(temp: u32, name: &str) -> NewGroupDraft {
@@ -516,7 +615,8 @@ mod draft {
     fn plan_input_contains_only_unsorted_terms_and_flags_more() {
         let s = setup(&["a", "b", "c", "d", "e", "f", "g"]);
         let ids = term_ids(&s);
-        let l = s.create_label("L").unwrap();
+        let l = s.create_category("L").unwrap();
+        s.create_label("Not a category").unwrap();
         s.map_term(ids[0], Some(l)).unwrap();
         s.set_term_ignored(ids[1], true).unwrap();
         let g = s.create_group("G").unwrap();
@@ -563,13 +663,13 @@ mod draft {
     fn apply_creates_groups_categories_and_mappings() {
         let mut s = setup(&["a", "b"]);
         let (a, b) = (term_named(&s, "a"), term_named(&s, "b"));
-        let loose = s.create_label("Loose").unwrap();
+        let loose = s.create_category("Loose").unwrap();
         let existing = s.create_group("Old").unwrap();
         let d = CategoryDraft {
             new_groups: vec![ng(1, "Politiikka")],
             new_categories: vec![nc(1, "Vaalit", GroupRef::New(1)), nc(2, "Muu", GroupRef::Existing(existing))],
             placements: vec![Placement {
-                label: loose,
+                category: loose,
                 rename: Some("Vapaa".into()),
                 group: GroupRef::New(1),
                 ticked: true,
@@ -582,12 +682,13 @@ mod draft {
         assert_eq!((r.applied, r.skipped), (6, 0));
         let tree = s.category_tree().unwrap();
         let pol = tree.groups.iter().find(|g| g.group.name == "Politiikka").unwrap();
-        let names: Vec<_> = pol.categories.iter().map(|c| c.label.name.as_str()).collect();
+        let names: Vec<_> = pol.categories.iter().map(|c| c.category.name.as_str()).collect();
         assert_eq!(names, vec!["Vaalit", "Vapaa"]);
-        assert_eq!(label_of(&s, a), Some(pol.categories[0].label.id));
-        assert_eq!(label_of(&s, b), Some(loose));
+        assert_eq!(category_of(&s, a), Some(pol.categories[0].category.id));
+        assert_eq!(category_of(&s, b), Some(loose));
         assert_eq!(tree.groups.last().unwrap().group.name, "Politiikka");
         assert!(s.pending_category_draft().unwrap().is_none());
+        assert_eq!(count(&s, "labels"), 0, "the draft never makes labels");
         let status: String =
             s.conn().query_row("SELECT status FROM ai_suggestions WHERE id = ?1", [id], |r| r.get(0)).unwrap();
         assert_eq!(status, "confirmed");
@@ -609,8 +710,8 @@ mod draft {
         let r = s.apply_category_draft(id, &d).unwrap();
         assert_eq!((r.applied, r.skipped), (0, 0));
         assert_eq!(count(&s, "category_groups"), 0);
-        assert_eq!(count(&s, "labels"), 0);
-        assert_eq!(label_of(&s, a), None);
+        assert_eq!(count(&s, "categories"), 0);
+        assert_eq!(category_of(&s, a), None);
     }
 
     #[test]
@@ -619,12 +720,12 @@ mod draft {
         let (a, b) = (term_named(&s, "a"), term_named(&s, "b"));
         let gone = s.create_group("Gone").unwrap();
         let keep = s.create_group("Keep").unwrap();
-        let p1 = s.create_label("P1").unwrap();
-        let p2 = s.create_label("P2").unwrap();
+        let p1 = s.create_category("P1").unwrap();
+        let p2 = s.create_category("P2").unwrap();
         let d = CategoryDraft {
             placements: vec![
-                Placement { label: p1, rename: None, group: GroupRef::Existing(gone), ticked: true },
-                Placement { label: p2, rename: None, group: GroupRef::Existing(keep), ticked: true },
+                Placement { category: p1, rename: None, group: GroupRef::Existing(gone), ticked: true },
+                Placement { category: p2, rename: None, group: GroupRef::Existing(keep), ticked: true },
             ],
             mappings: vec![mp(a, CategoryRef::Existing(p1)), mp(b, CategoryRef::Existing(p1))],
             ..Default::default()
@@ -638,8 +739,8 @@ mod draft {
         assert_eq!(r.skipped, 3);
         // applied: mapping b
         assert_eq!(r.applied, 1);
-        assert_eq!(label_of(&s, b), Some(p1));
-        assert_eq!(label_of(&s, a), Some(p2));
+        assert_eq!(category_of(&s, b), Some(p1));
+        assert_eq!(category_of(&s, a), Some(p2));
     }
 
     #[test]
@@ -657,23 +758,23 @@ mod draft {
         s.apply_category_draft(id, &d).unwrap();
         let again = CategoryDraft { mappings: vec![mp(b, CategoryRef::New(1))], ..d.clone() };
         assert!(matches!(s.apply_category_draft(id, &again), Err(juttusihti_core::Error::NotFound)));
-        assert_eq!((count(&s, "category_groups"), count(&s, "labels")), (1, 1));
-        assert_eq!(label_of(&s, b), None);
+        assert_eq!((count(&s, "category_groups"), count(&s, "categories")), (1, 1));
+        assert_eq!(category_of(&s, b), None);
         // Discarded: Approve afterwards changes nothing either.
         let id = s.save_category_draft(&again, Provider::Openai, "m").unwrap();
         s.discard_category_draft(id).unwrap();
         assert!(matches!(s.apply_category_draft(id, &again), Err(juttusihti_core::Error::NotFound)));
-        assert_eq!(label_of(&s, b), None);
+        assert_eq!(category_of(&s, b), None);
     }
 
     #[test]
     fn a_new_group_whose_contents_are_all_stale_is_not_created() {
         let mut s = setup(&["a"]);
-        let loose = s.create_label("Loose").unwrap();
+        let loose = s.create_category("Loose").unwrap();
         let other = s.create_group("Other").unwrap();
         let d = CategoryDraft {
             new_groups: vec![ng(1, "Uusi")],
-            placements: vec![Placement { label: loose, rename: None, group: GroupRef::New(1), ticked: true }],
+            placements: vec![Placement { category: loose, rename: None, group: GroupRef::New(1), ticked: true }],
             ..Default::default()
         };
         let id = s.save_category_draft(&d, Provider::Openai, "m").unwrap();
@@ -719,7 +820,7 @@ mod draft {
         let r = s.apply_category_draft(id, &d).unwrap();
         assert_eq!(r.skipped, 0);
         assert_eq!(count(&s, "category_groups"), 1);
-        let l = label_of(&s, a).unwrap();
+        let l = category_of(&s, a).unwrap();
         assert_eq!(group_of(&s, l), Some(g));
     }
 
@@ -736,8 +837,8 @@ mod draft {
         let id = s.save_category_draft(&d, Provider::Anthropic, "m").unwrap();
         s.discard_category_draft(id).unwrap();
         assert!(s.pending_category_draft().unwrap().is_none());
-        assert_eq!((count(&s, "category_groups"), count(&s, "labels")), (0, 0));
-        assert_eq!(label_of(&s, a), None);
+        assert_eq!((count(&s, "category_groups"), count(&s, "categories")), (0, 0));
+        assert_eq!(category_of(&s, a), None);
     }
 }
 
@@ -746,23 +847,34 @@ fn draft_is_empty_only_without_proposals() {
     use juttusihti_core::category_draft::{CategoryDraft, GroupRef, Placement};
     let mut d = CategoryDraft { vague: vec![1, 2], ..Default::default() };
     assert!(d.is_empty(), "vague terms alone propose nothing");
-    d.placements.push(Placement { label: 1, rename: None, group: GroupRef::New(1), ticked: true });
+    d.placements.push(Placement { category: 1, rename: None, group: GroupRef::New(1), ticked: true });
     assert!(!d.is_empty());
 }
 
-/// (a) confirmed label, (b) mapped term, (c) mapped term rejected for it,
-/// (d) only an AI suggestion, (e) nothing.
+/// (a) manual category, (b) mapped term, (c) AI category, (d) only a confirmed
+/// label, (e) nothing, (f) an unsorted term.
 fn uncategorized_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("a", &[]), entry("b", &["AI"]), entry("c", &["AI"]), entry("d", &[]), entry("e", &[])])
-        .unwrap();
-    let l = s.create_label("L").unwrap();
-    let m = s.create_label("M").unwrap();
-    s.tag_article(article_id(&s, "a"), l, Origin::User, None).unwrap();
+    s.ingest(
+        f,
+        &[
+            entry("a", &[]),
+            entry("b", &["AI"]),
+            entry("c", &[]),
+            entry("d", &[]),
+            entry("e", &[]),
+            entry("f", &["Odd"]),
+        ],
+    )
+    .unwrap();
+    let l = s.create_category("L").unwrap();
+    let m = s.create_category("M").unwrap();
+    s.set_article_category(article_id(&s, "a"), Some(l)).unwrap();
     s.map_term(term_id(&s, "AI"), Some(m)).unwrap();
-    s.untag_article(article_id(&s, "c"), m).unwrap();
-    s.tag_article(article_id(&s, "d"), l, Origin::Ai, None).unwrap();
+    set_ai(&s, article_id(&s, "c"), l);
+    let label = s.create_label("Tunniste").unwrap();
+    s.tag_article(article_id(&s, "d"), label, Origin::User, None).unwrap();
     s
 }
 
@@ -770,11 +882,8 @@ fn uncategorized_data() -> Store {
 fn uncategorized_filter_excludes_categorized_articles() {
     let s = uncategorized_data();
     let q = SearchQuery { uncategorized: true, ..Default::default() };
-    let r = s.search(&q, Page { limit: 50, offset: 0 }).unwrap();
-    let mut guids: Vec<String> = r.items.iter().map(|i| s.article(i.id).unwrap().guid).collect();
-    guids.sort();
-    assert_eq!(guids, ["c", "d", "e"]);
-    assert_eq!(r.total, 3);
+    assert_eq!(matching(&s, &q), ["d", "e", "f"]);
+    assert_eq!(s.search(&q, page()).unwrap().total, 3);
 }
 
 #[test]
@@ -786,29 +895,29 @@ fn counts_include_uncategorized_and_follow_the_view() {
     assert_eq!(s.category_counts(unread).unwrap().uncategorized, 2);
 }
 
-/// (a) unsorted term, (b) mapped term, (c) no terms but an AI suggestion, (d) nothing,
-/// (e) no terms but a confirmed label.
+/// (a) unsorted term, (b) mapped term, (c) only an ignored term, (d) nothing,
+/// (e) no terms but a manual category.
 fn without_terms_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
-    s.ingest(f, &[entry("a", &["Odd"]), entry("b", &["AI"]), entry("c", &[]), entry("d", &[]), entry("e", &[])])
-        .unwrap();
-    let l = s.create_label("L").unwrap();
-    let m = s.create_label("M").unwrap();
+    s.ingest(
+        f,
+        &[entry("a", &["Odd"]), entry("b", &["AI"]), entry("c", &["Tilaajille"]), entry("d", &[]), entry("e", &[])],
+    )
+    .unwrap();
+    let l = s.create_category("L").unwrap();
+    let m = s.create_category("M").unwrap();
     s.map_term(term_id(&s, "AI"), Some(m)).unwrap();
-    s.tag_article(article_id(&s, "c"), l, Origin::Ai, None).unwrap();
-    s.tag_article(article_id(&s, "e"), l, Origin::User, None).unwrap();
+    s.set_term_ignored(term_id(&s, "Tilaajille"), true).unwrap();
+    s.set_article_category(article_id(&s, "e"), Some(l)).unwrap();
     s
 }
 
 #[test]
-fn without_terms_filter_excludes_articles_with_publisher_terms() {
+fn without_terms_filter_excludes_articles_with_mapped_or_unsorted_terms() {
     let s = without_terms_data();
     let q = SearchQuery { uncategorized: true, without_terms: true, ..Default::default() };
-    let r = s.search(&q, Page { limit: 50, offset: 0 }).unwrap();
-    let mut guids: Vec<String> = r.items.iter().map(|i| s.article(i.id).unwrap().guid).collect();
-    guids.sort();
-    assert_eq!(guids, ["c", "d"]);
+    assert_eq!(matching(&s, &q), ["c", "d"]);
 }
 
 #[test]
@@ -848,8 +957,9 @@ fn dated(guid: &str, published_at: i64, terms: &[&str]) -> NewArticle {
     NewArticle { published_at: Some(published_at), ..entry(guid, terms) }
 }
 
-/// (old) no terms, (mid) no terms, (new) no terms, (termed) a publisher term,
-/// (labelled) no terms but a confirmed label. Newest first: new, mid, old.
+/// (old) no terms, (mid) no terms, (new) no terms, (termed) an unsorted
+/// publisher term, (categorized) no terms but a manual category. Newest first:
+/// new, mid, old.
 fn to_categorize_data() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     let f = feed(&mut s, "https://a.example/rss");
@@ -860,16 +970,16 @@ fn to_categorize_data() -> Store {
             dated("mid", 2_000, &[]),
             dated("new", 3_000, &[]),
             dated("termed", 4_000, &["Odd"]),
-            dated("labelled", 5_000, &[]),
+            dated("categorized", 5_000, &[]),
         ],
     )
     .unwrap();
-    let l = s.create_label("L").unwrap();
-    s.tag_article(article_id(&s, "labelled"), l, Origin::User, None).unwrap();
+    let l = s.create_category("L").unwrap();
+    s.set_article_category(article_id(&s, "categorized"), Some(l)).unwrap();
     s
 }
 
-fn guids(s: &Store, items: &[juttusihti_core::categories::ArticleForCategorizing]) -> Vec<String> {
+fn guids(s: &Store, items: &[ArticleForCategorizing]) -> Vec<String> {
     items.iter().map(|a| s.article(a.id).unwrap().guid).collect()
 }
 
@@ -884,6 +994,28 @@ fn articles_to_categorize_are_uncategorized_without_terms_and_newest_first() {
     let (items, eligible) = s.articles_to_categorize(ListFilter::default(), 2).unwrap();
     assert_eq!(guids(&s, &items), ["new", "mid"]);
     assert_eq!(eligible, 3, "the total counts every eligible article");
+}
+
+#[test]
+fn ai_eligibility_skips_unsorted_terms() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    s.ingest(
+        f,
+        &[
+            dated("none", 1_000, &[]),
+            dated("ignored", 2_000, &["Tilaajille"]),
+            dated("unsorted", 3_000, &["Odd"]),
+            dated("mapped", 4_000, &["AI"]),
+        ],
+    )
+    .unwrap();
+    let c = s.create_category("Tekoäly").unwrap();
+    s.map_term(term_id(&s, "AI"), Some(c)).unwrap();
+    s.set_term_ignored(term_id(&s, "Tilaajille"), true).unwrap();
+    let (items, eligible) = s.articles_to_categorize(ListFilter::default(), 100).unwrap();
+    assert_eq!(guids(&s, &items), ["ignored", "none"]);
+    assert_eq!(eligible, 2);
 }
 
 #[test]
@@ -917,59 +1049,47 @@ fn articles_to_categorize_fall_back_to_the_start_of_the_content() {
     assert!(items[0].text.chars().count() <= 300);
 }
 
-fn link_status(s: &Store, a: ArticleId, l: LabelId) -> String {
+fn choices(s: &Store, a: ArticleId) -> (Option<CategoryId>, Option<CategoryId>) {
     s.conn()
-        .query_row("SELECT status FROM article_labels WHERE article_id = ?1 AND label_id = ?2", [a, l], |r| r.get(0))
-        .unwrap()
+        .query_row("SELECT user_category_id, ai_category_id FROM article_categories WHERE article_id = ?1", [a], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap_or((None, None))
 }
 
 #[test]
-fn applying_categories_reuses_names_confirms_links_and_marks_articles_checked() {
+fn apply_writes_one_ai_category_and_never_manual() {
     let mut s = to_categorize_data();
     let (new, mid, old) = (article_id(&s, "new"), article_id(&s, "mid"), article_id(&s, "old"));
-    let space = s.create_label("Space").unwrap();
-    // The user rejected Space for `mid` earlier: AI must not bring it back.
-    s.tag_article(mid, space, Origin::Ai, None).unwrap();
-    s.decide_label(mid, space, Status::Rejected).unwrap();
+    let space = s.create_category("Space").unwrap();
+    let mine = s.create_category("Mine").unwrap();
+    // The user chose a category for `mid` by hand: AI must not change that.
+    s.set_article_category(mid, Some(mine)).unwrap();
 
-    let results = vec![
-        (new, vec!["  space ".to_string(), "Tiede".to_string()]),
-        (mid, vec!["Space".to_string(), "tiede".to_string()]),
-    ];
+    let results = vec![(new, Some("  space ".to_string())), (mid, Some("Tiede".to_string())), (old, Some("  ".into()))];
     let sent = [new, mid, old];
     let stats = s.apply_article_categories(&results, &sent).unwrap();
-    assert_eq!(stats.new_categories, 1, "Tiede is created once");
+    assert_eq!(stats.new_categories, 1, "Tiede is created");
     assert_eq!(stats.categorized, 2);
-    let tiede = s.labels().unwrap().into_iter().find(|l| l.name == "Tiede").unwrap().id;
-    assert!(s.category_tree().unwrap().ungrouped.iter().any(|c| c.label.id == tiede), "new ones are ungrouped");
+    let tiede = s.categories().unwrap().into_iter().find(|c| c.name == "Tiede").unwrap().id;
+    let tree = s.category_tree().unwrap();
+    assert_eq!(tree.ungrouped.last().unwrap().category.id, tiede, "new ones go last in Ungrouped");
 
-    assert_eq!(link_status(&s, new, space), "confirmed");
-    assert_eq!(link_status(&s, new, tiede), "confirmed");
-    assert_eq!(link_status(&s, mid, space), "rejected", "a user's rejection stays");
-    assert_eq!(link_status(&s, mid, tiede), "confirmed");
-    let origin: String = s
-        .conn()
-        .query_row("SELECT origin FROM article_labels WHERE article_id = ?1 AND label_id = ?2", [new, tiede], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(origin, "ai");
+    assert_eq!(choices(&s, new), (None, Some(space)));
+    assert_eq!(choices(&s, mid), (Some(mine), Some(tiede)), "the manual choice stays");
+    assert_eq!(choices(&s, old), (None, None));
+    assert_eq!(in_category(&s, tiede), Vec::<String>::new(), "manual wins over AI");
+    assert_eq!(in_category(&s, space), ["new"]);
+    assert_eq!(count(&s, "labels"), 0, "AI categories are not labels");
+    assert_eq!(count(&s, "article_labels"), 0);
     assert_eq!(count(&s, "category_ai_checks"), 3, "every sent article is checked, also `old`");
     assert!(s.articles_to_categorize(ListFilter::default(), 100).unwrap().0.is_empty());
 
     let again = s.apply_article_categories(&results, &sent).unwrap();
     assert_eq!(again.new_categories, 0);
-    assert_eq!(count(&s, "labels"), 3, "L, Space and Tiede");
+    assert_eq!(count(&s, "categories"), 4, "L, Space, Mine and Tiede");
     assert_eq!(count(&s, "category_ai_checks"), 3);
-    assert_eq!(link_status(&s, mid, space), "rejected");
-}
-
-#[test]
-fn applying_categories_confirms_a_pending_suggestion() {
-    let mut s = to_categorize_data();
-    let new = article_id(&s, "new");
-    let l = s.create_label("Space").unwrap();
-    s.tag_article(new, l, Origin::Ai, None).unwrap();
-    s.apply_article_categories(&[(new, vec!["Space".into()])], &[new]).unwrap();
-    assert_eq!(link_status(&s, new, l), "confirmed");
+    // A later result replaces the earlier AI choice.
+    s.apply_article_categories(&[(new, Some("Tiede".into()))], &[new]).unwrap();
+    assert_eq!(choices(&s, new), (None, Some(tiede)));
 }

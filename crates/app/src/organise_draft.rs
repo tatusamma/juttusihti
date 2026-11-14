@@ -8,9 +8,9 @@ use iced::widget::{Space, button, checkbox, column, container, row, scrollable, 
 use iced::{Center, Element, Fill, Point};
 use juttusihti_ai::categorize::{self, MAX_TERMS};
 use juttusihti_ai::{Client, RetryPolicy};
-use juttusihti_core::LabelId;
 use juttusihti_core::ai_defaults::AiDefaults;
 use juttusihti_core::budget::Limits;
+use juttusihti_core::categories::CategoryId;
 use juttusihti_core::categories::{CategoryNode, TermId, TermRow};
 use juttusihti_core::category_draft::{ApplyReport, CategoryDraft, CategoryRef, GroupRef, NewGroupDraft, PlanInput};
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Provider, Usage, format_usd};
@@ -437,7 +437,7 @@ impl Draft {
                         self.plan.new_categories.iter_mut().find(|x| x.temp == t).map(|x| &mut x.group)
                     }
                     CategoryRef::Existing(l) => {
-                        self.plan.placements.iter_mut().find(|p| p.label == l).map(|p| &mut p.group)
+                        self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| &mut p.group)
                     }
                 };
                 match slot {
@@ -482,7 +482,7 @@ impl Draft {
                 c.group
             }),
             Name::Category(CategoryRef::Existing(l)) => {
-                self.plan.placements.iter_mut().find(|p| p.label == l).map(|p| {
+                self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| {
                     p.ticked = on;
                     p.group
                 })
@@ -503,7 +503,7 @@ impl Draft {
                 self.plan.new_categories.iter().find(|c| c.temp == t).map(|c| c.name.clone())
             }
             Name::Category(CategoryRef::Existing(l)) => {
-                let p = self.plan.placements.iter().find(|p| p.label == l)?;
+                let p = self.plan.placements.iter().find(|p| p.category == l)?;
                 p.rename.clone().or_else(|| label_name(snap, l).map(str::to_string))
             }
         }
@@ -531,7 +531,7 @@ impl Draft {
             Name::Category(CategoryRef::Existing(l)) => {
                 // A placement keeps a rename only while it differs from the category's name.
                 let original = label_name(snap, l);
-                let Some(p) = self.plan.placements.iter_mut().find(|p| p.label == l) else { return false };
+                let Some(p) = self.plan.placements.iter_mut().find(|p| p.category == l) else { return false };
                 let rename = (Some(name) != original).then(|| name.to_string());
                 if p.rename == rename {
                     return false;
@@ -553,7 +553,9 @@ impl Draft {
         match n {
             Name::Group(t) => self.plan.new_groups.iter().any(|g| g.temp == t && g.ticked),
             Name::Category(CategoryRef::New(t)) => self.plan.new_categories.iter().any(|c| c.temp == t && c.ticked),
-            Name::Category(CategoryRef::Existing(l)) => self.plan.placements.iter().any(|p| p.label == l && p.ticked),
+            Name::Category(CategoryRef::Existing(l)) => {
+                self.plan.placements.iter().any(|p| p.category == l && p.ticked)
+            }
         }
     }
 
@@ -566,8 +568,8 @@ impl Draft {
             .filter(|c| c.group == g)
             .map(|c| (CategoryRef::New(c.temp), c.name.as_str()));
         let placed = self.plan.placements.iter().filter(|p| p.group == g).filter_map(|p| {
-            let name = p.rename.as_deref().or_else(|| label_name(snap, p.label))?;
-            Some((CategoryRef::Existing(p.label), name))
+            let name = p.rename.as_deref().or_else(|| label_name(snap, p.category))?;
+            Some((CategoryRef::Existing(p.category), name))
         });
         placed.chain(new).collect()
     }
@@ -601,20 +603,25 @@ impl Draft {
                 .align_y(Center);
             let mut block = column![heading].spacing(SPACE[0]);
             for c in &g.categories {
-                block = block.push(self.view_category(CategoryRef::Existing(c.label.id), &c.label.name, snap, kind));
+                block =
+                    block.push(self.view_category(CategoryRef::Existing(c.category.id), &c.category.name, snap, kind));
             }
             block = block.push(self.view_members(r, snap, kind, g.categories.is_empty()));
             body = body.push(self.group_zone(block, r, kind));
         }
         body = body.push(self.view_add_group());
         // The user's ungrouped categories the draft does not place: read-only term targets.
-        let own: Vec<&CategoryNode> =
-            snap.ungrouped.iter().filter(|c| !self.plan.placements.iter().any(|p| p.label == c.label.id)).collect();
+        let own: Vec<&CategoryNode> = snap
+            .ungrouped
+            .iter()
+            .filter(|c| !self.plan.placements.iter().any(|p| p.category == c.category.id))
+            .collect();
         if !own.is_empty() {
             let heading = row![style::heading("Ungrouped"), yours()].spacing(SPACE[1]).align_y(Center);
             let mut block = column![heading].spacing(SPACE[0]);
             for c in own {
-                block = block.push(self.view_category(CategoryRef::Existing(c.label.id), &c.label.name, snap, kind));
+                block =
+                    block.push(self.view_category(CategoryRef::Existing(c.category.id), &c.category.name, snap, kind));
             }
             body = body.push(block);
         }
@@ -742,7 +749,7 @@ impl Draft {
     ) -> Element<'a, DraftMsg> {
         let editable = match c {
             CategoryRef::New(_) => true,
-            CategoryRef::Existing(l) => self.plan.placements.iter().any(|p| p.label == l),
+            CategoryRef::Existing(l) => self.plan.placements.iter().any(|p| p.category == l),
         };
         let terms = self.terms(c, snap);
         let open = self.expanded.contains(&c);
@@ -814,13 +821,13 @@ fn yours<'a>() -> iced::widget::Text<'a> {
 }
 
 /// A category's name anywhere in the tree.
-fn label_name(snap: &Snapshot, id: LabelId) -> Option<&str> {
+fn label_name(snap: &Snapshot, id: CategoryId) -> Option<&str> {
     snap.groups
         .iter()
         .flat_map(|g| &g.categories)
         .chain(&snap.ungrouped)
-        .find(|c| c.label.id == id)
-        .map(|c| c.label.name.as_str())
+        .find(|c| c.category.id == id)
+        .map(|c| c.category.name.as_str())
 }
 
 pub(crate) fn vague_line(n: usize) -> Option<String> {

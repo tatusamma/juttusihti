@@ -238,16 +238,20 @@ fn main() {
             let _ = store.relate(*id, ids[k + 7], RelationshipKind::Related, Origin::Ai, None, Some(0.7), None);
         }
     }
-    // Categories: half the labels in one group, a third of the publisher terms mapped.
+    // Categories: eight, half of them in one group, a third of the publisher terms mapped.
     let group = store.create_group("Aiheet").unwrap();
-    for (i, l) in labels.iter().take(labels.len() / 2).enumerate() {
+    let categories: Vec<i64> = ["Politiikka", "Talous", "Sää", "Energia", "Terveys", "Liikenne", "Ilmasto", "Rikos"]
+        .iter()
+        .map(|n| store.create_category(n).unwrap())
+        .collect();
+    for (i, c) in categories.iter().take(categories.len() / 2).enumerate() {
         store
             .conn()
-            .execute("UPDATE labels SET group_id = ?1, position = ?2 WHERE id = ?3", (group, i as i64, l))
+            .execute("UPDATE categories SET group_id = ?1, position = ?2 WHERE id = ?3", (group, i as i64, c))
             .unwrap();
     }
-    for (i, l) in labels.iter().enumerate() {
-        store.conn().execute("UPDATE feed_terms SET label_id = ?1 WHERE id % 24 = ?2", (l, i as i64)).unwrap();
+    for (i, c) in categories.iter().enumerate() {
+        store.conn().execute("UPDATE feed_terms SET category_id = ?1 WHERE id % 24 = ?2", (c, i as i64)).unwrap();
     }
     store.conn().execute_batch("COMMIT").unwrap();
     res.add("Research data (labels/entities/links)", fmt(started.elapsed()));

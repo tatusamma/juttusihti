@@ -19,7 +19,6 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0006_fulltext.sql"),
     include_str!("../migrations/0007_factcheck.sql"),
     include_str!("../migrations/0008_categories.sql"),
-    include_str!("../migrations/0009_category_checks.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -115,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn categories_migration_keeps_labels_ungrouped_with_their_articles() {
+    fn categories_migration_leaves_labels_untouched_and_starts_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v7.db");
         {
@@ -140,9 +139,9 @@ mod tests {
         let store = crate::store::Store::open(&path).unwrap();
         let conn = store.conn();
         let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
-        let labels: Vec<(i64, String, Option<i64>)> = conn
-            .prepare("SELECT id, name, group_id FROM labels ORDER BY id")
+        assert_eq!((v, SCHEMA_VERSION), (8, 8));
+        let labels: Vec<(i64, String, Option<String>)> = conn
+            .prepare("SELECT id, name, color FROM labels ORDER BY id")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
@@ -157,10 +156,28 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(links, vec![(7, 3, "confirmed".into()), (7, 4, "suggested".into())]);
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('labels') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(columns, ["id", "name", "normalized", "color", "created_at"], "labels as on master");
+        for table in [
+            "category_groups",
+            "categories",
+            "feed_terms",
+            "article_terms",
+            "article_categories",
+            "favourites",
+            "category_ai_checks",
+        ] {
+            let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, 0, "{table} exists and starts empty");
+        }
         let tree = store.category_tree().unwrap();
-        assert!(tree.groups.is_empty());
-        let ungrouped: Vec<i64> = tree.ungrouped.iter().map(|c| c.label.id).collect();
-        assert_eq!(ungrouped, vec![3, 4], "existing labels are Ungrouped categories");
+        assert!(tree.groups.is_empty() && tree.ungrouped.is_empty(), "labels are not categories");
         assert!(store.unsorted_terms().unwrap().is_empty());
     }
 

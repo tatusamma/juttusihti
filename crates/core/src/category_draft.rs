@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-use crate::categories::{BY_ARTICLES, CategoryNode, Group, GroupId, TermId, TermRow};
+use crate::categories::{BY_ARTICLES, CategoryId, CategoryNode, Group, GroupId, TermId, TermRow, insert_category};
 use crate::normalize::normalize_text;
 use crate::pricing::Provider;
 use crate::research::NewSuggestion;
 use crate::store::Store;
-use crate::{Error, LabelId, Result, now};
+use crate::{Error, Result, now};
 
 pub const DRAFT_KIND: &str = "category_plan";
 pub const DRAFT_PROMPT_VERSION: &str = "categories-2";
@@ -24,7 +24,7 @@ pub enum GroupRef {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CategoryRef {
-    Existing(LabelId),
+    Existing(CategoryId),
     New(u32),
 }
 
@@ -47,7 +47,7 @@ pub struct NewCategoryDraft {
 /// Puts an existing, still ungrouped category into a group.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Placement {
-    pub label: LabelId,
+    pub category: CategoryId,
     pub rename: Option<String>,
     pub group: GroupRef,
     pub ticked: bool,
@@ -144,10 +144,12 @@ fn make_group(tx: &Transaction, g: Option<&NewGroupDraft>) -> Result<Option<Grou
     Ok(Some(tx.last_insert_rowid()))
 }
 
-fn place(tx: &Transaction, label: LabelId, group: GroupId) -> Result<()> {
+fn place(tx: &Transaction, category: CategoryId, group: GroupId) -> Result<()> {
     let pos: i64 =
-        tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id = ?1", [group], |r| r.get(0))?;
-    tx.execute("UPDATE labels SET group_id = ?1, position = ?2 WHERE id = ?3", params![group, pos, label])?;
+        tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM categories WHERE group_id = ?1", [group], |r| {
+            r.get(0)
+        })?;
+    tx.execute("UPDATE categories SET group_id = ?1, position = ?2 WHERE id = ?3", params![group, pos, category])?;
     Ok(())
 }
 
@@ -165,14 +167,16 @@ impl Store {
         // The most frequent terms first: sorting them helps the most articles.
         let mut stmt = conn.prepare(&format!(
             "SELECT t.id, t.name, f.title FROM feed_terms t JOIN feeds f ON f.id = t.feed_id
-             WHERE t.label_id IS NULL AND t.ignored = 0
+             WHERE t.category_id IS NULL AND t.ignored = 0
              ORDER BY {BY_ARTICLES} LIMIT ?1"
         ))?;
         let terms: Vec<TermRow> = stmt
             .query_map([max_terms as i64], |r| Ok(TermRow { id: r.get(0)?, name: r.get(1)?, feed_title: r.get(2)? }))?
             .collect::<rusqlite::Result<_>>()?;
         let total: i64 =
-            conn.query_row("SELECT COUNT(*) FROM feed_terms WHERE label_id IS NULL AND ignored = 0", [], |r| r.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM feed_terms WHERE category_id IS NULL AND ignored = 0", [], |r| {
+                r.get(0)
+            })?;
         let more_terms = (total as usize).saturating_sub(terms.len());
         Ok(PlanInput { groups, categories, terms, more_terms })
     }
@@ -248,7 +252,7 @@ impl Store {
         // New groups are made when their first category lands, so a group whose
         // contents all changed meanwhile is not left behind empty. `None`: unusable.
         let mut groups: HashMap<u32, Option<GroupId>> = HashMap::new();
-        let mut cats: HashMap<u32, LabelId> = HashMap::new();
+        let mut cats: HashMap<u32, CategoryId> = HashMap::new();
 
         // Resolves a group reference, making a new group on first use; None means it is stale.
         let mut resolve_group =
@@ -282,26 +286,20 @@ impl Store {
                 skipped += 1;
                 continue;
             };
-            tx.execute(
-                "INSERT INTO labels(name, normalized, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(normalized) DO NOTHING",
-                params![name, normalized, now()],
-            )?;
-            let (label, grouped): (LabelId, Option<GroupId>) =
-                tx.query_row("SELECT id, group_id FROM labels WHERE normalized = ?1", [&normalized], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?;
+            let (category, _) = insert_category(&tx, name)?;
+            let grouped: Option<GroupId> =
+                tx.query_row("SELECT group_id FROM categories WHERE id = ?1", [category], |r| r.get(0))?;
             if grouped.is_none() {
-                place(&tx, label, group)?;
+                place(&tx, category, group)?;
             }
-            cats.insert(c.temp, label);
+            cats.insert(c.temp, category);
             applied += 1;
         }
 
         for p in draft.placements.iter().filter(|p| p.ticked && draft.group_ref_counts(p.group)) {
             // Only a category that is still ungrouped is placed.
             let current: Option<Option<GroupId>> =
-                tx.query_row("SELECT group_id FROM labels WHERE id = ?1", [p.label], |r| r.get(0)).optional()?;
+                tx.query_row("SELECT group_id FROM categories WHERE id = ?1", [p.category], |r| r.get(0)).optional()?;
             if current != Some(None) {
                 skipped += 1;
                 continue;
@@ -314,32 +312,32 @@ impl Store {
                 let normalized = normalize_text(name);
                 let taken = tx
                     .query_row(
-                        "SELECT 1 FROM labels WHERE normalized = ?1 AND id != ?2",
-                        params![normalized, p.label],
+                        "SELECT 1 FROM categories WHERE normalized = ?1 AND id != ?2",
+                        params![normalized, p.category],
                         |_| Ok(()),
                     )
                     .optional()?
                     .is_some();
                 if !normalized.is_empty() && !taken {
                     tx.execute(
-                        "UPDATE labels SET name = ?1, normalized = ?2 WHERE id = ?3",
-                        params![name.trim(), normalized, p.label],
+                        "UPDATE categories SET name = ?1, normalized = ?2 WHERE id = ?3",
+                        params![name.trim(), normalized, p.category],
                     )?;
                 }
             }
-            place(&tx, p.label, group)?;
+            place(&tx, p.category, group)?;
             applied += 1;
         }
 
         for m in draft.mappings.iter().filter(|m| m.ticked && draft.category_ref_counts(m.category)) {
-            let label = match m.category {
-                CategoryRef::Existing(l) => exists(&tx, "SELECT 1 FROM labels WHERE id = ?1", l)?.then_some(l),
+            let category = match m.category {
+                CategoryRef::Existing(c) => exists(&tx, "SELECT 1 FROM categories WHERE id = ?1", c)?.then_some(c),
                 CategoryRef::New(t) => cats.get(&t).copied(),
             };
-            let n = match label {
-                Some(l) => tx.execute(
-                    "UPDATE feed_terms SET label_id = ?1 WHERE id = ?2 AND label_id IS NULL AND ignored = 0",
-                    params![l, m.term],
+            let n = match category {
+                Some(c) => tx.execute(
+                    "UPDATE feed_terms SET category_id = ?1 WHERE id = ?2 AND category_id IS NULL AND ignored = 0",
+                    params![c, m.term],
                 )?,
                 None => 0,
             };

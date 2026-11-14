@@ -417,13 +417,16 @@ pub struct SearchQuery {
     pub to: Option<i64>,
     /// Articles must carry all of these labels.
     pub label_ids: Vec<i64>,
+    /// Articles must be in all of these categories.
+    #[serde(default)]
+    pub category_ids: Vec<i64>,
     /// Articles must be in at least one category of each of these groups.
     #[serde(default)]
     pub group_ids: Vec<i64>,
-    /// Only articles in no category (confirmed labels and mapped terms count).
+    /// Only articles in no category.
     #[serde(default)]
     pub uncategorized: bool,
-    /// Only articles whose feed gave no category terms at all.
+    /// Only articles with no mapped or unsorted publisher terms (none, or only ignored ones).
     #[serde(default)]
     pub without_terms: bool,
     pub entity_ids: Vec<i64>,
@@ -454,6 +457,20 @@ pub struct SearchResults {
     /// ranked among the [`COUNT_CAP`] most recently stored matches.
     pub ranked_window: bool,
     pub interpreted: Option<String>,
+}
+
+/// Whether article `a` is in the category (or categories) `target` picks:
+/// its manual category; otherwise its mapped publisher terms or its AI
+/// category. `target` is a condition on a category id (`= ?`, `IN (...)`,
+/// `IS NOT NULL`); it appears three times, so a parameter is bound three times.
+pub(crate) fn category_membership(target: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM article_categories ac WHERE ac.article_id = a.id
+                 AND (ac.user_category_id {target} OR (ac.user_category_id IS NULL AND ac.ai_category_id {target})))
+         OR (NOT EXISTS (SELECT 1 FROM article_categories m WHERE m.article_id = a.id AND m.user_category_id IS NOT NULL)
+             AND EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                         WHERE t.article_id = a.id AND ft.category_id {target}))"
+    )
 }
 
 /// Builds the WHERE clause shared by search, counting and analysis scoping.
@@ -502,30 +519,28 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
         params.push(Value::Integer(to));
     }
     let statuses = if q.include_suggested { "('confirmed','suggested')" } else { "('confirmed')" };
-    let membership = |target: &str, statuses: &str| {
-        format!(
-            "EXISTS (SELECT 1 FROM article_labels x WHERE x.article_id = a.id AND x.label_id {target} AND x.status IN {statuses})
-             OR EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                        WHERE t.article_id = a.id AND ft.label_id {target}
-                          AND NOT EXISTS (SELECT 1 FROM article_labels r WHERE r.article_id = a.id
-                                          AND r.label_id = ft.label_id AND r.status = 'rejected'))"
-        )
-    };
     for id in &q.label_ids {
-        sql.push_str(&format!(" AND ({})", membership("= ?", statuses)));
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM article_labels x WHERE x.article_id = a.id AND x.label_id = ? AND x.status IN {statuses})"
+        ));
         params.push(Value::Integer(*id));
-        params.push(Value::Integer(*id));
+    }
+    for id in &q.category_ids {
+        sql.push_str(&format!(" AND ({})", category_membership("= ?")));
+        params.extend(std::iter::repeat_n(Value::Integer(*id), 3));
     }
     for id in &q.group_ids {
-        sql.push_str(&format!(" AND ({})", membership("IN (SELECT id FROM labels WHERE group_id = ?)", statuses)));
-        params.push(Value::Integer(*id));
-        params.push(Value::Integer(*id));
+        sql.push_str(&format!(" AND ({})", category_membership("IN (SELECT id FROM categories WHERE group_id = ?)")));
+        params.extend(std::iter::repeat_n(Value::Integer(*id), 3));
     }
     if q.uncategorized {
-        sql.push_str(&format!(" AND NOT ({})", membership("IS NOT NULL", "('confirmed')")));
+        sql.push_str(&format!(" AND NOT ({})", category_membership("IS NOT NULL")));
     }
     if q.without_terms {
-        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM article_terms t WHERE t.article_id = a.id)");
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+                              WHERE t.article_id = a.id AND ft.ignored = 0)",
+        );
     }
     for id in &q.entity_ids {
         sql.push_str(&format!(

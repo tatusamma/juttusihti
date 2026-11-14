@@ -628,7 +628,7 @@ impl App {
                 Selection::Group(g) => vec![g],
                 _ => vec![],
             },
-            label_ids: match self.category {
+            category_ids: match self.category {
                 Selection::Category(c) => vec![c],
                 _ => vec![],
             },
@@ -2225,10 +2225,10 @@ mod tests {
             let mut s = shared.lock().unwrap();
             let tech = s.create_group("Tech").unwrap();
             let local = s.create_group("Local").unwrap();
-            let ai = s.create_label("Artificial Intelligence").unwrap();
-            let space = s.create_label("Space").unwrap();
-            let local_politics = s.create_label("Local politics").unwrap();
-            let politics = s.create_label("Politics").unwrap();
+            let ai = s.create_category("Artificial Intelligence").unwrap();
+            let space = s.create_category("Space").unwrap();
+            let local_politics = s.create_category("Local politics").unwrap();
+            let politics = s.create_category("Politics").unwrap();
             s.move_category(ai, Some(tech), 0).unwrap();
             s.move_category(space, Some(tech), 1).unwrap();
             s.move_category(local_politics, Some(local), 0).unwrap();
@@ -2249,7 +2249,7 @@ mod tests {
         assert!(app.list_query().group_ids.is_empty());
         select(&mut app, Selection::Group(c.tech));
         assert_eq!(app.list_query().group_ids, vec![c.tech]);
-        assert!(app.list_query().label_ids.is_empty());
+        assert!(app.list_query().category_ids.is_empty());
         assert_eq!(app.quick_label(), "All feeds in “Tech”");
         select(&mut app, Selection::All);
         assert!(app.list_query().group_ids.is_empty());
@@ -2260,7 +2260,7 @@ mod tests {
         let (mut app, _) = app_with_categories();
         select(&mut app, Selection::Uncategorized);
         let q = app.list_query();
-        assert!(q.uncategorized && q.group_ids.is_empty() && q.label_ids.is_empty());
+        assert!(q.uncategorized && q.group_ids.is_empty() && q.category_ids.is_empty());
         assert_eq!(app.quick_label(), "All feeds in “Uncategorized”");
         assert!(app.is_filtered());
         select(&mut app, Selection::All);
@@ -2356,8 +2356,8 @@ mod tests {
         {
             let shared = app.db.shared();
             let s = shared.lock().unwrap();
-            let l = s.create_label("Tech").unwrap();
-            s.tag_article(a, l, juttusihti_core::Origin::User, None).unwrap();
+            let l = s.create_category("Tech").unwrap();
+            s.set_article_category(a, Some(l)).unwrap();
         }
         reload_categories(&mut app);
         select(&mut app, Selection::Uncategorized);
@@ -2371,9 +2371,9 @@ mod tests {
     fn selecting_category_filters_by_category() {
         let (mut app, c) = app_with_categories();
         select(&mut app, Selection::Category(c.ai));
-        assert_eq!(app.list_query().label_ids, vec![c.ai]);
+        assert_eq!(app.list_query().category_ids, vec![c.ai]);
         assert!(app.list_query().group_ids.is_empty());
-        assert!(!app.list_query().include_suggested, "only confirmed labels");
+        assert!(app.list_query().label_ids.is_empty(), "categories are not labels");
         assert!(app.is_filtered());
         // Clear clears the search, not the category.
         app.active_search = "vaalit".into();
@@ -2437,7 +2437,7 @@ mod tests {
     fn deleted_selection_falls_back_to_all() {
         let (mut app, c) = app_with_categories();
         select(&mut app, Selection::Category(c.ai));
-        app.db.shared().lock().unwrap().delete_label(c.ai).unwrap();
+        app.db.shared().lock().unwrap().delete_category(c.ai).unwrap();
         reload_categories(&mut app);
         assert_eq!(app.category, Selection::All);
         select(&mut app, Selection::Group(c.local));
@@ -2864,8 +2864,8 @@ mod tests {
         let l = {
             let shared = app.db.shared();
             let s = shared.lock().unwrap();
-            let l = s.create_label("Tech").unwrap();
-            s.tag_article(a, l, juttusihti_core::Origin::User, None).unwrap();
+            let l = s.create_category("Tech").unwrap();
+            s.set_article_category(a, Some(l)).unwrap();
             l
         };
         reload_categories(&mut app);

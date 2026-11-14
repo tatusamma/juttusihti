@@ -8,11 +8,11 @@ use std::collections::{BTreeSet, HashMap};
 use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, operation, pick_list, row, scrollable, text, text_input};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event};
-use juttusihti_core::categories::{CategoryNode, GroupId, GroupNode, TermId, TermRow};
+use juttusihti_core::Status;
+use juttusihti_core::categories::{CategoryId, CategoryNode, GroupId, GroupNode, TermId, TermRow};
 use juttusihti_core::category_draft::CategoryDraft;
 use juttusihti_core::pricing::Catalog;
 use juttusihti_core::store::Store;
-use juttusihti_core::{LabelId, Status};
 
 use crate::db::Db;
 use crate::drag::{self, DragMsg, DragState};
@@ -24,7 +24,7 @@ use crate::style::{self, SIZE_BODY, SIZE_SMALL, SPACE};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrgItem {
     Group(GroupId),
-    Category(LabelId),
+    Category(CategoryId),
     Term(TermId),
 }
 
@@ -34,7 +34,7 @@ pub enum OrgTarget {
     /// In a group (`None`: Ungrouped) before its row at this index. For a
     /// dragged group, `Some(g)` means before group `g` and `None` the end.
     GroupSlot(Option<GroupId>, usize),
-    Category(LabelId),
+    Category(CategoryId),
     Unsorted,
     Ignored,
 }
@@ -44,7 +44,7 @@ pub enum OrgTarget {
 pub enum TermPlace {
     Unsorted,
     Ignored,
-    Category(LabelId),
+    Category(CategoryId),
 }
 
 /// How many unsorted terms show before "Show all": the most frequent ones.
@@ -62,7 +62,7 @@ impl std::fmt::Display for Dest {
 
 /// Pick-list entry for merge targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target(pub LabelId, pub String);
+pub struct Target(pub CategoryId, pub String);
 
 impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,7 +74,7 @@ impl std::fmt::Display for Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
     Group(GroupId),
-    Category(LabelId),
+    Category(CategoryId),
 }
 
 /// The name field open inline, with what is typed so far.
@@ -83,7 +83,7 @@ enum Editing {
     NewGroup(String),
     NewCategory(String),
     Group(GroupId, String),
-    Category(LabelId, String),
+    Category(CategoryId, String),
 }
 
 /// Everything the screen shows, loaded in one call.
@@ -91,10 +91,10 @@ enum Editing {
 pub struct Snapshot {
     pub(crate) groups: Vec<GroupNode>,
     pub(crate) ungrouped: Vec<CategoryNode>,
-    /// Confirmed articles and pending AI label suggestions per category.
-    counts: HashMap<LabelId, (u64, u64)>,
+    /// Articles per category, and pending AI suggestions (none for categories).
+    counts: HashMap<CategoryId, (u64, u64)>,
     /// Terms of the opened categories.
-    terms: HashMap<LabelId, Vec<TermRow>>,
+    terms: HashMap<CategoryId, Vec<TermRow>>,
     /// The most frequent first.
     pub(crate) unsorted: Vec<TermRow>,
     /// Where each unsorted term is in `unsorted`.
@@ -104,10 +104,15 @@ pub struct Snapshot {
     pending: Option<Box<(i64, CategoryDraft)>>,
 }
 
-fn snapshot(s: &Store, expanded: &BTreeSet<LabelId>) -> juttusihti_core::Result<Snapshot> {
+fn snapshot(s: &Store, expanded: &BTreeSet<CategoryId>) -> juttusihti_core::Result<Snapshot> {
     let tree = s.category_tree()?;
-    let counts =
-        s.label_counts()?.into_iter().map(|(l, confirmed, suggested)| (l.id, (confirmed, suggested))).collect();
+    // Articles per category; categories have no pending AI suggestions.
+    let counts = s
+        .category_counts(juttusihti_core::store::ListFilter::default())?
+        .categories
+        .into_iter()
+        .map(|(id, n)| (id, (n, 0)))
+        .collect();
     let mut terms = HashMap::new();
     for &id in expanded {
         terms.insert(id, s.category_terms(id)?);
@@ -134,12 +139,12 @@ pub enum Op {
     RenameGroup(GroupId, String),
     DeleteGroup(GroupId, String),
     MoveGroup(GroupId, usize),
-    MoveCategory(LabelId, Option<GroupId>, usize),
-    RenameCategory(LabelId, String),
-    Merge(LabelId, LabelId, String),
-    DeleteCategory(LabelId),
-    Decide(LabelId, Status),
-    MapTerm(TermId, Option<LabelId>),
+    MoveCategory(CategoryId, Option<GroupId>, usize),
+    RenameCategory(CategoryId, String),
+    Merge(CategoryId, CategoryId, String),
+    DeleteCategory(CategoryId),
+    Decide(CategoryId, Status),
+    MapTerm(TermId, Option<CategoryId>),
     Ignore(TermId, bool),
     ApproveDraft(i64, Box<CategoryDraft>),
     DiscardDraft(i64),
@@ -151,8 +156,8 @@ impl Op {
         match self {
             Op::CreateGroup(name) => s.create_group(&name).map(|_| String::new()),
             Op::CreateCategory(name) => {
-                let similar = s.similar_labels(&name)?;
-                s.create_label(&name)?;
+                let similar = s.similar_categories(&name)?;
+                s.create_category(&name)?;
                 Ok(match similar.first() {
                     Some(l) if l.name != name => format!("Created “{name}”. Similar existing category: “{}”.", l.name),
                     _ => format!("Created “{name}”."),
@@ -164,9 +169,11 @@ impl Op {
             }
             Op::MoveGroup(id, index) => s.move_group(id, index).map(|_| String::new()),
             Op::MoveCategory(id, group, index) => s.move_category(id, group, index).map(|_| String::new()),
-            Op::RenameCategory(id, name) => s.rename_label(id, &name).map(|_| format!("Renamed to “{name}”.")),
-            Op::Merge(from, into, name) => s.merge_labels(from, into).map(|_| format!("Merged into “{name}”.")),
-            Op::DeleteCategory(id) => s.delete_label(id).map(|_| "Category deleted. Articles were not changed.".into()),
+            Op::RenameCategory(id, name) => s.rename_category(id, &name).map(|_| format!("Renamed to “{name}”.")),
+            Op::Merge(from, into, name) => s.merge_categories(from, into).map(|_| format!("Merged into “{name}”.")),
+            Op::DeleteCategory(id) => {
+                s.delete_category(id).map(|_| "Category deleted. Its terms are Unsorted again.".into())
+            }
             Op::Decide(id, status) => {
                 let n = s.bulk_decide_label(id, status)?;
                 Ok(format!(
@@ -174,7 +181,7 @@ impl Op {
                     if status == Status::Confirmed { "Accepted" } else { "Rejected" }
                 ))
             }
-            Op::MapTerm(id, label) => s.map_term(id, label).map(|_| String::new()),
+            Op::MapTerm(id, category) => s.map_term(id, category).map(|_| String::new()),
             Op::Ignore(id, ignored) => s.set_term_ignored(id, ignored).map(|_| String::new()),
             Op::ApproveDraft(id, draft) => s.apply_category_draft(id, &draft).map(ai::applied_text),
             Op::DiscardDraft(id) => s.discard_category_draft(id).map(|_| String::new()),
@@ -204,7 +211,7 @@ pub enum Msg {
     Done(Result<String, String>),
     Drag(DragMsg<OrgItem, OrgTarget>),
     MoveTo(OrgItem, Dest),
-    ToggleTerms(LabelId),
+    ToggleTerms(CategoryId),
     ToggleIgnored,
     /// "Show all (N)" or "Show fewer" under the unsorted terms.
     ShowAllUnsorted(bool),
@@ -219,7 +226,7 @@ pub enum Msg {
     ConfirmDelete,
     CancelDelete,
     /// Opens or closes a category's merge, bulk-decide and delete actions.
-    Actions(LabelId),
+    Actions(CategoryId),
     MergeTarget(Target),
     Merge,
     Decide(Status),
@@ -246,12 +253,12 @@ pub struct State {
     db: Db,
     snap: Snapshot,
     loaded: bool,
-    expanded: BTreeSet<LabelId>,
+    expanded: BTreeSet<CategoryId>,
     show_ignored: bool,
     show_all_unsorted: bool,
     drag: DragState<OrgItem, OrgTarget>,
     editing: Option<Editing>,
-    actions: Option<LabelId>,
+    actions: Option<CategoryId>,
     merge_target: Option<Target>,
     confirm: Option<Confirm>,
     message: Option<Result<String, String>>,
@@ -380,7 +387,7 @@ impl State {
                 self.sync_draft(snap.pending.take().map(|p| *p));
                 self.snap = snap;
                 self.loaded = true;
-                let gone: Vec<LabelId> =
+                let gone: Vec<CategoryId> =
                     self.expanded.iter().copied().filter(|id| self.category(*id).is_none()).collect();
                 for id in gone {
                     self.expanded.remove(&id);
@@ -430,7 +437,7 @@ impl State {
             Msg::StartRename(item) => {
                 self.editing = match item {
                     OrgItem::Group(id) => self.group(id).map(|g| Editing::Group(id, g.group.name.clone())),
-                    OrgItem::Category(id) => self.category(id).map(|c| Editing::Category(id, c.label.name.clone())),
+                    OrgItem::Category(id) => self.category(id).map(|c| Editing::Category(id, c.category.name.clone())),
                     OrgItem::Term(_) => None,
                 };
                 return if self.editing.is_some() { Effect::Focus } else { Effect::None };
@@ -451,7 +458,7 @@ impl State {
                     Editing::Group(id, n) if self.group(id).is_some_and(|g| renamed(&g.group.name, &n)) => {
                         Op::RenameGroup(id, n.trim().into())
                     }
-                    Editing::Category(id, n) if self.category(id).is_some_and(|c| renamed(&c.label.name, &n)) => {
+                    Editing::Category(id, n) if self.category(id).is_some_and(|c| renamed(&c.category.name, &n)) => {
                         Op::RenameCategory(id, n.trim().into())
                     }
                     _ => return Effect::None,
@@ -601,8 +608,8 @@ impl State {
         self.snap.groups.iter().flat_map(|g| &g.categories).chain(&self.snap.ungrouped)
     }
 
-    fn category(&self, id: LabelId) -> Option<&CategoryNode> {
-        self.categories().find(|c| c.label.id == id)
+    fn category(&self, id: CategoryId) -> Option<&CategoryNode> {
+        self.categories().find(|c| c.category.id == id)
     }
 
     /// The categories of a group, or the ungrouped ones.
@@ -627,7 +634,7 @@ impl State {
             }
             (OrgItem::Category(id), OrgTarget::GroupSlot(group, index)) => {
                 self.category(id)?;
-                match self.members(group).iter().position(|c| c.label.id == id) {
+                match self.members(group).iter().position(|c| c.category.id == id) {
                     // Within its own group the row leaves its old place first.
                     Some(from) => drag::reorder(from, index).map(|to| Op::MoveCategory(id, group, to)),
                     None => Some(Op::MoveCategory(id, group, index)),
@@ -673,7 +680,7 @@ impl State {
                 let reorder = siblings
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| Dest(OrgTarget::GroupSlot(current, i), format!("Before “{}”", c.label.name)))
+                    .map(|(i, c)| Dest(OrgTarget::GroupSlot(current, i), format!("Before “{}”", c.category.name)))
                     .chain([Dest(OrgTarget::GroupSlot(current, siblings.len()), format!("To the end of “{place}”"))])
                     .filter(|d| self.drop_op(item, d.0).is_some());
                 out.extend(reorder);
@@ -688,8 +695,8 @@ impl State {
     fn term_dests(&self, place: TermPlace) -> Vec<Dest> {
         let mut out: Vec<Dest> = self
             .categories()
-            .filter(|c| place != TermPlace::Category(c.label.id))
-            .map(|c| Dest(OrgTarget::Category(c.label.id), c.label.name.clone()))
+            .filter(|c| place != TermPlace::Category(c.category.id))
+            .map(|c| Dest(OrgTarget::Category(c.category.id), c.category.name.clone()))
             .collect();
         if place != TermPlace::Unsorted {
             out.push(Dest(OrgTarget::Unsorted, "Unsorted".into()));
@@ -893,7 +900,7 @@ impl State {
             let r = self.view_category(c);
             col = col.push(match kind {
                 Some(OrgItem::Category(_)) => self.slot(r, OrgTarget::GroupSlot(group, i)),
-                Some(OrgItem::Term(_)) => self.zone(r, OrgTarget::Category(c.label.id)),
+                Some(OrgItem::Term(_)) => self.zone(r, OrgTarget::Category(c.category.id)),
                 _ => r,
             });
         }
@@ -908,7 +915,7 @@ impl State {
     }
 
     fn view_category<'a>(&'a self, c: &'a CategoryNode) -> Element<'a, Msg> {
-        let id = c.label.id;
+        let id = c.category.id;
         let item = OrgItem::Category(id);
         let open = self.expanded.contains(&id);
         let (_, pending) = self.snap.counts.get(&id).copied().unwrap_or_default();
@@ -929,7 +936,7 @@ impl State {
             .on_press(Msg::ToggleTerms(id))
             .into(),
         };
-        let mut line = row![self.grip(item, &c.label.name, self.name(item, &c.label.name, false))]
+        let mut line = row![self.grip(item, &c.category.name, self.name(item, &c.category.name, false))]
             .spacing(SPACE[1])
             .align_y(Center);
         if pending > 0 {
@@ -954,10 +961,13 @@ impl State {
 
     /// Today's label actions for one category: merge, bulk decisions, delete.
     fn view_actions<'a>(&'a self, c: &'a CategoryNode) -> Element<'a, Msg> {
-        let id = c.label.id;
+        let id = c.category.id;
         let (confirmed, pending) = self.snap.counts.get(&id).copied().unwrap_or_default();
-        let targets: Vec<Target> =
-            self.categories().filter(|o| o.label.id != id).map(|o| Target(o.label.id, o.label.name.clone())).collect();
+        let targets: Vec<Target> = self
+            .categories()
+            .filter(|o| o.category.id != id)
+            .map(|o| Target(o.category.id, o.category.name.clone()))
+            .collect();
         let merge = row![
             pick_list(targets, self.merge_target.clone(), Msg::MergeTarget)
                 .style(style::pick_list)
@@ -1201,13 +1211,13 @@ mod tests {
     fn dropping_category_on_group_moves_it() {
         let mut st = state();
         let (ai, space, tech) = with(&st, |s| {
-            (s.create_label("AI").unwrap(), s.create_label("Space").unwrap(), s.create_group("Tech").unwrap())
+            (s.create_category("AI").unwrap(), s.create_category("Space").unwrap(), s.create_group("Tech").unwrap())
         });
         reload(&mut st);
         drag(&mut st, OrgItem::Category(ai), OrgTarget::GroupSlot(Some(tech), 0));
         drag(&mut st, OrgItem::Category(space), OrgTarget::GroupSlot(Some(tech), 0));
         let tree = with(&st, |s| s.category_tree()).unwrap();
-        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.label.name.as_str()).collect();
+        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.category.name.as_str()).collect();
         assert_eq!(names, ["Space", "AI"]);
         assert!(tree.ungrouped.is_empty());
         assert_eq!(st.snap.groups[0].categories.len(), 2, "the screen reloads after a drop");
@@ -1215,20 +1225,20 @@ mod tests {
         // Dropping a row below itself in the same group lands it after the row it was dropped on.
         drag(&mut st, OrgItem::Category(space), OrgTarget::GroupSlot(Some(tech), 2));
         let tree = with(&st, |s| s.category_tree()).unwrap();
-        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.label.name.as_str()).collect();
+        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.category.name.as_str()).collect();
         assert_eq!(names, ["AI", "Space"]);
 
         // Back to Ungrouped.
         drag(&mut st, OrgItem::Category(ai), OrgTarget::GroupSlot(None, 0));
         let tree = with(&st, |s| s.category_tree()).unwrap();
-        assert_eq!(tree.ungrouped[0].label.id, ai);
+        assert_eq!(tree.ungrouped[0].category.id, ai);
     }
 
     #[test]
     fn dropping_term_on_category_maps_it() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
-        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
         reload(&mut st);
         let t = term_id(&st, "Tekoäly");
         drag(&mut st, OrgItem::Term(t), OrgTarget::Category(ai));
@@ -1284,7 +1294,7 @@ mod tests {
     fn a_term_row_offers_moves_from_where_it_is() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
-        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
         reload(&mut st);
         let names = |d: Vec<Dest>| d.into_iter().map(|d| d.1).collect::<Vec<_>>();
         assert_eq!(names(st.term_dests(TermPlace::Unsorted)), ["AI", "Ignored"]);
@@ -1295,7 +1305,7 @@ mod tests {
     #[test]
     fn delete_group_needs_confirmation() {
         let mut st = state();
-        let (ai, tech) = with(&st, |s| (s.create_label("AI").unwrap(), s.create_group("Tech").unwrap()));
+        let (ai, tech) = with(&st, |s| (s.create_category("AI").unwrap(), s.create_group("Tech").unwrap()));
         with(&st, |s| s.move_category(ai, Some(tech), 0)).unwrap();
         reload(&mut st);
 
@@ -1310,7 +1320,7 @@ mod tests {
         send(&mut st, Msg::AskDelete(Confirm::Group(tech)));
         send(&mut st, Msg::ConfirmDelete);
         assert!(st.snap.groups.is_empty());
-        assert_eq!(st.snap.ungrouped[0].label.id, ai, "its categories become Ungrouped");
+        assert_eq!(st.snap.ungrouped[0].category.id, ai, "its categories become Ungrouped");
         assert_eq!(st.confirm, None);
     }
 
@@ -1320,8 +1330,8 @@ mod tests {
         add_terms(&st, &["Tekoäly"]);
         let (ai, space, tech, sci) = with(&st, |s| {
             (
-                s.create_label("AI").unwrap(),
-                s.create_label("Space").unwrap(),
+                s.create_category("AI").unwrap(),
+                s.create_category("Space").unwrap(),
                 s.create_group("Tech").unwrap(),
                 s.create_group("Science").unwrap(),
             )
@@ -1375,14 +1385,14 @@ mod tests {
         let d = st.dests(OrgItem::Category(ai)).into_iter().find(|d| d.1 == "Before “Space”").unwrap();
         send(&mut st, Msg::MoveTo(OrgItem::Category(ai), d));
         let tree = with(&st, |s| s.category_tree()).unwrap();
-        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.label.name.as_str()).collect();
+        let names: Vec<&str> = tree.groups[0].categories.iter().map(|c| c.category.name.as_str()).collect();
         assert_eq!(names, ["AI", "Space"]);
     }
 
     #[test]
     fn new_category_is_created_ungrouped_with_similar_name_warning() {
         let mut st = state();
-        with(&st, |s| s.create_label("Urheilu")).unwrap();
+        with(&st, |s| s.create_category("Urheilu")).unwrap();
         reload(&mut st);
         send(&mut st, Msg::NewCategory);
         send(&mut st, Msg::Escape);
@@ -1391,7 +1401,7 @@ mod tests {
         send(&mut st, Msg::EditName("  Urheilua ".into()));
         send(&mut st, Msg::SaveName);
         assert_eq!(st.editing, None);
-        let names: Vec<&str> = st.snap.ungrouped.iter().map(|c| c.label.name.as_str()).collect();
+        let names: Vec<&str> = st.snap.ungrouped.iter().map(|c| c.category.name.as_str()).collect();
         assert_eq!(names, ["Urheilu", "Urheilua"]);
         assert_eq!(st.message, Some(Ok("Created “Urheilua”. Similar existing category: “Urheilu”.".to_string())));
         send(&mut st, Msg::NewCategory);
@@ -1403,7 +1413,7 @@ mod tests {
     #[test]
     fn move_to_moves() {
         let mut st = state();
-        let (ai, _tech) = with(&st, |s| (s.create_label("AI").unwrap(), s.create_group("Tech").unwrap()));
+        let (ai, _tech) = with(&st, |s| (s.create_category("AI").unwrap(), s.create_group("Tech").unwrap()));
         reload(&mut st);
         // And it really moves.
         let first = st.dests(OrgItem::Category(ai))[0].clone();
@@ -1510,7 +1520,7 @@ mod tests {
         let tight = SuggestPlan {
             limits: juttusihti_core::budget::Limits { max_tokens: Some(10), ..plan.limits },
             input: with(&st, |s| {
-                s.create_label("AI").unwrap();
+                s.create_category("AI").unwrap();
                 s.category_plan_input(MAX_TERMS)
             })
             .unwrap(),
@@ -1548,8 +1558,8 @@ mod tests {
     }
 
     /// A draft with AI group 1 holding new category 1 (with a term) and a placement.
-    fn ai_draft(st: &State) -> (CategoryDraft, LabelId, TermId) {
-        let space = with(st, |s| s.create_label("Space")).unwrap();
+    fn ai_draft(st: &State) -> (CategoryDraft, CategoryId, TermId) {
+        let space = with(st, |s| s.create_category("Space")).unwrap();
         let t = term_id(st, "Tekoäly");
         let draft = CategoryDraft {
             new_groups: vec![NewGroupDraft { temp: 1, name: "Tech".into(), by_user: false, ticked: true }],
@@ -1559,7 +1569,7 @@ mod tests {
                 group: GroupRef::New(1),
                 ticked: true,
             }],
-            placements: vec![Placement { label: space, rename: None, group: GroupRef::New(1), ticked: true }],
+            placements: vec![Placement { category: space, rename: None, group: GroupRef::New(1), ticked: true }],
             mappings: vec![Mapping { term: t, category: CategoryRef::New(1), ticked: true }],
             vague: vec![],
         };
@@ -1593,7 +1603,7 @@ mod tests {
         let mut st = state();
         add_terms(&st, &["Tekoäly", "Avaruus"]);
         reload(&mut st);
-        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
         let (a, b) = (term_id(&st, "Tekoäly"), term_id(&st, "Avaruus"));
         let draft = CategoryDraft {
             mappings: vec![
@@ -1618,7 +1628,7 @@ mod tests {
     fn leaving_the_screen_drops_a_pressed_row() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
-        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
         reload(&mut st);
         let nan = Point::new(f32::NAN, f32::NAN);
         send(&mut st, Msg::Drag(DragMsg::Press(OrgItem::Category(ai), "AI".into(), nan)));
@@ -1696,7 +1706,7 @@ mod tests {
         let mut st = state();
         add_terms(&st, &["Tekoäly", "Avaruus"]);
         reload(&mut st);
-        let ai = with(&st, |s| s.create_label("AI")).unwrap();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
         let (a, b) = (term_id(&st, "Tekoäly"), term_id(&st, "Avaruus"));
         let draft = CategoryDraft {
             mappings: vec![
@@ -1791,7 +1801,7 @@ mod tests {
     fn own_ungrouped_categories_take_terms_in_the_draft() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
-        let mine = with(&st, |s| s.create_label("Mine")).unwrap();
+        let mine = with(&st, |s| s.create_category("Mine")).unwrap();
         reload(&mut st);
         let (draft, _, t) = ai_draft(&st);
         open_draft(&mut st, &draft);

@@ -1,4 +1,5 @@
-//! Organising API: category groups, ordering, publisher term mapping,
+//! Categories, their own entity apart from labels: category groups,
+//! ordering, publisher term mapping, an article's manual and AI category,
 //! favourites, the category tree and per-category counts.
 
 use std::collections::HashMap;
@@ -6,12 +7,20 @@ use std::collections::HashMap;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::normalize::normalize_text;
+use crate::research::similar_labels;
 use crate::search::{SearchQuery, build_where};
 use crate::store::{ListFilter, Store};
-use crate::{ArticleId, Error, Label, LabelId, Result, View, now};
+use crate::{ArticleId, Error, Result, View, now};
 
 pub type GroupId = i64;
 pub type TermId = i64;
+pub type CategoryId = i64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Category {
+    pub id: CategoryId,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
@@ -21,7 +30,7 @@ pub struct Group {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CategoryNode {
-    pub label: Label,
+    pub category: Category,
     pub group_id: Option<GroupId>,
     pub term_count: u64,
 }
@@ -35,7 +44,7 @@ pub struct GroupNode {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Favourite {
     Group(GroupId),
-    Category(LabelId),
+    Category(CategoryId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +64,19 @@ pub struct TermRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CategoryCounts {
     pub groups: HashMap<GroupId, u64>,
-    pub categories: HashMap<LabelId, u64>,
+    pub categories: HashMap<CategoryId, u64>,
     /// Articles in no category.
     pub uncategorized: u64,
+}
+
+/// Where an article's categories come from. The manual one, when set, is the
+/// article's only category; otherwise it is in each of `from_terms` and `ai`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArticleCategory {
+    pub manual: Option<Category>,
+    pub ai: Option<Category>,
+    /// Categories its publisher terms are mapped to, by name.
+    pub from_terms: Vec<Category>,
 }
 
 /// An article offered to AI for categories: its headline and a short text.
@@ -72,7 +91,7 @@ pub struct ArticleForCategorizing {
 /// What [`Store::apply_article_categories`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ApplyStats {
-    /// Articles now confirmed in at least one of the given categories.
+    /// Articles given an AI category.
     pub categorized: usize,
     /// Categories that did not exist before.
     pub new_categories: usize,
@@ -81,13 +100,35 @@ pub struct ApplyStats {
 /// Characters of content sent when an article has no description.
 const CONTENT_START: usize = 300;
 
-fn clean_group_name(name: &str) -> Result<(String, String)> {
+fn clean_name(name: &str, what: &str) -> Result<(String, String)> {
     let name = name.trim().to_string();
     let normalized = normalize_text(&name);
     if normalized.is_empty() {
-        return Err(Error::Invalid("group name must contain letters or digits".into()));
+        return Err(Error::Invalid(format!("{what} name must contain letters or digits")));
     }
     Ok((name, normalized))
+}
+
+fn clean_group_name(name: &str) -> Result<(String, String)> {
+    clean_name(name, "group")
+}
+
+fn clean_category_name(name: &str) -> Result<(String, String)> {
+    clean_name(name, "category")
+}
+
+/// Creates a category (last in Ungrouped) or finds the one with the same
+/// normalized name. Returns its id and whether it was created.
+pub(crate) fn insert_category(conn: &Connection, name: &str) -> Result<(CategoryId, bool)> {
+    let (name, normalized) = clean_category_name(name)?;
+    let created = conn.execute(
+        "INSERT INTO categories(name, normalized, group_id, position, created_at)
+         VALUES (?1, ?2, NULL, (SELECT COALESCE(MAX(position) + 1, 0) FROM categories WHERE group_id IS NULL), ?3)
+         ON CONFLICT(normalized) DO NOTHING",
+        params![name, normalized, now()],
+    )? > 0;
+    let id = conn.query_row("SELECT id FROM categories WHERE normalized = ?1", [normalized], |r| r.get(0))?;
+    Ok((id, created))
 }
 
 fn is_unique_violation(e: &rusqlite::Error) -> bool {
@@ -97,16 +138,16 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
 fn favourite_column(f: Favourite) -> (&'static str, i64) {
     match f {
         Favourite::Group(id) => ("group_id", id),
-        Favourite::Category(id) => ("label_id", id),
+        Favourite::Category(id) => ("category_id", id),
     }
 }
 
+fn category_from_row(r: &rusqlite::Row) -> rusqlite::Result<Category> {
+    Ok(Category { id: r.get(0)?, name: r.get(1)? })
+}
+
 fn node_from_row(r: &rusqlite::Row) -> rusqlite::Result<CategoryNode> {
-    Ok(CategoryNode {
-        label: Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? },
-        group_id: r.get(3)?,
-        term_count: r.get::<_, i64>(4)? as u64,
-    })
+    Ok(CategoryNode { category: category_from_row(r)?, group_id: r.get(2)?, term_count: r.get::<_, i64>(3)? as u64 })
 }
 
 /// Orders terms by name, then feed.
@@ -116,15 +157,15 @@ const BY_NAME: &str = "t.name COLLATE NOCASE, f.title COLLATE NOCASE, t.id";
 pub(crate) const BY_ARTICLES: &str = "(SELECT COUNT(*) FROM article_terms x WHERE x.term_id = t.id) DESC,
      t.name COLLATE NOCASE, f.title COLLATE NOCASE, t.id";
 
-fn terms(conn: &Connection, cond: &str, order: &str, label: Option<LabelId>) -> Result<Vec<TermRow>> {
+fn terms(conn: &Connection, cond: &str, order: &str, category: Option<CategoryId>) -> Result<Vec<TermRow>> {
     let sql = format!(
         "SELECT t.id, t.name, f.title FROM feed_terms t JOIN feeds f ON f.id = t.feed_id
          WHERE {cond} ORDER BY {order}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let map = |r: &rusqlite::Row| Ok(TermRow { id: r.get(0)?, name: r.get(1)?, feed_title: r.get(2)? });
-    let rows = match label {
-        Some(l) => stmt.query_map([l], map)?.collect::<rusqlite::Result<_>>()?,
+    let rows = match category {
+        Some(c) => stmt.query_map([c], map)?.collect::<rusqlite::Result<_>>()?,
         None => stmt.query_map([], map)?.collect::<rusqlite::Result<_>>()?,
     };
     Ok(rows)
@@ -135,13 +176,17 @@ fn column(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Vec<
     Ok(stmt.query_map(p, |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
+fn exists(conn: &Connection, sql: &str, id: i64) -> Result<bool> {
+    Ok(conn.query_row(sql, [id], |_| Ok(())).optional()?.is_some())
+}
+
 impl Store {
     pub fn category_tree(&self) -> Result<CategoryTree> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT l.id, l.name, l.color, l.group_id,
-                    (SELECT COUNT(*) FROM feed_terms t WHERE t.label_id = l.id)
-             FROM labels l ORDER BY l.position, l.name COLLATE NOCASE, l.id",
+            "SELECT c.id, c.name, c.group_id,
+                    (SELECT COUNT(*) FROM feed_terms t WHERE t.category_id = c.id)
+             FROM categories c ORDER BY c.position, c.name COLLATE NOCASE, c.id",
         )?;
         let nodes: Vec<CategoryNode> = stmt.query_map([], node_from_row)?.collect::<rusqlite::Result<_>>()?;
         let mut stmt =
@@ -156,7 +201,7 @@ impl Store {
                 None => ungrouped.push(n),
             }
         }
-        let mut stmt = conn.prepare("SELECT group_id, label_id FROM favourites ORDER BY position, id")?;
+        let mut stmt = conn.prepare("SELECT group_id, category_id FROM favourites ORDER BY position, id")?;
         let favourites = stmt
             .query_map([], |r| {
                 Ok(match r.get::<_, Option<GroupId>>(0)? {
@@ -167,6 +212,148 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
         Ok(CategoryTree { groups, ungrouped, favourites })
     }
+
+    // ---- categories --------------------------------------------------------
+
+    /// All categories, by name.
+    pub fn categories(&self) -> Result<Vec<Category>> {
+        let mut stmt = self.conn().prepare("SELECT id, name FROM categories ORDER BY name COLLATE NOCASE, id")?;
+        Ok(stmt.query_map([], category_from_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Creates a category, last in Ungrouped, or returns the existing one with
+    /// the same normalized name.
+    pub fn create_category(&self, name: &str) -> Result<CategoryId> {
+        Ok(insert_category(self.conn(), name)?.0)
+    }
+
+    pub fn rename_category(&self, id: CategoryId, name: &str) -> Result<()> {
+        let (name, normalized) = clean_category_name(name)?;
+        match self
+            .conn()
+            .execute("UPDATE categories SET name = ?1, normalized = ?2 WHERE id = ?3", params![name, normalized, id])
+        {
+            Ok(0) => Err(Error::NotFound),
+            Ok(_) => Ok(()),
+            Err(e) if is_unique_violation(&e) => Err(Error::Invalid("a category with that name already exists".into())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Deletes a category: its terms return to Unsorted, articles lose it as
+    /// their manual or AI category, and a favourite of it vanishes.
+    pub fn delete_category(&mut self, id: CategoryId) -> Result<()> {
+        let tx = self.conn_mut().transaction()?;
+        if tx.execute("DELETE FROM categories WHERE id = ?1", [id])? == 0 {
+            return Err(Error::NotFound);
+        }
+        tx.execute("DELETE FROM article_categories WHERE user_category_id IS NULL AND ai_category_id IS NULL", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Merges `from` into `into`: term mappings and articles' manual and AI
+    /// choices move over, `into` keeps its group, and `from` is deleted
+    /// (with any favourite of it).
+    pub fn merge_categories(&mut self, from: CategoryId, into: CategoryId) -> Result<()> {
+        if from == into {
+            return Ok(());
+        }
+        let tx = self.conn_mut().transaction()?;
+        let found: i64 =
+            tx.query_row("SELECT COUNT(*) FROM categories WHERE id IN (?1, ?2)", params![from, into], |r| r.get(0))?;
+        if found != 2 {
+            return Err(Error::NotFound);
+        }
+        tx.execute("UPDATE feed_terms SET category_id = ?2 WHERE category_id = ?1", params![from, into])?;
+        tx.execute(
+            "UPDATE article_categories SET user_category_id = ?2 WHERE user_category_id = ?1",
+            params![from, into],
+        )?;
+        tx.execute("UPDATE article_categories SET ai_category_id = ?2 WHERE ai_category_id = ?1", params![from, into])?;
+        tx.execute("DELETE FROM categories WHERE id = ?1", [from])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Existing categories that a proposed name probably duplicates.
+    pub fn similar_categories(&self, name: &str) -> Result<Vec<Category>> {
+        let wanted = normalize_text(name);
+        let mut stmt =
+            self.conn().prepare("SELECT id, name, normalized FROM categories ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([], |r| Ok((category_from_row(r)?, r.get::<_, String>(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (category, normalized) = row?;
+            if similar_labels(&wanted, &normalized) {
+                out.push(category);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Sets (or with `None` clears) an article's manual category. Clearing
+    /// returns the article to its publisher-term and AI categories.
+    pub fn set_article_category(&self, article: ArticleId, category: Option<CategoryId>) -> Result<()> {
+        let conn = self.conn();
+        if !exists(conn, "SELECT 1 FROM articles WHERE id = ?1", article)? {
+            return Err(Error::NotFound);
+        }
+        match category {
+            Some(c) => {
+                if !exists(conn, "SELECT 1 FROM categories WHERE id = ?1", c)? {
+                    return Err(Error::NotFound);
+                }
+                conn.execute(
+                    "INSERT INTO article_categories(article_id, user_category_id, ai_category_id, updated_at)
+                     VALUES (?1, ?2, NULL, ?3)
+                     ON CONFLICT(article_id) DO UPDATE SET user_category_id = excluded.user_category_id,
+                                                           updated_at = excluded.updated_at",
+                    params![article, c, now()],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "UPDATE article_categories SET user_category_id = NULL, updated_at = ?2 WHERE article_id = ?1",
+                    params![article, now()],
+                )?;
+                conn.execute(
+                    "DELETE FROM article_categories
+                     WHERE article_id = ?1 AND user_category_id IS NULL AND ai_category_id IS NULL",
+                    [article],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// An article's manual, AI and publisher-term categories.
+    pub fn article_category(&self, article: ArticleId) -> Result<ArticleCategory> {
+        let conn = self.conn();
+        let one = |col: &str| -> Result<Option<Category>> {
+            Ok(conn
+                .query_row(
+                    &format!(
+                        "SELECT c.id, c.name FROM article_categories ac JOIN categories c ON c.id = ac.{col}
+                         WHERE ac.article_id = ?1"
+                    ),
+                    [article],
+                    category_from_row,
+                )
+                .optional()?)
+        };
+        let manual = one("user_category_id")?;
+        let ai = one("ai_category_id")?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT c.id, c.name FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+             JOIN categories c ON c.id = ft.category_id WHERE t.article_id = ?1
+             ORDER BY c.name COLLATE NOCASE, c.id",
+        )?;
+        let from_terms = stmt.query_map([article], category_from_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(ArticleCategory { manual, ai, from_terms })
+    }
+
+    // ---- groups ------------------------------------------------------------
 
     pub fn create_group(&self, name: &str) -> Result<GroupId> {
         let (name, normalized) = clean_group_name(name)?;
@@ -198,13 +385,18 @@ impl Store {
     pub fn delete_group(&mut self, id: GroupId) -> Result<()> {
         let tx = self.conn_mut().transaction()?;
         let next: i64 =
-            tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL", [], |r| r.get(0))?;
-        let freed =
-            column(&tx, "SELECT id FROM labels WHERE group_id = ?1 ORDER BY position, name COLLATE NOCASE, id", [id])?;
-        for (i, label) in freed.iter().enumerate() {
+            tx.query_row("SELECT COALESCE(MAX(position) + 1, 0) FROM categories WHERE group_id IS NULL", [], |r| {
+                r.get(0)
+            })?;
+        let freed = column(
+            &tx,
+            "SELECT id FROM categories WHERE group_id = ?1 ORDER BY position, name COLLATE NOCASE, id",
+            [id],
+        )?;
+        for (i, category) in freed.iter().enumerate() {
             tx.execute(
-                "UPDATE labels SET group_id = NULL, position = ?1 WHERE id = ?2",
-                params![next + i as i64, label],
+                "UPDATE categories SET group_id = NULL, position = ?1 WHERE id = ?2",
+                params![next + i as i64, category],
             )?;
         }
         let n = tx.execute("DELETE FROM category_groups WHERE id = ?1", [id])?;
@@ -228,49 +420,49 @@ impl Store {
         Ok(())
     }
 
-    pub fn move_category(&mut self, label: LabelId, group: Option<GroupId>, index: usize) -> Result<()> {
+    pub fn move_category(&mut self, category: CategoryId, group: Option<GroupId>, index: usize) -> Result<()> {
         let tx = self.conn_mut().transaction()?;
         let old: Option<GroupId> = tx
-            .query_row("SELECT group_id FROM labels WHERE id = ?1", [label], |r| r.get(0))
+            .query_row("SELECT group_id FROM categories WHERE id = ?1", [category], |r| r.get(0))
             .optional()?
             .ok_or(Error::NotFound)?;
-        if let Some(g) = group {
-            let found: Option<i64> =
-                tx.query_row("SELECT id FROM category_groups WHERE id = ?1", [g], |r| r.get(0)).optional()?;
-            if found.is_none() {
-                return Err(Error::NotFound);
-            }
+        if let Some(g) = group
+            && !exists(&tx, "SELECT 1 FROM category_groups WHERE id = ?1", g)?
+        {
+            return Err(Error::NotFound);
         }
         let siblings = |tx: &Connection, g: Option<GroupId>| {
-            column(tx, "SELECT id FROM labels WHERE group_id IS ?1 ORDER BY position, name COLLATE NOCASE, id", [g])
+            column(tx, "SELECT id FROM categories WHERE group_id IS ?1 ORDER BY position, name COLLATE NOCASE, id", [g])
         };
         let renumber = |tx: &Connection, ids: &[i64]| -> Result<()> {
             for (pos, id) in ids.iter().enumerate() {
-                tx.execute("UPDATE labels SET position = ?1 WHERE id = ?2", params![pos as i64, id])?;
+                tx.execute("UPDATE categories SET position = ?1 WHERE id = ?2", params![pos as i64, id])?;
             }
             Ok(())
         };
         if old != group {
             let mut rest = siblings(&tx, old)?;
-            rest.retain(|x| *x != label);
+            rest.retain(|x| *x != category);
             renumber(&tx, &rest)?;
-            tx.execute("UPDATE labels SET group_id = ?1 WHERE id = ?2", params![group, label])?;
+            tx.execute("UPDATE categories SET group_id = ?1 WHERE id = ?2", params![group, category])?;
         }
         let mut ids = siblings(&tx, group)?;
-        ids.retain(|x| *x != label);
-        ids.insert(index.min(ids.len()), label);
+        ids.retain(|x| *x != category);
+        ids.insert(index.min(ids.len()), category);
         renumber(&tx, &ids)?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn category_terms(&self, label: LabelId) -> Result<Vec<TermRow>> {
-        terms(self.conn(), "t.label_id = ?1", BY_NAME, Some(label))
+    // ---- publisher terms ---------------------------------------------------
+
+    pub fn category_terms(&self, category: CategoryId) -> Result<Vec<TermRow>> {
+        terms(self.conn(), "t.category_id = ?1", BY_NAME, Some(category))
     }
 
     /// The terms waiting to be sorted, the most frequent first.
     pub fn unsorted_terms(&self) -> Result<Vec<TermRow>> {
-        terms(self.conn(), "t.label_id IS NULL AND t.ignored = 0", BY_ARTICLES, None)
+        terms(self.conn(), "t.category_id IS NULL AND t.ignored = 0", BY_ARTICLES, None)
     }
 
     pub fn ignored_terms(&self) -> Result<Vec<TermRow>> {
@@ -278,21 +470,24 @@ impl Store {
     }
 
     /// Maps a term to a category (or unmaps with `None`); clears `ignored`.
-    pub fn map_term(&self, term: TermId, label: Option<LabelId>) -> Result<()> {
+    pub fn map_term(&self, term: TermId, category: Option<CategoryId>) -> Result<()> {
         let n = self
             .conn()
-            .execute("UPDATE feed_terms SET label_id = ?1, ignored = 0 WHERE id = ?2", params![label, term])?;
+            .execute("UPDATE feed_terms SET category_id = ?1, ignored = 0 WHERE id = ?2", params![category, term])?;
         if n == 0 { Err(Error::NotFound) } else { Ok(()) }
     }
 
     /// Ignoring a term clears its mapping.
     pub fn set_term_ignored(&self, term: TermId, ignored: bool) -> Result<()> {
         let n = self.conn().execute(
-            "UPDATE feed_terms SET ignored = ?1, label_id = CASE WHEN ?1 = 1 THEN NULL ELSE label_id END WHERE id = ?2",
+            "UPDATE feed_terms SET ignored = ?1, category_id = CASE WHEN ?1 = 1 THEN NULL ELSE category_id END
+             WHERE id = ?2",
             params![ignored, term],
         )?;
         if n == 0 { Err(Error::NotFound) } else { Ok(()) }
     }
+
+    // ---- favourites --------------------------------------------------------
 
     pub fn add_favourite(&self, f: Favourite) -> Result<()> {
         let (col, id) = favourite_column(f);
@@ -329,9 +524,12 @@ impl Store {
         Ok(())
     }
 
-    /// Distinct article counts per category and per group (confirmed labels
-    /// plus mapped publisher terms), restricted like a list. One statement:
-    /// the memberships are worked out once and the counts read them.
+    // ---- counts and AI -----------------------------------------------------
+
+    /// Distinct article counts per category and per group, restricted like a
+    /// list. Membership: the manual category; otherwise mapped publisher
+    /// terms and the AI category. One statement: the memberships are worked
+    /// out once and the counts read them.
     pub fn category_counts(&self, filter: ListFilter) -> Result<CategoryCounts> {
         let view = match filter.view {
             View::All => "",
@@ -339,23 +537,26 @@ impl Store {
             View::Saved => " AND a.is_saved = 1",
         };
         let sql = format!(
-            "WITH m(article_id, label_id) AS (
-               SELECT article_id, label_id FROM article_labels WHERE status = 'confirmed'
+            "WITH m(article_id, category_id) AS (
+               SELECT article_id, user_category_id FROM article_categories WHERE user_category_id IS NOT NULL
                UNION
-               SELECT t.article_id, ft.label_id FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-               WHERE ft.label_id IS NOT NULL AND NOT EXISTS (
-                 SELECT 1 FROM article_labels r
-                 WHERE r.article_id = t.article_id AND r.label_id = ft.label_id AND r.status = 'rejected')
+               SELECT article_id, ai_category_id FROM article_categories
+               WHERE user_category_id IS NULL AND ai_category_id IS NOT NULL
+               UNION
+               SELECT t.article_id, ft.category_id FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
+               WHERE ft.category_id IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM article_categories x
+                 WHERE x.article_id = t.article_id AND x.user_category_id IS NOT NULL)
              ),
-             scoped(article_id, label_id) AS MATERIALIZED (
-               SELECT m.article_id, m.label_id FROM m
+             scoped(article_id, category_id) AS MATERIALIZED (
+               SELECT m.article_id, m.category_id FROM m
                JOIN articles a ON a.id = m.article_id JOIN feeds f ON f.id = a.feed_id
                WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
              )
-             SELECT 0, label_id, COUNT(*) FROM scoped GROUP BY label_id
+             SELECT 0, category_id, COUNT(*) FROM scoped GROUP BY category_id
              UNION ALL
-             SELECT 1, l.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
-             JOIN labels l ON l.id = s.label_id WHERE l.group_id IS NOT NULL GROUP BY l.group_id
+             SELECT 1, c.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
+             JOIN categories c ON c.id = s.category_id WHERE c.group_id IS NOT NULL GROUP BY c.group_id
              UNION ALL
              SELECT 2, 0, COUNT(*) FROM articles a JOIN feeds f ON f.id = a.feed_id
              WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
@@ -380,8 +581,9 @@ impl Store {
     }
 
     /// The articles "find categories with AI" offers next: uncategorized ones
-    /// whose feed gave no publisher categories, in `filter`'s scope, not yet
-    /// checked, newest first; at most `limit`, with how many are eligible.
+    /// none of whose publisher terms is mapped or unsorted (no terms, or only
+    /// ignored ones), in `filter`'s scope, not yet checked, newest first; at
+    /// most `limit`, with how many are eligible.
     pub fn articles_to_categorize(
         &self,
         filter: ListFilter,
@@ -414,41 +616,30 @@ impl Store {
         Ok((rows.collect::<rusqlite::Result<_>>()?, eligible as usize))
     }
 
-    /// Saves what "find categories with AI" found, in one transaction: each
-    /// name is an existing category (by normalized name) or a new ungrouped
-    /// one; the links are confirmed AI links, except that a link the user
-    /// rejected stays rejected. Every `checked` article is marked as sent.
+    /// Saves what "find categories with AI" found, in one transaction: a name
+    /// is an existing category (by normalized name) or a new one, last in
+    /// Ungrouped, and becomes the article's AI category. The manual choice is
+    /// never touched. Every `checked` article is marked as sent.
     pub fn apply_article_categories(
         &mut self,
-        results: &[(ArticleId, Vec<String>)],
+        results: &[(ArticleId, Option<String>)],
         checked: &[ArticleId],
     ) -> Result<ApplyStats> {
         let tx = self.conn_mut().transaction()?;
         let mut stats = ApplyStats::default();
         let t = now();
-        for (article, names) in results {
-            let mut confirmed = false;
-            for name in names {
-                if normalize_text(name).is_empty() {
-                    continue;
-                }
-                let (label, created) = crate::research::insert_label(&tx, name)?;
-                stats.new_categories += usize::from(created);
-                tx.execute(
-                    "INSERT INTO article_labels(article_id, label_id, origin, status, suggestion_id, created_at)
-                     VALUES (?1, ?2, 'ai', 'confirmed', NULL, ?3)
-                     ON CONFLICT(article_id, label_id) DO UPDATE SET status = 'confirmed'
-                     WHERE article_labels.status <> 'rejected'",
-                    params![article, label, t],
-                )?;
-                let status: String = tx.query_row(
-                    "SELECT status FROM article_labels WHERE article_id = ?1 AND label_id = ?2",
-                    params![article, label],
-                    |r| r.get(0),
-                )?;
-                confirmed |= status == "confirmed";
-            }
-            stats.categorized += usize::from(confirmed);
+        for (article, name) in results {
+            let Some(name) = name.as_deref().filter(|n| !normalize_text(n).is_empty()) else { continue };
+            let (category, created) = insert_category(&tx, name)?;
+            stats.new_categories += usize::from(created);
+            tx.execute(
+                "INSERT INTO article_categories(article_id, user_category_id, ai_category_id, updated_at)
+                 VALUES (?1, NULL, ?2, ?3)
+                 ON CONFLICT(article_id) DO UPDATE SET ai_category_id = excluded.ai_category_id,
+                                                       updated_at = excluded.updated_at",
+                params![article, category, t],
+            )?;
+            stats.categorized += 1;
         }
         for id in checked {
             tx.execute(

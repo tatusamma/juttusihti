@@ -2,17 +2,15 @@
 //! Pure; nothing here touches the network.
 
 use juttusihti_ai::categorize::{estimate_tokens, parse, request};
-use juttusihti_core::LabelId;
-use juttusihti_core::categories::{CategoryNode, Group, TermRow};
+use juttusihti_core::categories::{Category, CategoryId, CategoryNode, Group, TermRow};
 use juttusihti_core::category_draft::{CategoryRef, GroupRef, PlanInput};
-use juttusihti_core::model::Label;
 use serde_json::json;
 
 mod common;
 use common::{MockReply, mock};
 
-fn cat(id: LabelId, name: &str, group_id: Option<i64>) -> CategoryNode {
-    CategoryNode { label: Label { id, name: name.into(), color: None }, group_id, term_count: 0 }
+fn cat(id: CategoryId, name: &str, group_id: Option<i64>) -> CategoryNode {
+    CategoryNode { category: Category { id, name: name.into() }, group_id, term_count: 0 }
 }
 
 fn term(id: i64, name: &str) -> TermRow {
@@ -69,7 +67,7 @@ fn parse_builds_ticked_draft() {
     assert_eq!(d.new_groups[0].name, "Tech & Science");
     assert_eq!(d.new_categories[0].group, GroupRef::New(1));
     assert!(d.new_categories[0].ticked);
-    assert_eq!(d.placements[0].label, 12);
+    assert_eq!(d.placements[0].category, 12);
     assert_eq!(d.placements[0].group, GroupRef::New(1));
     assert!(d.placements[0].ticked && d.placements[0].rename.is_none());
     assert_eq!(d.mappings.len(), 2);
@@ -111,7 +109,7 @@ fn parse_drops_unknown_and_grouped() {
     assert_eq!(d.new_groups.iter().map(|g| g.temp).collect::<Vec<_>>(), vec![4]);
     assert_eq!(d.new_categories.iter().map(|c| c.temp).collect::<Vec<_>>(), vec![6]);
     assert_eq!(d.placements.len(), 1);
-    assert_eq!((d.placements[0].label, d.placements[0].group), (13, GroupRef::Existing(3)));
+    assert_eq!((d.placements[0].category, d.placements[0].group), (13, GroupRef::Existing(3)));
     assert_eq!(d.mappings.len(), 1);
     assert_eq!((d.mappings[0].term, d.mappings[0].category), (5, CategoryRef::New(6)));
     assert_eq!(d.vague, vec![6, 9]);

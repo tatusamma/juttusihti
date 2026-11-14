@@ -7,9 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use juttusihti_core::LabelId;
 use juttusihti_core::budget::{Guard, Limits, Totals};
-use juttusihti_core::categories::{GroupId, TermId};
+use juttusihti_core::categories::{CategoryId, GroupId, TermId};
 use juttusihti_core::category_draft::{
     CategoryDraft, CategoryRef, GroupRef, Mapping, NewCategoryDraft, NewGroupDraft, Placement, PlanInput,
 };
@@ -61,7 +60,7 @@ fn user_message(input: &PlanInput) -> String {
     let data = json!({
         "groups": input.groups.iter().map(|g| json!({"id": g.id, "name": g.name})).collect::<Vec<_>>(),
         "categories": input.categories.iter()
-            .map(|c| json!({"id": c.label.id, "name": c.label.name, "group_id": c.group_id}))
+            .map(|c| json!({"id": c.category.id, "name": c.category.name, "group_id": c.group_id}))
             .collect::<Vec<_>>(),
         "terms": input.terms.iter()
             .map(|t| json!({"id": t.id, "name": t.name, "feed": t.feed_title}))
@@ -135,9 +134,9 @@ pub fn parse(v: &Value, input: &PlanInput) -> Result<CategoryDraft, AiError> {
 
     let known_groups: HashSet<GroupId> = input.groups.iter().map(|g| g.id).collect();
     let by_name: HashMap<String, GroupId> = input.groups.iter().map(|g| (normalize_text(&g.name), g.id)).collect();
-    let known_cats: HashSet<LabelId> = input.categories.iter().map(|c| c.label.id).collect();
-    let ungrouped: HashSet<LabelId> =
-        input.categories.iter().filter(|c| c.group_id.is_none()).map(|c| c.label.id).collect();
+    let known_cats: HashSet<CategoryId> = input.categories.iter().map(|c| c.category.id).collect();
+    let ungrouped: HashSet<CategoryId> =
+        input.categories.iter().filter(|c| c.group_id.is_none()).map(|c| c.category.id).collect();
     let known_terms: HashSet<TermId> = input.terms.iter().map(|t| t.id).collect();
 
     let mut draft = CategoryDraft::default();
@@ -178,11 +177,11 @@ pub fn parse(v: &Value, input: &PlanInput) -> Result<CategoryDraft, AiError> {
         }
     }
 
-    let mut placed: HashSet<LabelId> = HashSet::new();
+    let mut placed: HashSet<CategoryId> = HashSet::new();
     for p in places {
-        let (Some(label), Some(g)) = (p["category_id"].as_i64(), group(&p["group"])) else { continue };
-        if ungrouped.contains(&label) && placed.insert(label) {
-            draft.placements.push(Placement { label, rename: None, group: g, ticked: true });
+        let (Some(category), Some(g)) = (p["category_id"].as_i64(), group(&p["group"])) else { continue };
+        if ungrouped.contains(&category) && placed.insert(category) {
+            draft.placements.push(Placement { category, rename: None, group: g, ticked: true });
         }
     }
 

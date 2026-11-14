@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, stack, text, text_input, tooltip};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event, mouse};
-use juttusihti_core::LabelId;
+use juttusihti_core::categories::CategoryId;
 use juttusihti_core::categories::{CategoryCounts, CategoryNode, CategoryTree, Favourite, GroupId, GroupNode};
 use juttusihti_core::normalize::normalize_text;
 use juttusihti_core::pricing::Catalog;
@@ -38,7 +38,7 @@ pub enum Selection {
     /// Articles in no category.
     Uncategorized,
     Group(GroupId),
-    Category(LabelId),
+    Category(CategoryId),
 }
 
 impl From<Favourite> for Selection {
@@ -56,7 +56,7 @@ pub enum Item {
     /// A row in Favourites (dragging it reorders the favourites).
     Favourite(Favourite),
     Group(GroupId),
-    Category(LabelId),
+    Category(CategoryId),
 }
 
 impl Item {
@@ -90,7 +90,7 @@ pub enum Op {
     Favourite(Favourite, bool),
     MoveFavourite(Favourite, usize),
     MoveGroup(GroupId, usize),
-    MoveCategory(LabelId, Option<GroupId>, usize),
+    MoveCategory(CategoryId, Option<GroupId>, usize),
 }
 
 impl Op {
@@ -459,8 +459,8 @@ impl State {
         self.tree.groups.iter().find(|g| g.group.id == id)
     }
 
-    fn node(&self, id: LabelId) -> Option<&CategoryNode> {
-        self.tree.groups.iter().flat_map(|g| &g.categories).chain(&self.tree.ungrouped).find(|c| c.label.id == id)
+    fn node(&self, id: CategoryId) -> Option<&CategoryNode> {
+        self.tree.groups.iter().flat_map(|g| &g.categories).chain(&self.tree.ungrouped).find(|c| c.category.id == id)
     }
 
     /// Whether the selection still exists.
@@ -478,7 +478,7 @@ impl State {
             Selection::All => None,
             Selection::Uncategorized => Some("Uncategorized"),
             Selection::Group(g) => self.group(g).map(|g| g.group.name.as_str()),
-            Selection::Category(c) => self.node(c).map(|c| c.label.name.as_str()),
+            Selection::Category(c) => self.node(c).map(|c| c.category.name.as_str()),
         }
     }
 
@@ -513,16 +513,16 @@ impl State {
             if hit(&g.group.name) {
                 out.push(Match { selection: Selection::Group(g.group.id), name: &g.group.name, group: None });
             }
-            for c in g.categories.iter().filter(|c| hit(&c.label.name)) {
+            for c in g.categories.iter().filter(|c| hit(&c.category.name)) {
                 out.push(Match {
-                    selection: Selection::Category(c.label.id),
-                    name: &c.label.name,
+                    selection: Selection::Category(c.category.id),
+                    name: &c.category.name,
                     group: Some(&g.group.name),
                 });
             }
         }
-        for c in self.tree.ungrouped.iter().filter(|c| hit(&c.label.name)) {
-            out.push(Match { selection: Selection::Category(c.label.id), name: &c.label.name, group: None });
+        for c in self.tree.ungrouped.iter().filter(|c| hit(&c.category.name)) {
+            out.push(Match { selection: Selection::Category(c.category.id), name: &c.category.name, group: None });
         }
         out
     }
@@ -553,7 +553,7 @@ impl State {
             }
             (Item::Category(id), Target::GroupSlot(group, index)) => {
                 self.node(id)?;
-                match self.members(group).iter().position(|c| c.label.id == id) {
+                match self.members(group).iter().position(|c| c.category.id == id) {
                     Some(from) => drag::reorder(from, index).map(|to| Op::MoveCategory(id, group, to)),
                     None => Some(Op::MoveCategory(id, group, index)),
                 }
@@ -711,7 +711,7 @@ impl State {
     ) -> Element<'a, Msg> {
         let mut col = column![].spacing(1);
         for (i, c) in cats.iter().enumerate() {
-            let r = self.item_row(Item::Category(c.label.id), &c.label.name, selected, indent);
+            let r = self.item_row(Item::Category(c.category.id), &c.category.name, selected, indent);
             col = col.push(match dragged {
                 Some(Item::Category(_)) => self.slot(r, Target::GroupSlot(group, i)),
                 _ => r,

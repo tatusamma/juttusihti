@@ -90,7 +90,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Whether two normalized labels are likely the same concept: equal, a
 /// small edit apart, or one an inflected/compound form of the other
 /// (common in Finnish: "vaali" / "vaalit" / "eduskuntavaalit").
-fn similar_labels(a: &str, b: &str) -> bool {
+pub(crate) fn similar_labels(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -99,31 +99,21 @@ fn similar_labels(a: &str, b: &str) -> bool {
     (n >= 4 && long.starts_with(short) && long.chars().count() - n <= 3) || (n >= 6 && edit_distance(a, b) <= 2)
 }
 
-/// Creates a label (last in Ungrouped) or finds the one with the same
-/// normalized name. Returns its id and whether it was created.
-pub(crate) fn insert_label(conn: &rusqlite::Connection, name: &str) -> Result<(LabelId, bool)> {
-    let name = name.trim();
-    let normalized = normalize_text(name);
-    if normalized.is_empty() {
-        return Err(Error::Invalid("label name must contain letters or digits".into()));
-    }
-    let created = conn.execute(
-        "INSERT INTO labels(name, normalized, created_at, position)
-         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(position) + 1, 0) FROM labels WHERE group_id IS NULL))
-         ON CONFLICT(normalized) DO NOTHING",
-        params![name, normalized, now()],
-    )? > 0;
-    let id = conn.query_row("SELECT id FROM labels WHERE normalized = ?1", [normalized], |r| r.get(0))?;
-    Ok((id, created))
-}
-
 impl Store {
     // ---- labels --------------------------------------------------------
 
     /// Creates a label or returns the existing one with the same normalized name.
-    /// A new one goes last in Ungrouped.
     pub fn create_label(&self, name: &str) -> Result<LabelId> {
-        Ok(insert_label(self.conn(), name)?.0)
+        let name = name.trim();
+        let normalized = normalize_text(name);
+        if normalized.is_empty() {
+            return Err(Error::Invalid("label name must contain letters or digits".into()));
+        }
+        self.conn().execute(
+            "INSERT INTO labels(name, normalized, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(normalized) DO NOTHING",
+            params![name, normalized, now()],
+        )?;
+        Ok(self.conn().query_row("SELECT id FROM labels WHERE normalized = ?1", [normalized], |r| r.get(0))?)
     }
 
     pub fn labels(&self) -> Result<Vec<Label>> {
@@ -197,7 +187,6 @@ impl Store {
                              ELSE 'rejected' END",
             params![from, into],
         )?;
-        tx.execute("UPDATE feed_terms SET label_id = ?2 WHERE label_id = ?1", params![from, into])?;
         if tx.execute("DELETE FROM labels WHERE id = ?1", [from])? == 0 {
             return Err(Error::NotFound);
         }
@@ -248,49 +237,22 @@ impl Store {
         )?)
     }
 
-    /// Removes a label from an article. When the article reaches the label
-    /// through a mapped term, a user rejection is recorded instead so the
-    /// mapping does not bring it back.
     pub fn untag_article(&self, article: ArticleId, label: LabelId) -> Result<()> {
-        let via_terms: bool = self.conn().query_row(
-            "SELECT EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                            WHERE t.article_id = ?1 AND ft.label_id = ?2)",
-            params![article, label],
-            |r| r.get(0),
-        )?;
-        if via_terms {
-            self.conn().execute(
-                "INSERT INTO article_labels(article_id, label_id, origin, status, suggestion_id, created_at)
-                 VALUES (?1, ?2, 'user', 'rejected', NULL, ?3)
-                 ON CONFLICT(article_id, label_id) DO UPDATE SET origin = 'user', status = 'rejected'",
-                params![article, label, now()],
-            )?;
-        } else {
-            self.conn().execute(
-                "DELETE FROM article_labels WHERE article_id = ?1 AND label_id = ?2",
-                params![article, label],
-            )?;
-        }
+        self.conn()
+            .execute("DELETE FROM article_labels WHERE article_id = ?1 AND label_id = ?2", params![article, label])?;
         Ok(())
     }
 
     pub fn article_labels(&self, article: ArticleId) -> Result<Vec<ArticleLabel>> {
         let mut stmt = self.conn().prepare(
-            "SELECT l.id, l.name, l.color, al.origin, al.status, 0 FROM article_labels al
-             JOIN labels l ON l.id = al.label_id WHERE al.article_id = ?1
-             UNION
-             SELECT l.id, l.name, l.color, 'user', 'confirmed', 1 FROM labels l
-             WHERE EXISTS (SELECT 1 FROM article_terms t JOIN feed_terms ft ON ft.id = t.term_id
-                           WHERE t.article_id = ?1 AND ft.label_id = l.id)
-               AND NOT EXISTS (SELECT 1 FROM article_labels r WHERE r.article_id = ?1 AND r.label_id = l.id)
-             ORDER BY 2 COLLATE NOCASE",
+            "SELECT l.id, l.name, l.color, al.origin, al.status FROM article_labels al
+             JOIN labels l ON l.id = al.label_id WHERE al.article_id = ?1 ORDER BY l.name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([article], |r| {
             Ok(ArticleLabel {
                 label: Label { id: r.get(0)?, name: r.get(1)?, color: r.get(2)? },
                 origin: r.get(3)?,
                 status: r.get(4)?,
-                via_terms: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
