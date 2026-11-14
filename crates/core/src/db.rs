@@ -27,13 +27,38 @@ const MIGRATIONS: &[&str] = &[
 /// The schema version a fully migrated database reports.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
-/// Opens (creating if needed) a read-write database and migrates it.
+/// Opens (creating if needed) a read-write database and migrates it, first copying an
+/// existing database that needs migrating (see [`backup_before_upgrade`]).
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    backup_before_upgrade(&conn, path)?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Copies an existing database that migrations are about to change to
+/// `<name>-before-schema-<N>.db` next to it, N being the version it is upgraded to, so the
+/// upgrade can be undone and an older build can still open the copy. A new or current database
+/// is not copied. A copy that is already there is kept: it is the state before the first
+/// attempt. When the copy cannot be made, the upgrade does not run.
+fn backup_before_upgrade(conn: &Connection, path: &Path) -> Result<Option<std::path::PathBuf>> {
+    let current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if current == 0 || current >= SCHEMA_VERSION {
+        return Ok(None);
+    }
+    let stem = path.file_stem().map_or_else(|| "database".into(), |s| s.to_string_lossy().into_owned());
+    let backup = path.with_file_name(format!("{stem}-before-schema-{SCHEMA_VERSION}.db"));
+    if backup.exists() {
+        return Ok(Some(backup));
+    }
+    let target =
+        backup.to_str().ok_or_else(|| crate::Error::Backup(format!("{} is not a valid path", backup.display())))?;
+    conn.execute("VACUUM INTO ?1", [target])
+        .map_err(|e| crate::Error::Backup(format!("could not copy the database to {}: {e}", backup.display())))?;
+    tracing::info!(from = current, to = SCHEMA_VERSION, backup = %backup.display(), "backed up the database before upgrading it");
+    Ok(Some(backup))
 }
 
 /// Opens an in-memory database, used by tests and previews.
@@ -242,6 +267,61 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(settled, [1, 2, 4, 5, 6]);
+    }
+
+    /// A database file at schema version `version`, with one feed.
+    fn file_at_version(path: &Path, version: usize) {
+        let conn = Connection::open(path).unwrap();
+        configure(&conn).unwrap();
+        for (i, sql) in MIGRATIONS[..version].iter().enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", i as u32 + 1).unwrap();
+        }
+        conn.execute("INSERT INTO feeds(id, url, title, created_at) VALUES (1, 'https://a/rss', 'A', 0)", []).unwrap();
+    }
+
+    fn version_of(path: &Path) -> u32 {
+        Connection::open(path).unwrap().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn upgrading_a_database_backs_it_up_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("juttusihti.db");
+        file_at_version(&path, 9);
+        drop(open(&path).unwrap());
+        let backup = dir.path().join(format!("juttusihti-before-schema-{SCHEMA_VERSION}.db"));
+        assert_eq!(version_of(&backup), 9, "the copy is the database as it was");
+        let feeds: i64 =
+            Connection::open(&backup).unwrap().query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0)).unwrap();
+        assert_eq!(feeds, 1);
+        assert_eq!(version_of(&path), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_new_or_current_database_gets_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("juttusihti.db");
+        drop(open(&path).unwrap());
+        drop(open(&path).unwrap());
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("before-schema"))
+            .collect();
+        assert!(files.is_empty(), "{files:?}");
+    }
+
+    #[test]
+    fn an_earlier_backup_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("juttusihti.db");
+        file_at_version(&path, 9);
+        let backup = dir.path().join(format!("juttusihti-before-schema-{SCHEMA_VERSION}.db"));
+        std::fs::write(&backup, b"the first copy").unwrap();
+        drop(open(&path).unwrap());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"the first copy");
+        assert_eq!(version_of(&path), SCHEMA_VERSION);
     }
 
     #[test]

@@ -9,6 +9,22 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+### Upgrading from 0.6
+
+The first start of this version updates your database once:
+
+- Before anything changes, a copy of the database is saved next to it as
+  `juttusihti-before-schema-11.db` (Settings shows the folder). 0.6 cannot open the updated
+  database; to go back, quit Juttusihti, replace `juttusihti.db` with that copy, and remove
+  `juttusihti.db-wal` and `juttusihti.db-shm` if they are there.
+- Publisher categories that were waiting under Unsorted terms are filed: under the category with
+  the same name when you have one, otherwise in a new category in Ungrouped when the name is on
+  at least two articles. The rest keep waiting until a second article has them.
+- Terms you had filed or ignored, your groups and categories, labels, and the categories you or
+  the AI set on articles do not change. Neither do the terms of feeds with a default category.
+- To undo a filing, move the term back to **Unsorted** or **Ignore** it; that choice now stays at
+  later refreshes. Delete any new category you do not want on the Categories screen.
+
 ### Security
 
 - Both advisories that 0.6.0 listed as not fixable yet are fixed in the full-article browser

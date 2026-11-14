@@ -132,7 +132,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
     (
         "Your data",
         &[
-            "All data is in one SQLite database on this computer; its path is shown at the bottom of Settings. Set JUTTUSIHTI_DATA_DIR to keep it elsewhere.",
+            "All data is in one SQLite database on this computer; its path is shown at the bottom of Settings. Set JUTTUSIHTI_DATA_DIR to keep it elsewhere. Before an update changes the database, a copy of it is saved next to it (juttusihti-before-schema-N.db); an older version of Juttusihti can open that copy, but not the updated database.",
         ],
     ),
 ];

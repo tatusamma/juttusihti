@@ -310,4 +310,6 @@ cache.
 ![Settings](screenshots/settings.png)
 
 All data is in one SQLite database on this computer; its path is shown at the bottom of
-Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
+Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else. Before an update changes the
+database, a copy of it is saved next to it as `juttusihti-before-schema-N.db`; an older version
+of Juttusihti can open that copy, but not the updated database.
