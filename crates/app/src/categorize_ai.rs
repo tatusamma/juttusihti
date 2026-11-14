@@ -144,8 +144,6 @@ pub async fn run(db: Db, plan: Plan) -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     let sent: Vec<_> = plan.articles.iter().map(|a| a.id).collect();
     let n = sent.len();
-    // One category per article: the first name the AI gave.
-    let found: Vec<_> = found.into_iter().map(|(id, names)| (id, names.into_iter().next())).collect();
     let stats = db.call(move |s| s.apply_article_categories(&found, &sent)).await?;
     Ok(summary(stats, n, plan.eligible.saturating_sub(n)))
 }

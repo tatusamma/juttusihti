@@ -42,7 +42,6 @@ fn request_wraps_bounded_data_and_is_strict() {
     assert!(r.user.starts_with("<data>") && r.user.trim_end().ends_with("</data>"));
     assert_eq!(r.user.matches("</data>").count(), 1);
     assert!(r.system.contains("untrusted"));
-    assert!(r.system.contains("1") && r.system.contains("3"), "asks for one to three categories");
     assert_eq!(r.reasoning_effort, Some("low"));
     assert!(r.web_search.is_none());
     assert_eq!(u64::from(r.max_output_tokens), estimate_tokens(&a, &vocabulary()).1);
@@ -54,7 +53,7 @@ fn request_wraps_bounded_data_and_is_strict() {
     assert_eq!(r.schema["additionalProperties"], false);
     let item = &r.schema["properties"]["articles"]["items"];
     assert_eq!(item["additionalProperties"], false);
-    assert_eq!(item["required"], json!(["id", "categories"]));
+    assert_eq!(item["required"], json!(["id", "category"]));
 }
 
 #[test]
@@ -66,21 +65,37 @@ fn output_room_grows_with_the_articles() {
 }
 
 #[test]
-fn parse_keeps_known_articles_and_reuses_existing_names() {
+fn schema_has_one_category_string_per_article() {
+    let r = request("m", &articles(), &vocabulary());
+    let item = &r.schema["properties"]["articles"]["items"];
+    assert_eq!(item["properties"]["category"], json!({"type": "string"}));
+    assert_eq!(item["properties"]["id"], json!({"type": "integer"}));
+    assert!(item["properties"].get("categories").is_none());
+}
+
+#[test]
+fn parse_keeps_one_category_per_article() {
     let v = json!({"articles": [
-        {"id": 1, "categories": [" space ", "Raketit", "SPACE", "", "Tiede", "Avaruus"]},
-        {"id": 2, "categories": []},
-        {"id": 99, "categories": ["Space"]},
-        {"id": 1, "categories": ["Politiikka"]}
+        {"id": 1, "category": "  Space "},
+        {"id": 2, "category": ""},
+        {"id": 99, "category": "Space"},
+        {"id": 1, "category": "Politiikka"}
     ]});
-    let got = parse(&v, &articles(), &vocabulary()).unwrap();
-    assert_eq!(got, vec![(1, vec!["Space".to_string(), "Raketit".to_string(), "Tiede".to_string()])]);
+    let got = parse(&v, &articles()).unwrap();
+    assert_eq!(got, vec![(1, Some("Space".to_string())), (2, None)]);
+}
+
+#[test]
+fn prompt_asks_for_a_single_main_category() {
+    let r = request("m", &articles(), &vocabulary());
+    assert!(r.system.contains("single main category"));
+    assert!(r.system.contains("untrusted"));
 }
 
 #[test]
 fn malformed_answers_are_errors() {
-    assert!(parse(&json!([]), &articles(), &vocabulary()).is_err());
-    assert!(parse(&json!({"x": []}), &articles(), &vocabulary()).is_err());
+    assert!(parse(&json!([]), &articles()).is_err());
+    assert!(parse(&json!({"x": []}), &articles()).is_err());
 }
 
 #[test]
@@ -137,14 +152,14 @@ fn sent_ids(r: &Recorded) -> Vec<i64> {
 }
 
 fn reply_for(r: &Recorded) -> MockReply {
-    let items: Vec<Value> = sent_ids(r).iter().map(|id| json!({"id": id, "categories": ["Space"]})).collect();
+    let items: Vec<Value> = sent_ids(r).iter().map(|id| json!({"id": id, "category": "Space"})).collect();
     answer(&json!({ "articles": items }).to_string())
 }
 
 async fn run_with(
     handler: common::Handler,
     n: i64,
-) -> (common::Mock, Result<Vec<(i64, Vec<String>)>, AiError>, Arc<Mutex<Store>>) {
+) -> (common::Mock, Result<Vec<(i64, Option<String>)>, AiError>, Arc<Mutex<Store>>) {
     let server = mock(handler).await;
     let endpoint =
         Endpoint { provider: Provider::Openai, base_url: server.base.clone(), auth: Auth::ApiKey("k".into()) };
