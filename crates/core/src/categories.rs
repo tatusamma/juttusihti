@@ -282,14 +282,15 @@ impl Store {
     }
 
     /// Distinct article counts per category and per group (confirmed labels
-    /// plus mapped publisher terms), restricted like a list.
+    /// plus mapped publisher terms), restricted like a list. One statement:
+    /// the memberships are worked out once and both counts read them.
     pub fn category_counts(&self, filter: ListFilter) -> Result<CategoryCounts> {
         let view = match filter.view {
             View::All => "",
             View::Unread => " AND a.is_read = 0",
             View::Saved => " AND a.is_saved = 1",
         };
-        let cte = format!(
+        let sql = format!(
             "WITH m(article_id, label_id) AS (
                SELECT article_id, label_id FROM article_labels WHERE status = 'confirmed'
                UNION
@@ -298,32 +299,26 @@ impl Store {
                  SELECT 1 FROM article_labels r
                  WHERE r.article_id = t.article_id AND r.label_id = ft.label_id AND r.status = 'rejected')
              ),
-             scoped(article_id, label_id) AS (
+             scoped(article_id, label_id) AS MATERIALIZED (
                SELECT m.article_id, m.label_id FROM m
                JOIN articles a ON a.id = m.article_id JOIN feeds f ON f.id = a.feed_id
                WHERE (?1 IS NULL OR a.feed_id = ?1) AND (?2 IS NULL OR f.folder_id = ?2){view}
-             )"
+             )
+             SELECT 0, label_id, COUNT(*) FROM scoped GROUP BY label_id
+             UNION ALL
+             SELECT 1, l.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
+             JOIN labels l ON l.id = s.label_id WHERE l.group_id IS NOT NULL GROUP BY l.group_id"
         );
         let mut out = CategoryCounts::default();
-        let mut stmt =
-            self.conn().prepare(&format!("{cte} SELECT label_id, COUNT(*) FROM scoped GROUP BY label_id"))?;
+        let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(params![filter.feed_id, filter.folder_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? as u64))
         })?;
         for r in rows {
-            let (id, n) = r?;
-            out.categories.insert(id, n);
-        }
-        let mut stmt = self.conn().prepare(&format!(
-            "{cte} SELECT l.group_id, COUNT(DISTINCT s.article_id) FROM scoped s
-             JOIN labels l ON l.id = s.label_id WHERE l.group_id IS NOT NULL GROUP BY l.group_id"
-        ))?;
-        let rows = stmt.query_map(params![filter.feed_id, filter.folder_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
-        })?;
-        for r in rows {
-            let (id, n) = r?;
-            out.groups.insert(id, n);
+            match r? {
+                (0, id, n) => out.categories.insert(id, n),
+                (_, id, n) => out.groups.insert(id, n),
+            };
         }
         Ok(out)
     }
