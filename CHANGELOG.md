@@ -38,6 +38,8 @@ The first start of this version updates your database once:
 
 ### Fixed
 
+- When Juttusihti cannot start (its data folder cannot be created, or its database cannot be
+  opened or updated), it now says why in a message box. On Windows it used to just not start.
 - ✨ Suggest categories no longer comes back with "The AI suggested no changes" when you have no
   groups yet: a new category that fits no group now goes to Ungrouped instead of being dropped,
   and the review shows it there.
