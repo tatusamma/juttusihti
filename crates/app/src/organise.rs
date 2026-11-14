@@ -8,7 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 use iced::keyboard::{self, key};
 use iced::widget::{Space, button, column, container, operation, pick_list, row, scrollable, text, text_input};
 use iced::{Center, Element, Fill, Point, Subscription, Task as Cmd, event};
-use juttusihti_core::categories::{CategoryId, CategoryNode, GroupId, GroupNode, TermId, TermRow};
+use juttusihti_core::FeedId;
+use juttusihti_core::categories::{CategoryId, CategoryNode, GroupFeed, GroupId, GroupNode, TermId, TermRow};
 use juttusihti_core::category_draft::CategoryDraft;
 use juttusihti_core::pricing::Catalog;
 use juttusihti_core::store::Store;
@@ -25,6 +26,8 @@ pub enum OrgItem {
     Group(GroupId),
     Category(CategoryId),
     Term(TermId),
+    /// A feed in a group; it only moves between groups.
+    Feed(FeedId),
 }
 
 /// Where a dragged row can land.
@@ -69,6 +72,21 @@ impl std::fmt::Display for Target {
     }
 }
 
+/// Pick-list entry for a feed to add to a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedPick(pub FeedId, pub String);
+
+impl std::fmt::Display for FeedPick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+/// "Default for: ..." under a category that is the default of some feeds.
+fn default_line(c: &CategoryNode) -> Option<String> {
+    (!c.default_for.is_empty()).then(|| format!("Default for: {}", c.default_for.join(", ")))
+}
+
 /// A deletion waiting for confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
@@ -90,6 +108,8 @@ enum Editing {
 pub struct Snapshot {
     pub(crate) groups: Vec<GroupNode>,
     pub(crate) ungrouped: Vec<CategoryNode>,
+    /// Feeds in no group: the ones "Add feed..." offers.
+    pub(crate) ungrouped_feeds: Vec<GroupFeed>,
     /// Articles per category.
     counts: HashMap<CategoryId, u64>,
     /// Terms of the opened categories.
@@ -103,7 +123,7 @@ pub struct Snapshot {
     pending: Option<Box<(i64, CategoryDraft)>>,
 }
 
-fn snapshot(s: &Store, expanded: &BTreeSet<CategoryId>) -> juttusihti_core::Result<Snapshot> {
+fn snapshot(s: &Store, expanded: &BTreeSet<CategoryId>) -> juttusihti_core::Result<Box<Snapshot>> {
     let tree = s.category_tree()?;
     let counts = s.category_counts(juttusihti_core::store::ListFilter::default())?.categories.into_iter().collect();
     let mut terms = HashMap::new();
@@ -112,16 +132,17 @@ fn snapshot(s: &Store, expanded: &BTreeSet<CategoryId>) -> juttusihti_core::Resu
     }
     let unsorted = s.unsorted_terms()?;
     let unsorted_at = unsorted.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
-    Ok(Snapshot {
+    Ok(Box::new(Snapshot {
         groups: tree.groups,
         ungrouped: tree.ungrouped,
+        ungrouped_feeds: tree.ungrouped_feeds,
         counts,
         terms,
         unsorted,
         unsorted_at,
         ignored: s.ignored_terms()?,
         pending: s.pending_category_draft()?.map(Box::new),
-    })
+    }))
 }
 
 /// Store work asked for by the screen.
@@ -133,6 +154,7 @@ pub enum Op {
     DeleteGroup(GroupId, String),
     MoveGroup(GroupId, usize),
     MoveCategory(CategoryId, Option<GroupId>, usize),
+    SetFeedGroup(FeedId, Option<GroupId>),
     RenameCategory(CategoryId, String),
     Merge(CategoryId, CategoryId, String),
     DeleteCategory(CategoryId),
@@ -164,6 +186,7 @@ impl Op {
             }
             Op::MoveGroup(id, index) => s.move_group(id, index).map(|_| String::new()),
             Op::MoveCategory(id, group, index) => s.move_category(id, group, index).map(|_| String::new()),
+            Op::SetFeedGroup(feed, group) => s.set_feed_group(feed, group).map(|_| String::new()),
             Op::RenameCategory(id, name) => s.rename_category(id, &name).map(|_| format!("Renamed to “{name}”.")),
             Op::Merge(from, into, name) => s.merge_categories(from, into).map(|_| format!("Merged into “{name}”.")),
             Op::DeleteCategory(id) => {
@@ -195,10 +218,14 @@ enum Effect {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(Result<Snapshot, String>),
+    Loaded(Result<Box<Snapshot>, String>),
     Done(Result<String, String>),
     Drag(DragMsg<OrgItem, OrgTarget>),
     MoveTo(OrgItem, Dest),
+    /// "Add feed..." in a group: the feed joins it.
+    AddFeed(GroupId, FeedId),
+    /// "Remove from group" on a feed row.
+    RemoveFeed(FeedId),
     ToggleTerms(CategoryId),
     ToggleIgnored,
     /// "Show all (N)" or "Show fewer" under the unsorted terms.
@@ -372,7 +399,7 @@ impl State {
         match msg {
             Msg::Loaded(Ok(mut snap)) => {
                 self.sync_draft(snap.pending.take().map(|p| *p));
-                self.snap = snap;
+                self.snap = *snap;
                 self.loaded = true;
                 let gone: Vec<CategoryId> =
                     self.expanded.iter().copied().filter(|id| self.category(*id).is_none()).collect();
@@ -405,6 +432,8 @@ impl State {
             Msg::MoveTo(item, Dest(target, _)) => {
                 return self.drop_op(item, target).map_or(Effect::None, Effect::Run);
             }
+            Msg::AddFeed(group, feed) => return Effect::Run(Op::SetFeedGroup(feed, Some(group))),
+            Msg::RemoveFeed(feed) => return Effect::Run(Op::SetFeedGroup(feed, None)),
             Msg::ToggleTerms(id) => {
                 if !self.expanded.remove(&id) {
                     self.expanded.insert(id);
@@ -425,7 +454,7 @@ impl State {
                 self.editing = match item {
                     OrgItem::Group(id) => self.group(id).map(|g| Editing::Group(id, g.group.name.clone())),
                     OrgItem::Category(id) => self.category(id).map(|c| Editing::Category(id, c.category.name.clone())),
-                    OrgItem::Term(_) => None,
+                    OrgItem::Term(_) | OrgItem::Feed(_) => None,
                 };
                 return if self.editing.is_some() { Effect::Focus } else { Effect::None };
             }
@@ -622,6 +651,10 @@ impl State {
                     None => Some(Op::MoveCategory(id, group, index)),
                 }
             }
+            (OrgItem::Feed(id), OrgTarget::GroupSlot(group, _)) => {
+                let current = self.snap.groups.iter().find(|g| g.feeds.iter().any(|f| f.id == id)).map(|g| g.group.id);
+                (current != group).then_some(Op::SetFeedGroup(id, group))
+            }
             (OrgItem::Term(id), OrgTarget::Category(category)) => Some(Op::MapTerm(id, Some(category))),
             (OrgItem::Term(id), OrgTarget::Unsorted) => Some(Op::MapTerm(id, None)),
             (OrgItem::Term(id), OrgTarget::Ignored) => Some(Op::Ignore(id, true)),
@@ -666,6 +699,17 @@ impl State {
                     .chain([Dest(OrgTarget::GroupSlot(current, siblings.len()), format!("To the end of “{place}”"))])
                     .filter(|d| self.drop_op(item, d.0).is_some());
                 out.extend(reorder);
+                out
+            }
+            OrgItem::Feed(_) => {
+                let mut out: Vec<Dest> = self
+                    .snap
+                    .groups
+                    .iter()
+                    .map(|g| Dest(OrgTarget::GroupSlot(Some(g.group.id), 0), g.group.name.clone()))
+                    .collect();
+                out.push(Dest(OrgTarget::GroupSlot(None, 0), "Ungrouped".into()));
+                out.retain(|d| self.drop_op(item, d.0).is_some());
                 out
             }
             // A term's menu depends on where its row is: see `term_dests`.
@@ -831,10 +875,17 @@ impl State {
         if self.confirm == Some(Confirm::Group(id)) {
             block = block.push(self.confirm_row());
         }
-        block = block.push(self.view_members(Some(id), &g.categories, kind));
+        block = block.push(self.view_members(Some(id), &g.categories, !g.feeds.is_empty(), kind));
+        for f in &g.feeds {
+            block = block.push(self.view_feed(f));
+        }
+        if let Some(add) = self.add_feed(id) {
+            block = block.push(add);
+        }
         match kind {
             Some(OrgItem::Group(_)) => self.slot(block, OrgTarget::GroupSlot(Some(id), 0)),
             Some(OrgItem::Category(_)) => self.zone(block, OrgTarget::GroupSlot(Some(id), g.categories.len())),
+            Some(OrgItem::Feed(_)) => self.zone(block, OrgTarget::GroupSlot(Some(id), 0)),
             _ => block.into(),
         }
     }
@@ -862,11 +913,12 @@ impl State {
 
     fn view_ungrouped(&self, kind: Option<OrgItem>) -> Element<'_, Msg> {
         let cats = &self.snap.ungrouped;
-        let block = column![style::heading("Ungrouped"), self.view_members(None, cats, kind)].spacing(SPACE[0]);
+        let block = column![style::heading("Ungrouped"), self.view_members(None, cats, false, kind)].spacing(SPACE[0]);
         match kind {
             // Above Ungrouped is after the last group.
             Some(OrgItem::Group(_)) => self.slot(block, OrgTarget::GroupSlot(None, 0)),
             Some(OrgItem::Category(_)) => self.zone(block, OrgTarget::GroupSlot(None, cats.len())),
+            Some(OrgItem::Feed(_)) => self.zone(block, OrgTarget::GroupSlot(None, 0)),
             _ => block.into(),
         }
     }
@@ -875,6 +927,7 @@ impl State {
         &'a self,
         group: Option<GroupId>,
         cats: &'a [CategoryNode],
+        has_feeds: bool,
         kind: Option<OrgItem>,
     ) -> Element<'a, Msg> {
         let mut col = column![];
@@ -886,8 +939,8 @@ impl State {
                 _ => r,
             });
         }
-        if cats.is_empty() {
-            let empty = if group.is_some() { "Empty. Drag categories here." } else { "Nothing ungrouped." };
+        if cats.is_empty() && !has_feeds {
+            let empty = if group.is_some() { "Empty. Drag categories or feeds here." } else { "Nothing ungrouped." };
             col = col.push(
                 container(text(empty).size(SIZE_SMALL).style(style::faint))
                     .padding(iced::padding::left(INDENT).top(SPACE[0]).bottom(SPACE[0])),
@@ -926,6 +979,11 @@ impl State {
             .push(self.move_to(item, self.dests(item)))
             .push(style::icon_button(Icon::More, "Merge, delete…", SIZE_SMALL, Some(Msg::Actions(id))));
         let mut col = column![container(line).padding(iced::padding::left(INDENT).top(2.0).bottom(2.0))];
+        if let Some(d) = default_line(c) {
+            col = col.push(
+                container(text(d).size(SIZE_SMALL).style(style::muted)).padding(iced::padding::left(INDENT + SPACE[1])),
+            );
+        }
         if self.actions == Some(id) {
             col = col.push(self.view_actions(c));
         }
@@ -935,6 +993,46 @@ impl State {
             }
         }
         col.into()
+    }
+
+    /// A feed in a group: draggable to another group, or removed from it.
+    fn view_feed<'a>(&'a self, f: &'a GroupFeed) -> Element<'a, Msg> {
+        let item = OrgItem::Feed(f.id);
+        let name = row![icon(Icon::Rss).size(SIZE_SMALL).style(style::muted), text(&f.title).size(SIZE_BODY)]
+            .spacing(SPACE[1])
+            .align_y(Center);
+        container(
+            row![
+                self.grip(item, &f.title, name),
+                Space::new().width(Fill),
+                self.move_to(item, self.dests(item)),
+                style::quiet_button(None, "Remove from group", style::quiet, Some(Msg::RemoveFeed(f.id))),
+            ]
+            .spacing(SPACE[1])
+            .align_y(Center),
+        )
+        .padding(iced::padding::left(INDENT).top(2.0).bottom(2.0))
+        .into()
+    }
+
+    /// "Add feed...": the feeds in no group; hidden when there are none.
+    fn add_feed(&self, group: GroupId) -> Option<Element<'_, Msg>> {
+        if self.snap.ungrouped_feeds.is_empty() {
+            return None;
+        }
+        let feeds: Vec<FeedPick> = self.snap.ungrouped_feeds.iter().map(|f| FeedPick(f.id, f.title.clone())).collect();
+        Some(
+            container(
+                pick_list(feeds, None::<FeedPick>, move |p| Msg::AddFeed(group, p.0))
+                    .placeholder("Add feed…")
+                    .text_size(SIZE_SMALL)
+                    .padding([2.0, SPACE[1]])
+                    .style(style::pick_list)
+                    .menu_style(style::menu),
+            )
+            .padding(iced::padding::left(INDENT).top(2.0).bottom(2.0))
+            .into(),
+        )
     }
 
     /// A category's actions: merge into another, delete.
@@ -1167,6 +1265,79 @@ mod tests {
     fn term_id(st: &State, name: &str) -> TermId {
         let snap = &st.snap;
         snap.unsorted.iter().chain(&snap.ignored).find(|t| t.name == name).unwrap().id
+    }
+
+    /// A feed with this title, not yet in a group.
+    fn add_feed_titled(st: &State, title: &str) -> juttusihti_core::FeedId {
+        with(st, |s| {
+            s.add_feed(&NewFeed {
+                url: format!("https://{title}.example/rss"),
+                title: title.into(),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+    }
+
+    fn feed_group(st: &State, feed: juttusihti_core::FeedId) -> Option<GroupId> {
+        let tree = with(st, |s| s.category_tree()).unwrap();
+        tree.groups.iter().find(|g| g.feeds.iter().any(|f| f.id == feed)).map(|g| g.group.id)
+    }
+
+    #[test]
+    fn adding_dragging_and_removing_a_group_feed() {
+        let mut st = state();
+        let (sports, tech) = with(&st, |s| (s.create_group("Sports").unwrap(), s.create_group("Tech").unwrap()));
+        let f = add_feed_titled(&st, "Yle");
+        reload(&mut st);
+        assert_eq!(st.snap.ungrouped_feeds.len(), 1);
+        send(&mut st, Msg::AddFeed(sports, f));
+        assert_eq!(feed_group(&st, f), Some(sports));
+        assert!(st.snap.ungrouped_feeds.is_empty(), "the screen reloads");
+        let _ = st.view();
+
+        drag(&mut st, OrgItem::Feed(f), OrgTarget::GroupSlot(Some(tech), 0));
+        assert_eq!(feed_group(&st, f), Some(tech));
+        drag(&mut st, OrgItem::Feed(f), OrgTarget::GroupSlot(None, 0));
+        assert_eq!(feed_group(&st, f), None);
+
+        send(&mut st, Msg::AddFeed(sports, f));
+        send(&mut st, Msg::RemoveFeed(f));
+        assert_eq!(feed_group(&st, f), None);
+    }
+
+    #[test]
+    fn dropping_a_feed_on_its_own_group_does_nothing() {
+        let mut st = state();
+        let sports = with(&st, |s| s.create_group("Sports")).unwrap();
+        let f = add_feed_titled(&st, "Yle");
+        with(&st, |s| s.set_feed_group(f, Some(sports))).unwrap();
+        reload(&mut st);
+        assert_eq!(st.drop_op(OrgItem::Feed(f), OrgTarget::GroupSlot(Some(sports), 0)), None);
+        assert_eq!(st.drop_op(OrgItem::Feed(f), OrgTarget::GroupSlot(None, 0)), Some(Op::SetFeedGroup(f, None)));
+    }
+
+    #[test]
+    fn a_feed_cannot_be_dropped_on_categories_or_term_targets() {
+        let mut st = state();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
+        let f = add_feed_titled(&st, "Yle");
+        reload(&mut st);
+        for t in [OrgTarget::Category(ai), OrgTarget::Unsorted, OrgTarget::Ignored] {
+            assert_eq!(st.drop_op(OrgItem::Feed(f), t), None);
+        }
+    }
+
+    #[test]
+    fn a_category_shows_the_feeds_it_is_default_for() {
+        let mut st = state();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
+        let f = add_feed_titled(&st, "Yle");
+        with(&st, |s| s.set_feed_default_category(f, Some(ai))).unwrap();
+        reload(&mut st);
+        assert_eq!(st.snap.ungrouped[0].default_for, ["Yle"]);
+        assert_eq!(default_line(&st.snap.ungrouped[0]).as_deref(), Some("Default for: Yle"));
+        let _ = st.view();
     }
 
     #[test]

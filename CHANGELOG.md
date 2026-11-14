@@ -37,6 +37,10 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   estimate first, and the result is an editable draft: nothing is saved until you press Approve.
   Suggestions file categories under your own groups first and propose a new group only when
   nothing fits; terms and articles in any language go to the matching category.
+- **Feed default category and feeds in groups**: a feed can have a default category (set in its edit
+  form) that files its articles when its terms give none, before AI; a feed can also sit in a
+  category group, so all its articles show under that group. Both are set on the Categories
+  screen and the feed edit form.
 
 ### Changed
 
