@@ -131,7 +131,7 @@ pub async fn plan(db: Db, catalog: Catalog, filter: ListFilter) -> Result<Box<Pl
 pub async fn run(db: Db, plan: Plan) -> Result<String, String> {
     let endpoint = research::endpoint(plan.provider, plan.billing).await?;
     let client = Client::new(endpoint, RetryPolicy::default()).map_err(|e| e.to_string())?;
-    let found = categorize_articles::categorize(
+    let result = categorize_articles::categorize(
         &client,
         &plan.model,
         &plan.articles,
@@ -140,12 +140,25 @@ pub async fn run(db: Db, plan: Plan) -> Result<String, String> {
         plan.limits,
         db.shared(),
     )
-    .await
-    .map_err(|e| e.to_string())?;
-    let sent: Vec<_> = plan.articles.iter().map(|a| a.id).collect();
-    let n = sent.len();
-    let stats = db.call(move |s| s.apply_article_categories(&found, &sent)).await?;
-    Ok(summary(stats, n, plan.eligible.saturating_sub(n)))
+    .await;
+    let n = plan.articles.len();
+    let left = plan.eligible.saturating_sub(n);
+    match result {
+        Ok(found) => {
+            let sent: Vec<_> = plan.articles.iter().map(|a| a.id).collect();
+            let stats = db.call(move |s| s.apply_article_categories(&found, &sent)).await?;
+            Ok(summary(stats, n, left))
+        }
+        // The first half was paid for: keep it, then show what went wrong.
+        Err(e) if !e.found.is_empty() => {
+            let sent: Vec<_> = e.found.iter().map(|(id, _)| *id).collect();
+            let done = sent.len();
+            let found = e.found;
+            let stats = db.call(move |s| s.apply_article_categories(&found, &sent)).await?;
+            Err(format!("{} The rest failed: {}", summary(stats, done, 0), e.error))
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// "Categorized 82 of 100 articles; 3 new categories. 240 left."

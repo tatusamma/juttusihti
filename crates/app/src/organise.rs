@@ -149,7 +149,10 @@ impl Op {
             Op::CreateGroup(name) => s.create_group(&name).map(|_| String::new()),
             Op::CreateCategory(name) => {
                 let similar = s.similar_categories(&name)?;
-                s.create_category(&name)?;
+                let (_, created) = s.create_category_checked(&name)?;
+                if !created {
+                    return Ok(format!("“{name}” already exists."));
+                }
                 Ok(match similar.first() {
                     Some(l) if l.name != name => format!("Created “{name}”. Similar existing category: “{}”.", l.name),
                     _ => format!("Created “{name}”."),
@@ -619,7 +622,7 @@ impl State {
                     None => Some(Op::MoveCategory(id, group, index)),
                 }
             }
-            (OrgItem::Term(id), OrgTarget::Category(label)) => Some(Op::MapTerm(id, Some(label))),
+            (OrgItem::Term(id), OrgTarget::Category(category)) => Some(Op::MapTerm(id, Some(category))),
             (OrgItem::Term(id), OrgTarget::Unsorted) => Some(Op::MapTerm(id, None)),
             (OrgItem::Term(id), OrgTarget::Ignored) => Some(Op::Ignore(id, true)),
             _ => None,
@@ -1164,6 +1167,14 @@ mod tests {
     fn term_id(st: &State, name: &str) -> TermId {
         let snap = &st.snap;
         snap.unsorted.iter().chain(&snap.ignored).find(|t| t.name == name).unwrap().id
+    }
+
+    #[test]
+    fn creating_an_existing_category_says_so() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(Op::CreateCategory("Tech".into()).apply(&mut s).unwrap(), "Created “Tech”.");
+        assert_eq!(Op::CreateCategory("tech".into()).apply(&mut s).unwrap(), "“tech” already exists.");
+        assert_eq!(s.categories().unwrap().len(), 1);
     }
 
     #[test]

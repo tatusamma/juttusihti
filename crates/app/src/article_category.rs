@@ -67,7 +67,7 @@ pub fn view<'a, M: Clone + 'a>(
     let list = choices(all, c);
     if !list.is_empty() {
         let picker = pick_list(list, None::<Choice>, move |ch: Choice| on_pick(ch.0))
-            .placeholder("Change...")
+            .placeholder("Change category…")
             .style(style::pick_list)
             .menu_style(style::menu)
             .text_size(SIZE_SMALL)

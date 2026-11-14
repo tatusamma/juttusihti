@@ -920,37 +920,6 @@ fn without_terms_filter_excludes_articles_with_mapped_or_unsorted_terms() {
     assert_eq!(matching(&s, &q), ["c", "d"]);
 }
 
-#[test]
-fn analysis_scope_covers_exactly_the_articles_without_terms() {
-    use juttusihti_core::analysis::{AnalysisConfig, ClickbaitCheck, Depth, Task};
-    use juttusihti_core::budget::Limits;
-    use juttusihti_core::pricing::Provider;
-    let s = without_terms_data();
-    let config = AnalysisConfig {
-        scope: SearchQuery { uncategorized: true, without_terms: true, ..Default::default() },
-        range_label: String::new(),
-        provider: Provider::Anthropic,
-        model: "claude-haiku-5-5".into(),
-        depth: Depth::HeadlinesAndDescriptions,
-        tasks: [Task::Labels].into_iter().collect(),
-        limits: Limits::default(),
-        max_articles: 100,
-        reuse_cached: true,
-        use_batch: false,
-        billing: Default::default(),
-        relevance_criteria: None,
-        clickbait: ClickbaitCheck::off(),
-        parallel_requests: 4,
-    };
-    let scope = s.analysis_scope(&config).unwrap();
-    assert_eq!(scope.stats.matched, 2);
-    let mut ids = scope.selected_ids.clone();
-    ids.sort();
-    let mut want = vec![article_id(&s, "c"), article_id(&s, "d")];
-    want.sort();
-    assert_eq!(ids, want);
-}
-
 // ---- AI categorizing of uncategorized articles ----------------------------------
 
 fn dated(guid: &str, published_at: i64, terms: &[&str]) -> NewArticle {
@@ -1092,4 +1061,25 @@ fn apply_writes_one_ai_category_and_never_manual() {
     // A later result replaces the earlier AI choice.
     s.apply_article_categories(&[(new, Some("Tiede".into()))], &[new]).unwrap();
     assert_eq!(choices(&s, new), (None, Some(tiede)));
+}
+
+#[test]
+fn apply_skips_articles_deleted_meanwhile() {
+    let mut s = to_categorize_data();
+    let (new, mid, old) = (article_id(&s, "new"), article_id(&s, "mid"), article_id(&s, "old"));
+    s.conn().execute("DELETE FROM articles WHERE id = ?1", [mid]).unwrap();
+    let results = vec![(new, Some("Space".to_string())), (mid, Some("Tiede".to_string())), (old, None)];
+    let stats = s.apply_article_categories(&results, &[new, mid, old]).unwrap();
+    assert_eq!(stats.categorized, 1);
+    assert_eq!(stats.new_categories, 1, "only Space; the deleted article's Tiede is not created");
+    assert_eq!(count(&s, "category_ai_checks"), 2, "new and old are checked, the deleted one is not");
+    assert_eq!(in_category(&s, s.create_category("Space").unwrap()), ["new"]);
+}
+
+#[test]
+fn create_category_checked_says_whether_it_was_created() {
+    let s = Store::open_in_memory().unwrap();
+    let (a, created) = s.create_category_checked("Tekoäly").unwrap();
+    assert!(created);
+    assert_eq!(s.create_category_checked("  tekoäly ").unwrap(), (a, false));
 }

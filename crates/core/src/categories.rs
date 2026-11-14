@@ -227,6 +227,12 @@ impl Store {
         Ok(insert_category(self.conn(), name)?.0)
     }
 
+    /// Like `create_category`, and says whether it was created (false: a
+    /// category with the same normalized name already existed).
+    pub fn create_category_checked(&self, name: &str) -> Result<(CategoryId, bool)> {
+        insert_category(self.conn(), name)
+    }
+
     pub fn rename_category(&self, id: CategoryId, name: &str) -> Result<()> {
         let (name, normalized) = clean_category_name(name)?;
         match self
@@ -630,6 +636,12 @@ impl Store {
         let t = now();
         for (article, name) in results {
             let Some(name) = name.as_deref().filter(|n| !normalize_text(n).is_empty()) else { continue };
+            // An article deleted while the request ran is skipped, so the rest applies.
+            let exists: bool =
+                tx.query_row("SELECT EXISTS (SELECT 1 FROM articles WHERE id = ?1)", params![article], |r| r.get(0))?;
+            if !exists {
+                continue;
+            }
             let (category, created) = insert_category(&tx, name)?;
             stats.new_categories += usize::from(created);
             tx.execute(
@@ -643,7 +655,8 @@ impl Store {
         }
         for id in checked {
             tx.execute(
-                "INSERT INTO category_ai_checks(article_id, checked_at) VALUES (?1, ?2)
+                "INSERT INTO category_ai_checks(article_id, checked_at)
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM articles WHERE id = ?1)
                  ON CONFLICT(article_id) DO UPDATE SET checked_at = excluded.checked_at",
                 params![id, t],
             )?;

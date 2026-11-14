@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use juttusihti_ai::categorize_articles::{TEXT_CHARS, categorize, estimate_tokens, parse, request};
+use juttusihti_ai::categorize_articles::{CategorizeError, TEXT_CHARS, categorize, estimate_tokens, parse, request};
 use juttusihti_ai::{AiError, Auth, Client, Endpoint, RetryPolicy, is_context_window_exceeded};
 use juttusihti_core::budget::Limits;
 use juttusihti_core::categories::ArticleForCategorizing;
@@ -159,7 +159,7 @@ fn reply_for(r: &Recorded) -> MockReply {
 async fn run_with(
     handler: common::Handler,
     n: i64,
-) -> (common::Mock, Result<Vec<(i64, Option<String>)>, AiError>, Arc<Mutex<Store>>) {
+) -> (common::Mock, Result<Vec<(i64, Option<String>)>, CategorizeError>, Arc<Mutex<Store>>) {
     let server = mock(handler).await;
     let endpoint =
         Endpoint { provider: Provider::Openai, base_url: server.base.clone(), auth: Auth::ApiKey("k".into()) };
@@ -224,4 +224,45 @@ async fn nothing_is_sent_when_the_reservation_is_refused() {
     let r = categorize(&client, "gpt-test", &articles(), &vocabulary(), None, limits, db).await;
     assert!(r.is_err());
     assert_eq!(server.count(), 0);
+}
+
+fn reply_with(r: &Recorded, category: &str) -> MockReply {
+    let items: Vec<Value> = sent_ids(r).iter().map(|id| json!({"id": id, "category": category})).collect();
+    answer(&json!({ "articles": items }).to_string())
+}
+
+fn server_error() -> MockReply {
+    MockReply { status: 500, body: json!({"error": {"message": "boom"}}), delay: Duration::ZERO }
+}
+
+#[tokio::test]
+async fn a_failing_second_half_keeps_the_first_halfs_result() {
+    let handler: common::Handler = Arc::new(|r, n| match n {
+        0 => too_long(),
+        1 => reply_with(r, "Avaruus"),
+        _ => server_error(),
+    });
+    let (server, r, _) = run_with(handler, 5).await;
+    assert_eq!(server.count(), 3);
+    let e = r.unwrap_err();
+    let mut ids: Vec<i64> = e.found.iter().map(|(id, _)| *id).collect();
+    ids.sort();
+    assert_eq!(ids, [1, 2], "the paid first half is returned with the error");
+    assert!(!e.error.to_string().is_empty());
+}
+
+#[tokio::test]
+async fn the_second_half_knows_the_first_halfs_new_categories() {
+    let handler: common::Handler = Arc::new(|r, n| if n == 0 { too_long() } else { reply_with(r, "Avaruus") });
+    let (server, r, _) = run_with(handler, 4).await;
+    r.unwrap();
+    let reqs = server.requests();
+    let user = |r: &Recorded| {
+        r.body["input"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(data_of(&user(&reqs[1]))["categories"], json!(["Space", "Politiikka"]));
+    assert_eq!(data_of(&user(&reqs[2]))["categories"], json!(["Space", "Politiikka", "Avaruus"]));
 }

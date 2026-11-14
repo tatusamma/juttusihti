@@ -156,7 +156,7 @@ offline.
 ### Categories
 
 The sidebar between the rail and the article list picks a group or a category: All articles, your
-★ Favourites, then the groups and Ungrouped. The numbers follow All / Unread and the feed menu.
+★ Favourites, Uncategorized, then the groups and Ungrouped. The numbers follow All / Unread and the feed menu.
 "Find category…" finds a name (Esc or ✕ clears it), right-click or the star on hover adds a row
 to Favourites, and drag reorders. **«** hides the sidebar and **»** (or **c**) shows it again;
 **Organise…** opens the Categories screen.

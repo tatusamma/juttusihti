@@ -10,6 +10,7 @@ use juttusihti_core::ArticleId;
 use juttusihti_core::budget::{Guard, Limits, Totals};
 use juttusihti_core::categories::ArticleForCategorizing;
 use juttusihti_core::estimate::approx_tokens;
+use juttusihti_core::normalize::normalize_text;
 use juttusihti_core::pricing::{Micros, Price, Usage};
 use juttusihti_core::store::Store;
 use serde_json::{Value, json};
@@ -123,7 +124,7 @@ impl Failure {
 struct Run<'a> {
     client: &'a Client,
     model: &'a str,
-    vocabulary: &'a [String],
+    vocabulary: Vec<String>,
     price: Option<&'a Price>,
     guard: Guard,
     db: Arc<Mutex<Store>>,
@@ -139,8 +140,8 @@ impl Run<'_> {
 
     /// Reserves the worst case, sends one request and validates its answer.
     async fn send(&mut self, articles: &[ArticleForCategorizing]) -> Result<Found, Failure> {
-        let req = request(self.model, articles, self.vocabulary);
-        let (worst_in, worst_out) = estimate_tokens(articles, self.vocabulary);
+        let req = request(self.model, articles, &self.vocabulary);
+        let (worst_in, worst_out) = estimate_tokens(articles, &self.vocabulary);
         let worst = Usage { input: worst_in, output: worst_out, ..Default::default() };
         let worst_cost = self.price.and_then(|p| p.cost(&worst, false));
         let reservation = self
@@ -173,10 +174,27 @@ impl Run<'_> {
     }
 }
 
+/// A run that failed, with whatever was paid for and found before it did.
+#[derive(Debug)]
+pub struct CategorizeError {
+    pub found: Found,
+    pub error: AiError,
+}
+
+impl std::fmt::Display for CategorizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for CategorizeError {}
+
 /// Finds categories for `articles` with one request. When the provider
 /// rejects it as too big for the model or the answer is cut off, the two
-/// halves are sent once each instead. Nothing is sent beyond `limits`; the
-/// usage is recorded in the ledger as `categorize_articles`.
+/// halves are sent once each instead; the second half also sees the category
+/// names the first one introduced, and if it fails the first half's result is
+/// returned with the error. Nothing is sent beyond `limits`; the usage is
+/// recorded in the ledger as `categorize_articles`.
 pub async fn categorize(
     client: &Client,
     model: &str,
@@ -185,16 +203,29 @@ pub async fn categorize(
     price: Option<&Price>,
     limits: Limits,
     db: Arc<Mutex<Store>>,
-) -> Result<Found, AiError> {
-    let mut run = Run { client, model, vocabulary, price, guard: Guard::new(limits, Totals::default()), db };
+) -> Result<Found, CategorizeError> {
+    let mut run =
+        Run { client, model, vocabulary: vocabulary.to_vec(), price, guard: Guard::new(limits, Totals::default()), db };
+    let nothing = |f: Failure| CategorizeError { found: Vec::new(), error: f.error() };
     match run.send(articles).await {
         Ok(found) => Ok(found),
         Err(Failure::TooBig(_)) if articles.len() > 1 => {
             let (first, second) = articles.split_at(articles.len() / 2);
-            let mut found = run.send(first).await.map_err(Failure::error)?;
-            found.extend(run.send(second).await.map_err(Failure::error)?);
-            Ok(found)
+            let mut found = run.send(first).await.map_err(nothing)?;
+            for name in found.iter().filter_map(|(_, n)| n.as_deref()) {
+                let known = |v: &String| normalize_text(v) == normalize_text(name);
+                if !run.vocabulary.iter().any(known) {
+                    run.vocabulary.push(name.to_string());
+                }
+            }
+            match run.send(second).await {
+                Ok(more) => {
+                    found.extend(more);
+                    Ok(found)
+                }
+                Err(f) => Err(CategorizeError { found, error: f.error() }),
+            }
         }
-        Err(f) => Err(f.error()),
+        Err(f) => Err(nothing(f)),
     }
 }

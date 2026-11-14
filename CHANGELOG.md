@@ -26,7 +26,7 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   category, with article counts, your ★ Favourites and a "Find category…" box. Drag rows to
   reorder them; hide it with « or the **c** key and show it again with » or **c**. "Organise…"
   (at the top of the sidebar) opens the Categories screen.
-- **Groups and publisher categories**: the Categories screen now has groups, **+ New group** and
+- **Groups and publisher categories**: the Categories screen has groups, **+ New group** and
   **+ New category**, drag or **Move to…** to file a category, and the section names publishers
   give their articles, collected as terms you can file, leave in Unsorted or Ignore. Publisher
   categories are collected from now on; articles fetched earlier get them only if they are

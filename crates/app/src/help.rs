@@ -105,7 +105,7 @@ const SECTIONS: [(&str, &[&str]); 12] = [
     (
         "Review",
         &[
-            "Everything AI produces starts as a suggestion. On Review you confirm or reject entities, relationships, relevance and summaries, one by one or in bulk. AI never overrides a choice you have made.",
+            "Everything AI produces starts as a suggestion. On Review you confirm or reject entities, relationships, relevance and summaries, one by one or in bulk. AI never overrides a choice you have made. The one exception is the ✨ on Uncategorized: it saves the categories it finds directly, and never changes a category you chose.",
         ],
     ),
     (
