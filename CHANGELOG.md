@@ -20,6 +20,12 @@ The release workflow copies the section for a tag into the GitHub Release notes,
   The [dependency audit](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md) lists no
   vulnerabilities, and CI now audits the engine's lock file too.
 
+### Fixed
+
+- On Windows, a window no longer flashes in the top-left corner and takes the focus for a
+  moment when a full article is fetched. It came from the graphics setup inside the browser
+  engine (surfman), which the engine now builds patched.
+
 ### Changed
 
 - The full-article browser engine is Servo 0.8. Iltalehti, Ilta-Sanomat, Helsingin Sanomat and
