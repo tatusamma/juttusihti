@@ -14,7 +14,7 @@ use crate::store::Store;
 use crate::{Error, LabelId, Result, now};
 
 pub const DRAFT_KIND: &str = "category_plan";
-pub const DRAFT_PROMPT_VERSION: &str = "categories-1";
+pub const DRAFT_PROMPT_VERSION: &str = "categories-2";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GroupRef {
@@ -84,6 +84,14 @@ pub struct PlanInput {
 }
 
 impl CategoryDraft {
+    /// True when the draft proposes nothing to change.
+    pub fn is_empty(&self) -> bool {
+        self.new_groups.is_empty()
+            && self.new_categories.is_empty()
+            && self.placements.is_empty()
+            && self.mappings.is_empty()
+    }
+
     /// A new group counts if ticked and something counting goes into it.
     pub fn group_counts(&self, temp: u32) -> bool {
         self.new_groups.iter().any(|g| g.temp == temp && g.ticked)

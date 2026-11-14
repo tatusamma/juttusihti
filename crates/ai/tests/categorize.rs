@@ -41,6 +41,7 @@ fn request_wraps_data_and_never_includes_article_text() {
     assert!(r.user.starts_with("<data>") && r.user.trim_end().ends_with("</data>"));
     assert_eq!(r.user.matches("</data>").count(), 1);
     assert!(r.system.contains("untrusted"));
+    assert!(r.system.contains("top-level group") && r.system.contains("new_groups"), "asks for groups");
     assert_eq!(r.reasoning_effort, Some("low"));
     assert!(r.web_search.is_none());
     let (_, out) = estimate_tokens(&i);

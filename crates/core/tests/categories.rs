@@ -740,3 +740,12 @@ mod draft {
         assert_eq!(label_of(&s, a), None);
     }
 }
+
+#[test]
+fn draft_is_empty_only_without_proposals() {
+    use juttusihti_core::category_draft::{CategoryDraft, GroupRef, Placement};
+    let mut d = CategoryDraft { vague: vec![1, 2], ..Default::default() };
+    assert!(d.is_empty(), "vague terms alone propose nothing");
+    d.placements.push(Placement { label: 1, rename: None, group: GroupRef::New(1), ticked: true });
+    assert!(!d.is_empty());
+}

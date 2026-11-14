@@ -146,6 +146,9 @@ pub async fn plan(db: Db, catalog: Catalog) -> Result<Box<SuggestPlan>, String> 
     Ok(Box::new(SuggestPlan::build(&d, input, price, ready)))
 }
 
+/// Shown instead of an empty draft when the AI proposed nothing.
+pub(crate) const NO_SUGGESTIONS: &str = "The AI suggested no changes. Nothing was saved.";
+
 /// Sends the consented request and saves the validated answer as the pending
 /// draft: its id, the draft and how many terms wait for a later run.
 pub async fn run(db: Db, plan: SuggestPlan) -> Result<(i64, Box<CategoryDraft>, usize), String> {
@@ -154,6 +157,9 @@ pub async fn run(db: Db, plan: SuggestPlan) -> Result<(i64, Box<CategoryDraft>, 
     let draft = categorize::suggest(&client, &plan.model, &plan.input, plan.price.as_ref(), plan.limits, db.shared())
         .await
         .map_err(|e| e.to_string())?;
+    if draft.is_empty() {
+        return Err(NO_SUGGESTIONS.into());
+    }
     let (saved, provider, model) = (draft.clone(), plan.provider, plan.model.clone());
     let id = db.call(move |s| s.save_category_draft(&saved, provider, &model)).await?;
     Ok((id, Box::new(draft), plan.input.more_terms))
