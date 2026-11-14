@@ -276,12 +276,14 @@ mod tests {
     use super::*;
 
     fn fake_helper() -> PathBuf {
-        // Test exes live in target/<profile>/deps, examples in ../examples.
+        // Examples land in target/<profile>/examples. The test exe is somewhere below
+        // target/<profile>: in deps, or deeper with cargo 1.100's build directory layout.
         let exe = std::env::current_exe().unwrap();
         let name = if cfg!(windows) { "fake_helper.exe" } else { "fake_helper" };
-        let p = exe.parent().unwrap().parent().unwrap().join("examples").join(name);
-        assert!(p.exists(), "build the example first: {}", p.display());
-        p
+        exe.ancestors()
+            .map(|dir| dir.join("examples").join(name))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("build the example first: no examples/{name} above {}", exe.display()))
     }
 
     fn url(s: &str) -> Url {
