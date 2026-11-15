@@ -185,7 +185,7 @@ impl Op {
     /// Runs the work; the text is shown on the screen (empty: nothing to say).
     fn apply(self, s: &mut Store) -> juttusihti_core::Result<String> {
         match self {
-            Op::CreateGroup(name) => s.create_group(&name).map(|_| String::new()),
+            Op::CreateGroup(name) => s.create_group(&name).map(|_| format!("Created group “{name}”.")),
             Op::CreateCategory(name) => {
                 let similar = s.similar_categories(&name)?;
                 let (_, created) = s.create_category_checked(&name)?;
@@ -223,6 +223,8 @@ enum Effect {
     None,
     Load,
     Run(Op),
+    /// Save the name typed so far, then focus the name field that replaced it.
+    RunAndFocus(Op),
     /// Focus the inline name field.
     Focus,
     /// Work out the AI estimate for the consent panel (this generation).
@@ -231,6 +233,8 @@ enum Effect {
     Suggest,
     /// Store the edited draft (one save at a time; see [`Draft::saved`]).
     SaveDraft(i64, Box<CategoryDraft>),
+    /// Store the edited draft and focus the name field that just opened.
+    SaveDraftAndFocus(i64, Box<CategoryDraft>),
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +270,10 @@ pub enum Msg {
     Suggest,
     Planned(u64, Result<Box<SuggestPlan>, String>),
     /// The consent: sends the request.
+    /// Ticks or unticks an ungrouped category for the AI to put into a group.
+    ToggleGrouping(CategoryId),
+    /// Ticks (true) or unticks every ungrouped category.
+    GroupAll(bool),
     SendSuggest,
     CloseSuggest,
     /// The saved draft's id, the draft and the terms left for later.
@@ -341,6 +349,13 @@ impl State {
                 let db = self.db.clone();
                 Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, Msg::Done)
             }
+            Effect::RunAndFocus(op) => {
+                let db = self.db.clone();
+                Cmd::batch([
+                    Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, Msg::Done),
+                    operation::focus(NAME_ID).chain(operation::select_all(NAME_ID)),
+                ])
+            }
             Effect::Focus => operation::focus(NAME_ID).chain(operation::select_all(NAME_ID)),
             Effect::Plan(generation) => {
                 Cmd::perform(ai::plan(self.db.clone(), self.catalog.clone()), move |r| Msg::Planned(generation, r))
@@ -351,6 +366,16 @@ impl State {
                     async move { db.call(move |s| s.update_category_draft(id, &draft)).await },
                     Msg::DraftSaved,
                 )
+            }
+            Effect::SaveDraftAndFocus(id, draft) => {
+                let db = self.db.clone();
+                Cmd::batch([
+                    Cmd::perform(
+                        async move { db.call(move |s| s.update_category_draft(id, &draft)).await },
+                        Msg::DraftSaved,
+                    ),
+                    operation::focus(NAME_ID).chain(operation::select_all(NAME_ID)),
+                ])
             }
             Effect::Suggest => match &self.suggest {
                 Some(Panel::Running(p)) => Cmd::perform(ai::run(self.db.clone(), (**p).clone()), Msg::Suggested),
@@ -459,21 +484,15 @@ impl State {
             }
             Msg::ToggleIgnored => self.show_ignored = !self.show_ignored,
             Msg::ShowAllUnsorted(all) => self.show_all_unsorted = all,
-            Msg::NewGroup => {
-                self.editing = Some(Editing::NewGroup(String::new()));
-                return Effect::Focus;
-            }
-            Msg::NewCategory => {
-                self.editing = Some(Editing::NewCategory(String::new()));
-                return Effect::Focus;
-            }
+            Msg::NewGroup => return self.open_field(Some(Editing::NewGroup(String::new()))),
+            Msg::NewCategory => return self.open_field(Some(Editing::NewCategory(String::new()))),
             Msg::StartRename(item) => {
-                self.editing = match item {
+                let field = match item {
                     OrgItem::Group(id) => self.group(id).map(|g| Editing::Group(id, g.group.name.clone())),
                     OrgItem::Category(id) => self.category(id).map(|c| Editing::Category(id, c.category.name.clone())),
                     OrgItem::Term(_) | OrgItem::Feed(_) => None,
                 };
-                return if self.editing.is_some() { Effect::Focus } else { Effect::None };
+                return if field.is_some() { self.open_field(field) } else { Effect::None };
             }
             Msg::EditName(s) => {
                 if let Some(
@@ -483,21 +502,7 @@ impl State {
                     *n = s;
                 }
             }
-            Msg::SaveName => {
-                let Some(editing) = self.editing.take() else { return Effect::None };
-                let op = match editing {
-                    Editing::NewGroup(n) if !n.trim().is_empty() => Op::CreateGroup(n.trim().into()),
-                    Editing::NewCategory(n) if !n.trim().is_empty() => Op::CreateCategory(n.trim().into()),
-                    Editing::Group(id, n) if self.group(id).is_some_and(|g| renamed(&g.group.name, &n)) => {
-                        Op::RenameGroup(id, n.trim().into())
-                    }
-                    Editing::Category(id, n) if self.category(id).is_some_and(|c| renamed(&c.category.name, &n)) => {
-                        Op::RenameCategory(id, n.trim().into())
-                    }
-                    _ => return Effect::None,
-                };
-                return Effect::Run(op);
-            }
+            Msg::SaveName => return self.take_typed().map_or(Effect::None, Effect::Run),
             Msg::Escape => {
                 if let Some(d) = self.draft.as_mut() {
                     d.update(DraftMsg::Escape, &self.snap);
@@ -537,6 +542,8 @@ impl State {
             Msg::Ignore(id, ignored) => return Effect::Run(Op::Ignore(id, ignored)),
             Msg::Suggest
             | Msg::Planned(..)
+            | Msg::ToggleGrouping(_)
+            | Msg::GroupAll(_)
             | Msg::SendSuggest
             | Msg::CloseSuggest
             | Msg::Suggested(_)
@@ -565,6 +572,16 @@ impl State {
                     });
                 }
             }
+            Msg::ToggleGrouping(id) => {
+                if let Some(Panel::Ready(p)) = &mut self.suggest {
+                    p.toggle_grouping(id);
+                }
+            }
+            Msg::GroupAll(on) => {
+                if let Some(Panel::Ready(p)) = &mut self.suggest {
+                    p.group_all(on);
+                }
+            }
             Msg::SendSuggest => {
                 if let Some(Panel::Ready(p)) = &self.suggest
                     && p.blocker().is_none()
@@ -591,6 +608,7 @@ impl State {
                     Outcome::None => Effect::None,
                     Outcome::Focus => Effect::Focus,
                     Outcome::Changed => Effect::SaveDraft(d.id, Box::new(d.plan.clone())),
+                    Outcome::ChangedAndFocus => Effect::SaveDraftAndFocus(d.id, Box::new(d.plan.clone())),
                     Outcome::Approve => Effect::Run(Op::ApproveDraft(d.id, Box::new(d.plan.clone()))),
                     Outcome::Discard => Effect::Run(Op::DiscardDraft(d.id)),
                 };
@@ -645,6 +663,32 @@ impl State {
         match group {
             Some(g) => self.group(g).map_or(&[], |g| &g.categories),
             None => &self.snap.ungrouped,
+        }
+    }
+
+    /// Closes the name field and returns the store work for what it holds: a new group or
+    /// category, or a changed name. None when the field is empty or unchanged.
+    fn take_typed(&mut self) -> Option<Op> {
+        match self.editing.take()? {
+            Editing::NewGroup(n) if !n.trim().is_empty() => Some(Op::CreateGroup(n.trim().into())),
+            Editing::NewCategory(n) if !n.trim().is_empty() => Some(Op::CreateCategory(n.trim().into())),
+            Editing::Group(id, n) if self.group(id).is_some_and(|g| renamed(&g.group.name, &n)) => {
+                Some(Op::RenameGroup(id, n.trim().into()))
+            }
+            Editing::Category(id, n) if self.category(id).is_some_and(|c| renamed(&c.category.name, &n)) => {
+                Some(Op::RenameCategory(id, n.trim().into()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Opens `field`, first saving what the open field holds so a typed name is never lost.
+    fn open_field(&mut self, field: Option<Editing>) -> Effect {
+        let typed = self.take_typed();
+        self.editing = field;
+        match typed {
+            Some(op) => Effect::RunAndFocus(op),
+            None => Effect::Focus,
         }
     }
 
@@ -776,9 +820,8 @@ impl State {
         let kind = self.drag.dragging().map(|d| d.item);
         let mut body = column![].spacing(SPACE[4]);
         if self.loaded && self.categories().next().is_none() {
-            body = body.push(style::note(
-                "No categories yet. Publisher categories appear under Unsorted terms after the next refresh.",
-            ));
+            body = body
+                .push(style::note("No categories yet. Publisher categories become categories at the next refresh."));
         }
         for g in &self.snap.groups {
             body = body.push(self.view_group(g, kind));
@@ -845,7 +888,7 @@ impl State {
             _ => None,
         };
         if let Some(n) = typed {
-            return name_input("Name", n).into();
+            return name_field("Name", n);
         }
         let label = text(name).size(SIZE_BODY);
         let label = if strong { label.font(style::SEMIBOLD) } else { label };
@@ -917,12 +960,12 @@ impl State {
                 .into()
         };
         let group = match &self.editing {
-            Some(Editing::NewGroup(n)) => name_input("Group name", n).into(),
+            Some(Editing::NewGroup(n)) => name_field("Group name", n),
             _ => add("+ New group", Msg::NewGroup),
         };
         // A new category starts Ungrouped.
         let category = match &self.editing {
-            Some(Editing::NewCategory(n)) => name_input("Category name", n).into(),
+            Some(Editing::NewCategory(n)) => name_field("Category name", n),
             _ => add("+ New category", Msg::NewCategory),
         };
         row![group, category].spacing(SPACE[3]).align_y(Center).into()
@@ -1180,7 +1223,17 @@ fn renamed(name: &str, typed: &str) -> bool {
     !typed.trim().is_empty() && typed.trim() != name
 }
 
-/// The inline name field: Enter saves, Esc cancels.
+/// The inline name field with its Save button: Enter or Save saves, Esc cancels, and opening
+/// another name field saves what is typed here.
+fn name_field<'a>(placeholder: &'a str, value: &'a str) -> Element<'a, Msg> {
+    let save = button(text("Save").size(SIZE_SMALL).style(style::accent))
+        .padding([0.0, SPACE[0]])
+        .style(style::row)
+        .on_press_maybe((!value.trim().is_empty()).then_some(Msg::SaveName));
+    row![name_input(placeholder, value), save].spacing(SPACE[0]).align_y(Center).into()
+}
+
+/// The text input itself: Enter saves.
 fn name_input<'a>(placeholder: &'a str, value: &'a str) -> iced::widget::TextInput<'a, Msg> {
     text_input(placeholder, value)
         .id(NAME_ID)
@@ -1216,13 +1269,13 @@ mod tests {
     /// Sends `msg` and runs any store work it asks for synchronously.
     fn send(st: &mut State, msg: Msg) {
         match st.handle(msg) {
-            Effect::Run(op) => {
+            Effect::Run(op) | Effect::RunAndFocus(op) => {
                 let r = with(st, |s| op.apply(s)).map_err(|e| e.to_string());
                 let _ = st.handle(Msg::Done(r));
                 reload(st);
             }
             Effect::Load => reload(st),
-            Effect::SaveDraft(id, draft) => {
+            Effect::SaveDraft(id, draft) | Effect::SaveDraftAndFocus(id, draft) => {
                 let r = with(st, |s| s.update_category_draft(id, &draft)).map_err(|e| e.to_string());
                 send(st, Msg::DraftSaved(r));
             }
@@ -1255,9 +1308,15 @@ mod tests {
         })
     }
 
-    /// One feed with an article carrying the publisher terms `terms`.
+    /// One feed with an article carrying the publisher terms `terms`, left in Unsorted (a
+    /// refresh files new terms automatically; these tests start from terms the user has not
+    /// filed).
     fn add_terms(st: &State, terms: &[&str]) {
         with(st, |s| {
+            let max = |s: &Store, table: &str| -> i64 {
+                s.conn().query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| r.get(0)).unwrap()
+            };
+            let (old_terms, old_categories) = (max(s, "feed_terms"), max(s, "categories"));
             let f = s
                 .add_feed(&NewFeed {
                     url: "https://a.example/rss".into(),
@@ -1276,6 +1335,8 @@ mod tests {
                 terms: terms.iter().map(|t| NewTerm { name: (*t).into(), scheme: String::new() }).collect(),
             };
             s.ingest(f, &[a]).unwrap();
+            s.conn().execute("UPDATE feed_terms SET category_id = NULL WHERE id > ?1", [old_terms]).unwrap();
+            s.conn().execute("DELETE FROM categories WHERE id > ?1", [old_categories]).unwrap();
         });
     }
 
@@ -1596,6 +1657,51 @@ mod tests {
     }
 
     #[test]
+    fn a_new_group_is_confirmed() {
+        let mut st = state();
+        send(&mut st, Msg::NewGroup);
+        send(&mut st, Msg::EditName(" Talous ".into()));
+        send(&mut st, Msg::SaveName);
+        assert_eq!(st.snap.groups.iter().map(|g| g.group.name.as_str()).collect::<Vec<_>>(), ["Talous"]);
+        assert_eq!(st.message, Some(Ok("Created group “Talous”.".to_string())));
+    }
+
+    #[test]
+    fn a_typed_name_is_saved_when_another_field_opens() {
+        let mut st = state();
+        send(&mut st, Msg::NewGroup);
+        send(&mut st, Msg::EditName("Urheilu".into()));
+        assert!(matches!(st.handle(Msg::NewCategory), Effect::RunAndFocus(Op::CreateGroup(n)) if n == "Urheilu"));
+        assert_eq!(st.editing, Some(Editing::NewCategory(String::new())), "the new field opens");
+
+        let mut st = state();
+        send(&mut st, Msg::NewCategory);
+        send(&mut st, Msg::EditName("Talous".into()));
+        send(&mut st, Msg::NewGroup);
+        assert_eq!(st.snap.ungrouped.iter().map(|c| c.category.name.as_str()).collect::<Vec<_>>(), ["Talous"]);
+        assert_eq!(st.editing, Some(Editing::NewGroup(String::new())));
+    }
+
+    #[test]
+    fn a_typed_rename_is_saved_when_a_new_field_opens() {
+        let mut st = state();
+        let ai = with(&st, |s| s.create_category("AI")).unwrap();
+        reload(&mut st);
+        send(&mut st, Msg::StartRename(OrgItem::Category(ai)));
+        send(&mut st, Msg::EditName("Tekoäly".into()));
+        send(&mut st, Msg::NewGroup);
+        assert_eq!(st.snap.ungrouped[0].category.name, "Tekoäly");
+    }
+
+    #[test]
+    fn an_empty_field_is_just_replaced() {
+        let mut st = state();
+        send(&mut st, Msg::NewGroup);
+        assert_eq!(st.handle(Msg::NewCategory), Effect::Focus);
+        assert_eq!(st.editing, Some(Editing::NewCategory(String::new())));
+    }
+
+    #[test]
     fn move_to_moves() {
         let mut st = state();
         let (ai, _tech) = with(&st, |s| (s.create_category("AI").unwrap(), s.create_group("Tech").unwrap()));
@@ -1648,6 +1754,43 @@ mod tests {
         ] {
             draft_msg(st, DraftMsg::Drag(m));
         }
+    }
+
+    #[test]
+    fn the_user_picks_which_ungrouped_categories_the_ai_groups() {
+        let mut st = state();
+        let (ai, space) = with(&st, |s| (s.create_category("AI").unwrap(), s.create_category("Space").unwrap()));
+        reload(&mut st);
+        let _ = st.handle(Msg::Suggest);
+        let _ = st.handle(Msg::Planned(st.generation, Ok(suggest_plan(&st, Ok(())))));
+        let plan = |st: &State| match &st.suggest {
+            Some(Panel::Ready(p)) => p.clone(),
+            _ => panic!("the panel is ready"),
+        };
+        let p = plan(&st);
+        assert!(p.chosen_for_grouping(ai) && p.chosen_for_grouping(space), "all are chosen at first");
+        assert_eq!(p.grouping_line().as_deref(), Some("Put 2 of 2 ungrouped categories into groups:"));
+        let all_tokens = p.tokens;
+
+        assert_eq!(st.handle(Msg::ToggleGrouping(space)), Effect::None);
+        let p = plan(&st);
+        assert!(p.chosen_for_grouping(ai) && !p.chosen_for_grouping(space));
+        assert_eq!(p.input.leave_ungrouped, [space]);
+        assert!(p.tokens < all_tokens, "the estimate follows the choice");
+        let _ = st.view();
+
+        // None: nothing to group and no terms, so nothing to send.
+        let _ = st.handle(Msg::GroupAll(false));
+        let p = plan(&st);
+        assert_eq!(p.input.leave_ungrouped, [ai, space]);
+        assert_eq!(p.blocker().as_deref(), Some("Pick the categories to put into groups."));
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::None);
+
+        // All again, then Send carries the choice.
+        let _ = st.handle(Msg::GroupAll(true));
+        let _ = st.handle(Msg::ToggleGrouping(ai));
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::Suggest);
+        assert!(matches!(&st.suggest, Some(Panel::Running(p)) if p.input.leave_ungrouped == [ai]));
     }
 
     #[test]
@@ -1755,7 +1898,7 @@ mod tests {
             new_categories: vec![NewCategoryDraft {
                 temp: 1,
                 name: "AI".into(),
-                group: GroupRef::New(1),
+                group: Some(GroupRef::New(1)),
                 ticked: true,
             }],
             placements: vec![Placement { category: space, rename: None, group: GroupRef::New(1), ticked: true }],
@@ -1834,6 +1977,68 @@ mod tests {
     }
 
     #[test]
+    fn a_name_typed_in_the_draft_is_saved_when_another_name_field_opens() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, _, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        // A new group's name, then a click on a name to rename it.
+        draft_msg(&mut st, DraftMsg::NewGroup);
+        draft_msg(&mut st, DraftMsg::EditName("Mine".into()));
+        let Effect::SaveDraftAndFocus(id, plan) = st.handle(Msg::Draft(DraftMsg::StartRename(Name::Group(1)))) else {
+            panic!("the typed group is saved and the rename field focused");
+        };
+        let r = with(&st, |s| s.update_category_draft(id, &plan)).map_err(|e| e.to_string());
+        send(&mut st, Msg::DraftSaved(r));
+        let plan = st.draft.as_ref().unwrap().plan.clone();
+        assert!(plan.new_groups.iter().any(|g| g.by_user && g.name == "Mine"), "the typed group is kept");
+
+        // A rename, then + New group.
+        draft_msg(&mut st, DraftMsg::EditName("Teknologia".into()));
+        draft_msg(&mut st, DraftMsg::NewGroup);
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert_eq!(plan.new_groups[0].name, "Teknologia", "the typed rename is kept");
+        assert_eq!(pending(&st).unwrap().1, *plan, "and stored");
+    }
+
+    #[test]
+    fn a_new_category_without_a_group_can_be_ticked_filed_and_approved() {
+        let mut st = state();
+        add_terms(&st, &["Viihde"]);
+        let work = with(&st, |s| s.create_group("Work")).unwrap();
+        reload(&mut st);
+        let t = term_id(&st, "Viihde");
+        let draft = CategoryDraft {
+            new_categories: vec![NewCategoryDraft { temp: 1, name: "Viihde".into(), group: None, ticked: true }],
+            mappings: vec![Mapping { term: t, category: CategoryRef::New(1), ticked: true }],
+            ..Default::default()
+        };
+        open_draft(&mut st, &draft);
+
+        // Unticking and ticking it again leaves it ungrouped.
+        draft_msg(&mut st, DraftMsg::Tick(Name::Category(CategoryRef::New(1))));
+        assert!(!st.draft.as_ref().unwrap().plan.new_categories[0].ticked);
+        draft_msg(&mut st, DraftMsg::Tick(Name::Category(CategoryRef::New(1))));
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert!(plan.new_categories[0].ticked && plan.new_categories[0].group.is_none());
+
+        // Dropped on a group, it is filed there.
+        draft_drag(&mut st, DItem::Category(CategoryRef::New(1)), DTarget::Group(GroupRef::Existing(work)));
+        assert_eq!(st.draft.as_ref().unwrap().plan.new_categories[0].group, Some(GroupRef::Existing(work)));
+
+        // Back to ungrouped and approved: it is created in Ungrouped and takes its term.
+        st.draft.as_mut().unwrap().plan.new_categories[0].group = None;
+        let plan = st.draft.as_ref().unwrap().plan.clone();
+        let id = pending(&st).unwrap().0;
+        with(&st, |s| s.apply_category_draft(id, &plan)).unwrap();
+        reload(&mut st);
+        assert_eq!(st.snap.ungrouped.iter().map(|c| c.category.name.as_str()).collect::<Vec<_>>(), ["Viihde"]);
+        assert!(st.snap.unsorted.is_empty());
+    }
+
+    #[test]
     fn dragging_category_into_user_group_updates_draft() {
         let mut st = state();
         add_terms(&st, &["Tekoäly"]);
@@ -1855,7 +2060,7 @@ mod tests {
         draft_drag(&mut st, DItem::Category(CategoryRef::New(1)), DTarget::Group(GroupRef::New(mine)));
         draft_drag(&mut st, DItem::Category(CategoryRef::Existing(space)), DTarget::Group(GroupRef::Existing(work)));
         let plan = &st.draft.as_ref().unwrap().plan;
-        assert_eq!(plan.new_categories[0].group, GroupRef::New(mine));
+        assert_eq!(plan.new_categories[0].group, Some(GroupRef::New(mine)));
         assert_eq!(plan.placements[0].group, GroupRef::Existing(work));
 
         // Terms move between categories; placements are renamed by clicking.

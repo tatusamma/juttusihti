@@ -32,6 +32,7 @@ mod research;
 mod review;
 mod secrets;
 mod settings;
+mod startup;
 mod style;
 mod timeline_view;
 
@@ -56,17 +57,13 @@ fn main() -> iced::Result {
 
     let dir = data_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("cannot create data directory {}: {e}", dir.display());
-        std::process::exit(1);
+        startup::fail(&startup::data_dir_text(&dir, &e));
     }
     crash_log::install(dir.join("crash.log"));
     let db_path = dir.join("juttusihti.db");
     let store = match juttusihti_core::store::Store::open(&db_path) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("cannot open database {}: {e}", db_path.display());
-            std::process::exit(1);
-        }
+        Err(e) => startup::fail(&startup::open_text(&db_path, &e)),
     };
     tracing::info!(path = %db_path.display(), "database opened");
     // The renderer is chosen before the window exists. An explicit

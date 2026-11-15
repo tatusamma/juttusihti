@@ -1,0 +1,2 @@
+# Patched upstream crates: keep them byte-for-byte as published (see crates/browser/vendor/README.md).
+crates/browser/vendor/** -text

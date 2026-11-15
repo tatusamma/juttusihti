@@ -53,17 +53,21 @@ Articles it has checked are not sent again, and each press handles the next newe
 
 On the Categories screen, **+ New group** and **+ New category** add them; drag a category onto
 a group (or use **Move to…**) to file it. Publisher categories, the section names a feed gives its
-articles, are collected as terms: file one under a category with **Move to…**, leave it in
-**Unsorted**, or **Ignore** it. Publisher categories are collected from now on; articles fetched
-earlier get them only if they are still in the feed at the next refresh.
+articles, are collected as terms and filed under the category with the same name: at once when
+you have one, otherwise in a new category in Ungrouped once the name is on two articles ("Kotimaa"
+from two feeds lands in one category). Until then a one-off name, such as a player or a place,
+waits under **Unsorted terms**. Move a term to another category with **Move to…**, or to
+**Unsorted**, or **Ignore** it; your choice stays at later refreshes. Publisher categories are collected from now on; articles fetched earlier get
+them only if they are still in the feed at the next refresh.
 
 ![The Categories screen: groups, categories, a feed in a group and feed defaults](screenshots/categories.png)
 
 **Feed defaults and feeds in groups.** Some feeds send no publisher categories but stay on one
 theme. Give such a feed a **default category** in its edit form (**Edit feed**, in the feed menu
 or the **⋯** menu): it files the feed's articles whose publisher categories give no category,
-old articles too, and those articles are never sent to the ✨. Clearing the default brings back
-any category AI had given them. A feed can also sit in one **group**, so all of its articles show
+old articles too, and those articles are never sent to the ✨. Its publisher categories are not
+filed automatically while it has a default (file one by hand if you want it); clearing the default
+lets them be filed at the next refresh and brings back any category AI had given its articles. A feed can also sit in one **group**, so all of its articles show
 under that group whatever their categories. Pick the group in the edit form, or type a name in
 "or new group" to create the group and file the feed in one step. On the Categories screen,
 **Add feed…** in a group files a feed there; drag a feed row to another group or to Ungrouped,
@@ -78,10 +82,13 @@ list for filtering. In the article view, the **Category** row shows the article'
 where it came from (from the feed, the default of its feed, from AI, or set by you); pick another to change it, or
 **Automatic** to clear your choice and return to the feed's or the AI's.
 
-**✨ Suggest categories** asks your AI to group your unsorted terms. It first shows what will be
-sent (the publisher terms with their feed titles, plus your group and category names; no article
-text) and an estimate, and sends only when you consent. The answer is an editable draft; nothing
-is saved until you press **Approve**.
+**✨ Suggest categories** asks your AI to sort your ungrouped categories into groups, and to file
+the publisher terms still in Unsorted. Your groups stay as they are and keep what is in them; the
+AI proposes new groups for the sections they do not cover, and a new category that fits no group
+goes to Ungrouped. It first shows what will be sent (the publisher terms with their feed titles,
+plus your group and category names; no article text) and an estimate, and sends only when you
+consent. Tick the ungrouped categories you want put into groups (**All** and **None** help with
+a long list): only those are grouped, and the others stay in Ungrouped. The answer is an editable draft; nothing is saved until you press **Approve**.
 
 ## Full articles
 
@@ -304,4 +311,6 @@ cache.
 ![Settings](screenshots/settings.png)
 
 All data is in one SQLite database on this computer; its path is shown at the bottom of
-Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else.
+Settings. Set `JUTTUSIHTI_DATA_DIR` to keep it somewhere else. Before an update changes the
+database, a copy of it is saved next to it as `juttusihti-before-schema-N.db`; an older version
+of Juttusihti can open that copy, but not the updated database.

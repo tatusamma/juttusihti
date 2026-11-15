@@ -263,12 +263,13 @@ tokenizer, or AI-assisted query expansion.
     - Markers, labels and the attribution strip are drawn in a layer above the tiles, and
       tiles are clipped to the map area with the CPU renderer too.
 - **Full articles**: done on Windows. The built-in browser engine (`juttusihti-browser`, Servo
-  0.7 with no window) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
+  0.8 with no window) fetches one article per click with a throwaway profile, EasyList/EasyPrivacy blocking,
   DuckDuckGo autoconsent rules and Readability.js. Checked against Ilta-Sanomat (3 of 3 free
   articles in full) and Helsingin Sanomat (2 of 3; the third is subscriber-only and keeps its
   public opening). Servo does not expose HTTP status codes, so a refusing site shows up as "no
   article text". Released in 0.4.0 (signed on Windows); the Linux packages are built and tested
-  in CI but not yet tried on a desktop machine.
+  in CI but not yet tried on a desktop machine. 0.7.0 moved it to Servo 0.8 and builds patched
+  copies of four crates Servo pins (see crates/browser/vendor/README.md).
 - **Fact check**: done. One extraction call picks up to 8 claims and judges four JSN points; one
   call per claim searches with the provider's own web search, Wikipedia and (with a key) Google
   Fact Check Tools, with evidence rules enforced in code. Tried against OpenAI on a ChatGPT plan;
@@ -280,7 +281,11 @@ tokenizer, or AI-assisted query expansion.
   statement that a test compares under every scope and view. ✨ Suggest categories (two requests,
   an editable draft) was tried against OpenAI in its first, one-request form; the two-request
   form, the ✨ on Uncategorized with groups, feed defaults and feeds in groups are covered by
-  tests. Released in 0.6.0.
+  tests. Released in 0.6.0. In 0.7.0 publisher terms are filed automatically (under the category
+  with the same name, or a new one once the name is on two articles; never for a feed with a
+  default category), Suggest categories groups only the categories you tick and keeps new ones
+  that fit no group in Ungrouped; its grouping prompt was tried against OpenAI. The database is
+  copied before every schema upgrade.
 - **M8 Distribution**: done, except checks on real Linux desktops.
   - GitHub Actions: CI on every push and pull request; a `v*` tag builds the Linux packages
     onto a draft release, and the signed Windows installer is added locally (RELEASING.md).

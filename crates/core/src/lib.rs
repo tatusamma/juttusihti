@@ -34,6 +34,9 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("database schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: u32, supported: u32 },
+    /// The copy made before an upgrade failed, so the upgrade did not run.
+    #[error("not upgrading the database: {0}")]
+    Backup(String),
     #[error("feed parse error: {0}")]
     FeedParse(String),
     #[error("OPML error: {0}")]

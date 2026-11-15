@@ -70,7 +70,7 @@ const UI_NOISE: &[&str] = &[
 /// What was extracted from a loaded article page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Extracted {
-    /// HTTP status of the main document, when the engine exposes it. Servo 0.7 does not: its
+    /// HTTP status of the main document, when the engine exposes it. Servo (0.7 and 0.8) does not: its
     /// resource-load hooks see requests only, never responses, and it has no navigation-timing
     /// `responseStatus`. So a refusal page (403) surfaces as `NoArticle`, never as `Refused`.
     pub main_status: Option<u16>,
@@ -136,14 +136,17 @@ impl Delegate {
         let kind = resource_kind(request.destination);
         if request.is_for_main_frame && kind == ResourceKind::Document {
             // The page the reader asked for.
-            *self.page_url.borrow_mut() = Some(request.url.clone());
+            *self.page_url.borrow_mut() = Some(request.url.as_url().clone());
             return false;
         }
         if kind == ResourceKind::Media || (self.block_images && kind == ResourceKind::Image) {
             return true;
         }
         let page = self.page_url.borrow();
-        let source = request.referrer_url.as_ref().or(page.as_ref()).map(Url::as_str).unwrap_or("");
+        let source = match &request.referrer_url {
+            Some(referrer) => referrer.as_str(),
+            None => page.as_ref().map_or("", Url::as_str),
+        };
         self.blocker.should_block(request.url.as_str(), source, kind)
     }
 }
@@ -156,7 +159,8 @@ impl WebViewDelegate for Delegate {
                 self.load_complete.set(false);
             }
             LoadStatus::HeadParsed => {}
-            LoadStatus::Complete => self.load_complete.set(true),
+            // Stopped (by `window.stop()` or the embedder): nothing more will load either.
+            LoadStatus::Complete | LoadStatus::Stopped => self.load_complete.set(true),
         }
     }
 
@@ -198,7 +202,7 @@ impl ServoDelegate for BlockEverythingElse {
 
 /// Answers a load with an empty 204 instead of letting it reach the network.
 fn block(load: WebResourceLoad) {
-    let response = WebResourceResponse::new(load.request().url.clone())
+    let response = WebResourceResponse::new(load.request().url.as_url().clone())
         .status_code(http::StatusCode::NO_CONTENT)
         .status_message(b"No Content".to_vec());
     load.intercept(response).finish();
@@ -237,9 +241,10 @@ pub fn load_and_extract(page: &PageLoad, blocker: Rc<Blocker>) -> (Result<Loaded
 fn run(page: &PageLoad, blocker: Rc<Blocker>, stats: Rc<Cell<LoadStats>>) -> Result<Loaded, EngineError> {
     let deadline = Instant::now() + page.timeout;
 
-    let rendering_context = Rc::new(with_current_gl_context(|| {
-        SoftwareRenderingContext::new(VIEWPORT).map_err(|e| EngineError::Engine(format!("rendering context: {e:?}")))
-    })??);
+    let rendering_context = Rc::new(
+        SoftwareRenderingContext::new(VIEWPORT)
+            .map_err(|e| EngineError::Engine(format!("rendering context: {e:?}")))?,
+    );
     rendering_context.make_current().map_err(|e| EngineError::Engine(format!("rendering context: {e:?}")))?;
 
     // hard_fail defaults to true, which aborts the whole process on a script panic. Off, a page
@@ -250,7 +255,7 @@ fn run(page: &PageLoad, blocker: Rc<Blocker>, stats: Rc<Cell<LoadStats>>) -> Res
         hard_fail: false,
         ..Opts::default()
     };
-    // IS and HS (Next.js) crash without IntersectionObserver, which Servo 0.7 ships behind this
+    // IS and HS (Next.js) crash without IntersectionObserver, which Servo (0.7 and 0.8) ships behind this
     // experimental-feature pref. It only enables a standard web API; nothing about the browser's
     // identity changes. Service workers stay off (Servo's default).
     let preferences = Preferences { dom_intersection_observer_enabled: true, ..Preferences::default() };
@@ -514,36 +519,6 @@ const PICTURE_FETCH_JS: &str = r#"(function (url, max) {
 /// `null` while the download runs, then `{"data": base64 | null, "error": string | null}`.
 const PICTURE_POLL_JS: &str = "(function () { var s = window.__juttusihtiPicture; \
      return s && s.done ? JSON.stringify({ data: s.data, error: s.error }) : null; })()";
-
-/// Runs `create` while a throwaway GL context is current on this thread.
-///
-/// Servo 0.7's `SoftwareRenderingContext::new` loads its GL function pointers and reads
-/// `GL_VERSION` before it makes its own context current. On Windows (WGL) nothing is current at
-/// that point, so the load panics. A context from the same software adapter, current only while
-/// Servo's is created, gives it valid pointers; Servo's context is current when `create` returns.
-fn with_current_gl_context<T>(create: impl FnOnce() -> T) -> Result<T, EngineError> {
-    use surfman::{ContextAttributeFlags, ContextAttributes, GLApi, GLVersion};
-
-    let gl_error = |e: surfman::Error| EngineError::Engine(format!("GL bootstrap: {e:?}"));
-    let connection = surfman::Connection::new().map_err(gl_error)?;
-    let adapter = connection.create_software_adapter().map_err(gl_error)?;
-    let device = connection.create_device(&adapter).map_err(gl_error)?;
-    let version = match connection.gl_api() {
-        GLApi::GLES => GLVersion { major: 3, minor: 0 },
-        GLApi::GL => GLVersion { major: 3, minor: 2 },
-    };
-    let descriptor = device
-        .create_context_descriptor(&ContextAttributes {
-            flags: ContextAttributeFlags::ALPHA | ContextAttributeFlags::DEPTH | ContextAttributeFlags::STENCIL,
-            version,
-        })
-        .map_err(gl_error)?;
-    let mut context = device.create_context(&descriptor, None).map_err(gl_error)?;
-    device.make_context_current(&context).map_err(gl_error)?;
-    let created = create();
-    let _ = device.destroy_context(&mut context);
-    Ok(created)
-}
 
 /// `url` parsed, when it is an http or https address.
 fn web_url(url: &str) -> Option<Url> {

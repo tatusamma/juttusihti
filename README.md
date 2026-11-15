@@ -157,8 +157,8 @@ build it. Build it into the same `target` folder, so the app finds it next to it
 cargo build --release --locked --manifest-path crates/browser/Cargo.toml --target-dir target
 ```
 
-Do not run a plain `cargo update` there: the lock file pins a pre-release crate. Servo also
-needs LLVM/clang (set `LIBCLANG_PATH` if it is not found) and, for the first build, network
+Servo pins exact versions of two crates with security advisories, so the helper builds patched
+copies of them from `crates/browser/vendor` (see its README). Servo also needs LLVM/clang (set `LIBCLANG_PATH` if it is not found) and, for the first build, network
 access to download a prebuilt SpiderMonkey; the first build takes a few minutes. On Windows it
 needs a working OpenGL driver at run time. On Debian/Ubuntu add `clang libclang-dev cmake
 pkg-config python3 libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev

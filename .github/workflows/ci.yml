@@ -98,3 +98,6 @@ jobs:
           toolchain: stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+      # The browser helper's own lock file. Its patched crates (crates/browser/vendor) are path
+      # crates, which cargo audit skips; see SECURITY.md.
+      - run: cargo audit --file crates/browser/Cargo.lock

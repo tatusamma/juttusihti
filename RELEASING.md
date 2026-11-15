@@ -29,7 +29,7 @@ On a `tero-k/release-X.Y.Z` branch:
    `crates/browser/Cargo.toml` and `crates/article/Cargo.toml`, which name their versions
    explicitly (the helper is its own workspace and cannot inherit the workspace version).
 2. `cargo check` so `Cargo.lock` picks up the new version, then refresh only these two entries
-   in the helper's own lock file (never a plain `cargo update` there: it pins a pre-release crate):
+   in the helper's own lock file:
 
    ```sh
    cargo update -p juttusihti-browser -p juttusihti-article --manifest-path crates/browser/Cargo.toml

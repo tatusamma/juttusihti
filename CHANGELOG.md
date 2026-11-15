@@ -9,6 +9,82 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
+### Changed
+
+- **Publisher categories are accepted automatically.** A section name a feed gives its articles
+  is filed under the category with the same name: at once when you have one, otherwise in a new
+  category in Ungrouped once the name is on two articles, so "Kotimaa" from Yle and from
+  Ilta-Sanomat land in one category and one-off names (a player, a place) wait under Unsorted
+  terms instead of each becoming a category. Terms already waiting in Unsorted are filed the same
+  way once, when you update. A term you move to another category, back to Unsorted, or Ignore
+  stays that way at later refreshes. A feed with a default category keeps its articles there:
+  its publisher categories are not filed automatically while it has one.
+- ✨ Suggest categories lets you pick which ungrouped categories it puts into groups: tick them in
+  its panel (All and None help with a long list); the others stay in Ungrouped.
+- The full-article browser engine is Servo 0.8. Iltalehti, Ilta-Sanomat, Helsingin Sanomat and
+  Yle articles were checked against 0.6.0's engine: the text is the same or more complete, and
+  Yle articles now get their picture.
+- Dependencies were updated, including `async-executor` 1.14.1 (1.14.0 was yanked).
+
+### Upgrading from 0.6
+
+The first start of this version updates your database once:
+
+- Before anything changes, a copy of the database is saved next to it as
+  `juttusihti-before-schema-11.db` (Settings shows the folder). 0.6 cannot open the updated
+  database; to go back, quit Juttusihti, replace `juttusihti.db` with that copy, and remove
+  `juttusihti.db-wal` and `juttusihti.db-shm` if they are there.
+- Publisher categories that were waiting under Unsorted terms are filed: under the category with
+  the same name when you have one, otherwise in a new category in Ungrouped when the name is on
+  at least two articles. The rest keep waiting until a second article has them.
+- Terms you had filed or ignored, your groups and categories, labels, and the categories you or
+  the AI set on articles do not change. Neither do the terms of feeds with a default category.
+- To undo a filing, move the term back to **Unsorted** or **Ignore** it; that choice now stays at
+  later refreshes. Delete any new category you do not want on the Categories screen.
+- The new categories start in Ungrouped. To have them put into groups, use **✨ Suggest
+  categories** and tick the ones you want grouped: the AI files each under one of your groups,
+  or proposes a new group when none fits, and you review the result before anything is saved.
+
+### Fixed
+
+- When Juttusihti cannot start (its data folder cannot be created, or its database cannot be
+  opened or updated), it now says why in a message box. On Windows it used to just not start.
+- ✨ Suggest categories no longer comes back with "The AI suggested no changes" when you have no
+  groups yet: a new category that fits no group now goes to Ungrouped instead of being dropped,
+  and the review shows it there.
+- A typed group or category name is no longer lost when you open another name field: it is
+  saved first, on the Categories screen and in the review of suggested categories. The name
+  field has a Save button, and creating a group says so.
+- ✨ Suggest categories no longer puts nearly every category into one existing group (such as
+  "Kotimaa") and then suggests no grouping at all. Your groups are now treated as sections, not
+  catch-alls: the AI proposes new sections such as Sport or Culture for the rest, and it is told
+  how many categories one group may take.
+- On Windows, a window no longer flashes in the top-left corner and takes the focus for a
+  moment when a full article is fetched. It came from the graphics setup inside the browser
+  engine (surfman), which the engine now builds patched.
+
+### Security
+
+- Both advisories that 0.6.0 listed as not fixable yet are fixed in the full-article browser
+  engine. Servo pins the affected versions, so the engine builds patched copies:
+  - The SQLite inside the engine is 3.54.1 (CVE-2026-119375, RUSTSEC-2026-0459).
+  - Its WebCrypto uses the released, constant-time `rsa` 0.10.0 (Marvin attack,
+    RUSTSEC-2023-0071).
+
+  The [dependency audit](https://github.com/tero-k/juttusihti/blob/master/SECURITY.md) lists no
+  vulnerabilities, and CI now audits the engine's lock file too.
+
+### Known issues
+
+- ✨ Suggest categories' new grouping, its category picker and its handling of categories that fit
+  no group were tried against the real service only with OpenAI. Other providers are covered by
+  tests against local fake servers.
+- The full-article browser engine's move to Servo 0.8 was checked against news sites on Windows.
+  On Linux it is covered by the automated tests only.
+- With the feed edit form open in a very small window, the feed list shrinks to a row and a half.
+
 ## [0.6.0] - 2026-11-14
 
 ### Added
@@ -277,6 +353,7 @@ for Windows and Linux.
   `työttömyysturva*`.
 
 [Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.6.0...HEAD
+[0.7.0]: https://github.com/tero-k/juttusihti/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tero-k/juttusihti/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tero-k/juttusihti/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tero-k/juttusihti/compare/v0.3.0...v0.4.0

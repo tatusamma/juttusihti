@@ -249,6 +249,7 @@ impl Store {
                         insert_term.execute(params![feed_id, t.name, normalized, t.scheme, fetched_at])?;
                         let tid: i64 = term_id.query_row(params![feed_id, normalized, t.scheme], |r| r.get(0))?;
                         link_term.execute(params![article_id, tid])?;
+                        file_waiting_terms(&tx, &normalized, &t.name)?;
                     }
                 }
             }
@@ -433,6 +434,62 @@ fn feed_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Feed> {
         default_category_id: r.get(9)?,
         category_group_id: r.get(10)?,
     })
+}
+
+/// Articles a publisher category must be on, across feeds, before a new category is made for
+/// it. One-off names (a player, a place) wait in Unsorted instead of each becoming a category.
+pub const AUTO_CATEGORY_MIN_ARTICLES: i64 = 2;
+
+/// Files the waiting (not yet settled) terms named `normalized` under the category with that
+/// name: at once when it exists, otherwise by creating it in Ungrouped once the name is on
+/// [`AUTO_CATEGORY_MIN_ARTICLES`] articles. Filing settles a term, as does anything the user
+/// does with it, so a term they moved, ignored or whose category they deleted stays as they
+/// left it. A name that cannot be a category (no letters or digits) stays unsorted. Terms of a
+/// feed with a default category are left waiting (its articles go to that category) and do
+/// not count towards the articles; clearing the default lets them be filed at the next refresh.
+fn file_waiting_terms(conn: &Connection, normalized: &str, name: &str) -> Result<()> {
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    let waiting: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM feed_terms
+                       WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0
+                         AND feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL))",
+        [normalized],
+        |r| r.get(0),
+    )?;
+    if !waiting {
+        return Ok(());
+    }
+    let existing: Option<i64> =
+        conn.query_row("SELECT id FROM categories WHERE normalized = ?1", [normalized], |r| r.get(0)).optional()?;
+    let category = match existing {
+        Some(id) => id,
+        None => {
+            let articles: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT a.article_id) FROM article_terms a JOIN feed_terms t ON t.id = a.term_id
+                 WHERE t.normalized = ?1 AND t.settled = 0 AND t.category_id IS NULL AND t.ignored = 0
+                   AND t.feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL)",
+                [normalized],
+                |r| r.get(0),
+            )?;
+            if articles < AUTO_CATEGORY_MIN_ARTICLES {
+                return Ok(());
+            }
+            match crate::categories::insert_category(conn, name, None) {
+                Ok((id, _)) => id,
+                Err(Error::Invalid(_)) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    conn.execute(
+        "UPDATE feed_terms SET category_id = ?2, settled = 1
+         WHERE normalized = ?1 AND settled = 0 AND category_id IS NULL AND ignored = 0
+           AND feed_id NOT IN (SELECT id FROM feeds WHERE default_category_id IS NOT NULL)",
+        params![normalized, category],
+    )?;
+    Ok(())
 }
 
 fn non_empty<'a>(s: &'a str, what: &str) -> Result<&'a str> {

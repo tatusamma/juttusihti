@@ -40,7 +40,8 @@ pub struct NewGroupDraft {
 pub struct NewCategoryDraft {
     pub temp: u32,
     pub name: String,
-    pub group: GroupRef,
+    /// `None`: the category goes to Ungrouped.
+    pub group: Option<GroupRef>,
     pub ticked: bool,
 }
 
@@ -79,12 +80,15 @@ pub struct ApplyReport {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanInput {
     pub groups: Vec<Group>,
     pub categories: Vec<CategoryNode>,
     pub terms: Vec<TermRow>,
     pub more_terms: usize,
+    /// Ungrouped categories the user keeps out of the grouping: they are not sent to be put into
+    /// groups and are never placed, but terms can still be filed under them.
+    pub leave_ungrouped: Vec<CategoryId>,
 }
 
 impl CategoryDraft {
@@ -99,7 +103,7 @@ impl CategoryDraft {
     /// A new group counts if ticked and something counting goes into it.
     pub fn group_counts(&self, temp: u32) -> bool {
         self.new_groups.iter().any(|g| g.temp == temp && g.ticked)
-            && (self.new_categories.iter().any(|c| c.ticked && c.group == GroupRef::New(temp))
+            && (self.new_categories.iter().any(|c| c.ticked && c.group == Some(GroupRef::New(temp)))
                 || self.placements.iter().any(|p| p.ticked && p.group == GroupRef::New(temp)))
     }
 
@@ -111,7 +115,9 @@ impl CategoryDraft {
     }
 
     pub fn category_counts(&self, temp: u32) -> bool {
-        self.new_categories.iter().any(|c| c.temp == temp && c.ticked && self.group_ref_counts(c.group))
+        self.new_categories
+            .iter()
+            .any(|c| c.temp == temp && c.ticked && c.group.is_none_or(|g| self.group_ref_counts(g)))
     }
 
     pub fn category_ref_counts(&self, c: CategoryRef) -> bool {
@@ -182,7 +188,7 @@ impl Store {
                 r.get(0)
             })?;
         let more_terms = (total as usize).saturating_sub(terms.len());
-        Ok(PlanInput { groups, categories, terms, more_terms })
+        Ok(PlanInput { groups, categories, terms, more_terms, leave_ungrouped: Vec::new() })
     }
 
     pub fn save_category_draft(&self, draft: &CategoryDraft, provider: Provider, model: &str) -> Result<i64> {
@@ -279,21 +285,28 @@ impl Store {
                 Ok(made)
             };
 
-        for c in draft.new_categories.iter().filter(|c| c.ticked && draft.group_ref_counts(c.group)) {
+        for c in draft.new_categories.iter().filter(|c| c.ticked && c.group.is_none_or(|g| draft.group_ref_counts(g))) {
             let name = c.name.trim();
             let normalized = normalize_text(name);
             if normalized.is_empty() {
                 skipped += 1;
                 continue;
             }
-            let Some(group) = resolve_group(&tx, c.group, &mut applied, &mut skipped)? else {
-                skipped += 1;
-                continue;
+            // No group: the category goes to Ungrouped.
+            let group = match c.group {
+                Some(r) => match resolve_group(&tx, r, &mut applied, &mut skipped)? {
+                    Some(g) => Some(g),
+                    None => {
+                        skipped += 1;
+                        continue;
+                    }
+                },
+                None => None,
             };
             let (category, _) = insert_category(&tx, name, None)?;
             let grouped: Option<GroupId> =
                 tx.query_row("SELECT group_id FROM categories WHERE id = ?1", [category], |r| r.get(0))?;
-            if grouped.is_none() {
+            if let (None, Some(group)) = (grouped, group) {
                 place(&tx, category, group)?;
             }
             cats.insert(c.temp, category);
@@ -340,7 +353,7 @@ impl Store {
             };
             let n = match category {
                 Some(c) => tx.execute(
-                    "UPDATE feed_terms SET category_id = ?1 WHERE id = ?2 AND category_id IS NULL AND ignored = 0",
+                    "UPDATE feed_terms SET category_id = ?1, settled = 1 WHERE id = ?2 AND category_id IS NULL AND ignored = 0",
                     params![c, m.term],
                 )?,
                 None => 0,

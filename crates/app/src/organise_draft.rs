@@ -12,7 +12,9 @@ use juttusihti_core::ai_defaults::AiDefaults;
 use juttusihti_core::budget::Limits;
 use juttusihti_core::categories::CategoryId;
 use juttusihti_core::categories::{CategoryNode, TermId, TermRow};
-use juttusihti_core::category_draft::{ApplyReport, CategoryDraft, CategoryRef, GroupRef, NewGroupDraft, PlanInput};
+use juttusihti_core::category_draft::{
+    ApplyReport, CategoryDraft, CategoryRef, GroupRef, NewCategoryDraft, NewGroupDraft, PlanInput,
+};
 use juttusihti_core::pricing::{Billing, Catalog, Micros, Price, Provider, Usage, format_usd};
 
 use crate::db::Db;
@@ -46,25 +48,82 @@ pub struct SuggestPlan {
 
 impl SuggestPlan {
     pub fn build(d: &AiDefaults, input: PlanInput, price: Option<Price>, ready: Result<(), String>) -> Self {
-        let (worst_in, worst_out) = categorize::estimate_tokens(&input);
-        let worst = Usage { input: worst_in, output: worst_out, ..Default::default() };
-        Self {
+        let mut plan = Self {
             provider: d.provider,
             billing: d.billing(),
             model: d.model(),
-            tokens: worst.total(),
-            cost: price.as_ref().and_then(|p| p.cost(&worst, false)),
+            tokens: 0,
+            cost: None,
             price,
             input,
             limits: run_limits(d),
             ready,
+        };
+        plan.estimate();
+        plan
+    }
+
+    /// Works out the worst case of what is sent now.
+    fn estimate(&mut self) {
+        let (worst_in, worst_out) = categorize::estimate_tokens(&self.input);
+        let worst = Usage { input: worst_in, output: worst_out, ..Default::default() };
+        self.tokens = worst.total();
+        self.cost = self.price.as_ref().and_then(|p| p.cost(&worst, false));
+    }
+
+    /// The ungrouped categories, in tree order: the ones the user may send to be grouped.
+    pub fn ungrouped(&self) -> impl Iterator<Item = &CategoryNode> {
+        self.input.categories.iter().filter(|c| c.group_id.is_none())
+    }
+
+    /// Whether the ungrouped category `id` is sent to be put into a group.
+    pub fn chosen_for_grouping(&self, id: CategoryId) -> bool {
+        !self.input.leave_ungrouped.contains(&id)
+    }
+
+    fn chosen_count(&self) -> usize {
+        self.ungrouped().filter(|c| self.chosen_for_grouping(c.category.id)).count()
+    }
+
+    pub fn toggle_grouping(&mut self, id: CategoryId) {
+        if !self.ungrouped().any(|c| c.category.id == id) {
+            return;
         }
+        let leave = &mut self.input.leave_ungrouped;
+        match leave.iter().position(|l| *l == id) {
+            Some(i) => {
+                leave.remove(i);
+            }
+            None => leave.push(id),
+        }
+        let order: Vec<CategoryId> = self.ungrouped().map(|c| c.category.id).collect();
+        self.input.leave_ungrouped.sort_by_key(|l| order.iter().position(|o| o == l));
+        self.estimate();
+    }
+
+    /// Chooses every ungrouped category (true) or none.
+    pub fn group_all(&mut self, on: bool) {
+        self.input.leave_ungrouped = if on { Vec::new() } else { self.ungrouped().map(|c| c.category.id).collect() };
+        self.estimate();
+    }
+
+    /// The heading of the category choice, when there are ungrouped categories.
+    pub fn grouping_line(&self) -> Option<String> {
+        let total = self.ungrouped().count();
+        (total > 0).then(|| {
+            let what = if total == 1 { "ungrouped category" } else { "ungrouped categories" };
+            format!("Put {} of {total} {what} into groups:", self.chosen_count())
+        })
     }
 
     /// Why Send is disabled, if it is.
     pub fn blocker(&self) -> Option<String> {
-        if self.input.terms.is_empty() && self.input.categories.iter().all(|c| c.group_id.is_some()) {
-            return Some("Nothing is unsorted or ungrouped.".into());
+        if self.input.terms.is_empty() && self.chosen_count() == 0 {
+            return Some(if self.ungrouped().next().is_some() {
+                "Pick the categories to put into groups.".into()
+            } else {
+                "Nothing is unsorted or ungrouped.".into()
+            });
         }
         if let Err(e) = &self.ready {
             return Some(e.clone());
@@ -200,6 +259,9 @@ pub fn view_panel(panel: &Panel) -> Element<'_, Msg> {
                 style::note(p.limit_line()),
             ]
             .spacing(SPACE[1]);
+            if let Some(line) = p.grouping_line() {
+                col = col.push(view_grouping_choice(p, line));
+            }
             let blocker = p.blocker();
             if let Some(why) = &blocker {
                 col = col.push(text(why.clone()).size(SIZE_SMALL).style(style::danger));
@@ -216,6 +278,35 @@ pub fn view_panel(panel: &Panel) -> Element<'_, Msg> {
         }
     };
     container(content).padding(SPACE[3]).width(Fill).style(style::card).into()
+}
+
+/// The ungrouped categories with a tick each: the ticked ones go to the AI to be put into one of
+/// your groups or a new one; the others stay in Ungrouped.
+fn view_grouping_choice(p: &SuggestPlan, line: String) -> Element<'_, Msg> {
+    let quick = |label: &'static str, on: bool| style::quiet_button(None, label, style::quiet, Some(Msg::GroupAll(on)));
+    let heading =
+        row![text(line).size(SIZE_SMALL).style(style::body).width(Fill), quick("All", true), quick("None", false)]
+            .spacing(SPACE[1])
+            .align_y(Center);
+    let mut list = column![].spacing(2.0);
+    for c in p.ungrouped() {
+        let id = c.category.id;
+        list = list.push(
+            checkbox(p.chosen_for_grouping(id))
+                .label(c.category.name.as_str())
+                .size(SIZE_SMALL)
+                .text_size(SIZE_SMALL)
+                .style(style::checkbox)
+                .on_toggle(move |_| Msg::ToggleGrouping(id)),
+        );
+    }
+    column![
+        heading,
+        container(scrollable(list)).max_height(180.0),
+        style::note("Unticked categories stay in Ungrouped. Your groups and what is in them do not change."),
+    ]
+    .spacing(SPACE[0])
+    .into()
 }
 
 /// The message after Approve.
@@ -278,6 +369,9 @@ pub enum Outcome {
     /// The draft changed: store it.
     Changed,
     Focus,
+    /// The draft changed (a name typed in the field that closed) and a new name field opened:
+    /// store it and focus the field.
+    ChangedAndFocus,
     Approve,
     Discard,
 }
@@ -365,6 +459,14 @@ impl Draft {
                 self.saving = true;
                 Outcome::Changed
             }
+            Outcome::ChangedAndFocus if self.saving => {
+                self.dirty = true;
+                Outcome::Focus
+            }
+            Outcome::ChangedAndFocus => {
+                self.saving = true;
+                Outcome::ChangedAndFocus
+            }
             o @ (Outcome::Approve | Outcome::Discard) => {
                 self.closing = true;
                 self.edit = None;
@@ -372,6 +474,15 @@ impl Draft {
                 o
             }
             o => o,
+        }
+    }
+
+    /// Closes the name field and applies what it holds; true when the draft changed.
+    fn save_typed(&mut self, snap: &Snapshot) -> bool {
+        match self.edit.take() {
+            Some(Edit::NewGroup(typed)) => self.add_group(typed.trim()),
+            Some(Edit::Rename(n, typed)) => self.rename(n, typed.trim(), snap),
+            None => false,
         }
     }
 
@@ -390,8 +501,13 @@ impl Draft {
                 None => Outcome::None,
             },
             DraftMsg::StartRename(n) => {
+                let saved = self.save_typed(snap);
                 self.edit = self.shown_name(n, snap).map(|s| Edit::Rename(n, s));
-                if self.edit.is_some() { Outcome::Focus } else { Outcome::None }
+                match (saved, self.edit.is_some()) {
+                    (true, true) => Outcome::ChangedAndFocus,
+                    (false, true) => Outcome::Focus,
+                    (saved, false) => changed(saved),
+                }
             }
             DraftMsg::EditName(s) => {
                 if let Some(Edit::NewGroup(typed) | Edit::Rename(_, typed)) = &mut self.edit {
@@ -399,14 +515,11 @@ impl Draft {
                 }
                 Outcome::None
             }
-            DraftMsg::SaveName => match self.edit.take() {
-                Some(Edit::NewGroup(typed)) => changed(self.add_group(typed.trim())),
-                Some(Edit::Rename(n, typed)) => changed(self.rename(n, typed.trim(), snap)),
-                None => Outcome::None,
-            },
+            DraftMsg::SaveName => changed(self.save_typed(snap)),
             DraftMsg::NewGroup => {
+                let saved = self.save_typed(snap);
                 self.edit = Some(Edit::NewGroup(String::new()));
-                Outcome::Focus
+                if saved { Outcome::ChangedAndFocus } else { Outcome::Focus }
             }
             DraftMsg::Escape => {
                 self.drag.update(DragMsg::Cancel);
@@ -439,23 +552,22 @@ impl Draft {
     /// Applies dropping `item` on `target`; false when nothing changes.
     pub fn drop(&mut self, item: DItem, target: DTarget) -> bool {
         match (item, target) {
-            (DItem::Category(c), DTarget::Group(g)) => {
-                let slot = match c {
-                    CategoryRef::New(t) => {
-                        self.plan.new_categories.iter_mut().find(|x| x.temp == t).map(|x| &mut x.group)
-                    }
-                    CategoryRef::Existing(l) => {
-                        self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| &mut p.group)
-                    }
-                };
-                match slot {
-                    Some(slot) if *slot != g => {
-                        *slot = g;
+            (DItem::Category(c), DTarget::Group(g)) => match c {
+                CategoryRef::New(t) => match self.plan.new_categories.iter_mut().find(|x| x.temp == t) {
+                    Some(x) if x.group != Some(g) => {
+                        x.group = Some(g);
                         true
                     }
                     _ => false,
-                }
-            }
+                },
+                CategoryRef::Existing(l) => match self.plan.placements.iter_mut().find(|p| p.category == l) {
+                    Some(p) if p.group != g => {
+                        p.group = g;
+                        true
+                    }
+                    _ => false,
+                },
+            },
             (DItem::Term(t), DTarget::Category(c)) => match self.plan.mappings.iter_mut().find(|m| m.term == t) {
                 Some(m) if m.category != c => {
                     m.category = c;
@@ -477,7 +589,7 @@ impl Draft {
                 for g in self.plan.new_groups.iter_mut().filter(|g| g.temp == t) {
                     g.ticked = on;
                 }
-                for c in self.plan.new_categories.iter_mut().filter(|c| c.group == GroupRef::New(t)) {
+                for c in self.plan.new_categories.iter_mut().filter(|c| c.group == Some(GroupRef::New(t))) {
                     c.ticked = on;
                 }
                 for p in self.plan.placements.iter_mut().filter(|p| p.group == GroupRef::New(t)) {
@@ -485,10 +597,12 @@ impl Draft {
                 }
                 return;
             }
-            Name::Category(CategoryRef::New(t)) => self.plan.new_categories.iter_mut().find(|c| c.temp == t).map(|c| {
-                c.ticked = on;
-                c.group
-            }),
+            Name::Category(CategoryRef::New(t)) => {
+                self.plan.new_categories.iter_mut().find(|c| c.temp == t).and_then(|c| {
+                    c.ticked = on;
+                    c.group
+                })
+            }
             Name::Category(CategoryRef::Existing(l)) => {
                 self.plan.placements.iter_mut().find(|p| p.category == l).map(|p| {
                     p.ticked = on;
@@ -573,7 +687,7 @@ impl Draft {
             .plan
             .new_categories
             .iter()
-            .filter(|c| c.group == g)
+            .filter(|c| c.group == Some(g))
             .map(|c| (CategoryRef::New(c.temp), c.name.as_str()));
         let placed = self.plan.placements.iter().filter(|p| p.group == g).filter_map(|p| {
             let name = p.rename.as_deref().or_else(|| category_name(snap, p.category))?;
@@ -618,18 +732,26 @@ impl Draft {
             body = body.push(self.group_zone(block, r, kind));
         }
         body = body.push(self.view_add_group());
-        // The user's ungrouped categories the draft does not place: read-only term targets.
+        // The user's ungrouped categories the draft does not place (read-only term targets),
+        // and the new categories the draft leaves without a group (drag one onto a group to file it).
         let own: Vec<&CategoryNode> = snap
             .ungrouped
             .iter()
             .filter(|c| !self.plan.placements.iter().any(|p| p.category == c.category.id))
             .collect();
-        if !own.is_empty() {
-            let heading = row![style::heading("Ungrouped"), yours()].spacing(SPACE[1]).align_y(Center);
+        let new: Vec<&NewCategoryDraft> = self.plan.new_categories.iter().filter(|c| c.group.is_none()).collect();
+        if !own.is_empty() || !new.is_empty() {
+            let mut heading = row![style::heading("Ungrouped")].spacing(SPACE[1]).align_y(Center);
+            if new.is_empty() {
+                heading = heading.push(yours());
+            }
             let mut block = column![heading].spacing(SPACE[0]);
             for c in own {
                 block =
                     block.push(self.view_category(CategoryRef::Existing(c.category.id), &c.category.name, snap, kind));
+            }
+            for c in new {
+                block = block.push(self.view_category(CategoryRef::New(c.temp), &c.name, snap, kind));
             }
             body = body.push(block);
         }
@@ -697,7 +819,7 @@ impl Draft {
         if let Some(Edit::Rename(e, typed)) = &self.edit
             && *e == n
         {
-            return name_input("Name", typed).into();
+            return name_field("Name", typed);
         }
         let mut label = text(name).size(SIZE_BODY);
         if strong {
@@ -817,7 +939,7 @@ impl Draft {
 
     fn view_add_group(&self) -> Element<'_, DraftMsg> {
         match &self.edit {
-            Some(Edit::NewGroup(n)) => name_input("Group name", n).into(),
+            Some(Edit::NewGroup(n)) => name_field("Group name", n),
             _ => button(text("+ New group").size(SIZE_SMALL).style(style::accent))
                 .padding([0.0, SPACE[0]])
                 .style(style::row)
@@ -853,7 +975,17 @@ fn more_terms_line(n: usize) -> String {
     format!("{n} more {} will be offered next time.", if n == 1 { "term" } else { "terms" })
 }
 
-/// The inline name field: Enter saves, Esc cancels.
+/// The inline name field with its Save button: Enter or Save saves, Esc cancels, and opening
+/// another name field saves what is typed here.
+fn name_field<'a>(placeholder: &'a str, value: &'a str) -> Element<'a, DraftMsg> {
+    let save = button(text("Save").size(SIZE_SMALL).style(style::accent))
+        .padding([0.0, SPACE[0]])
+        .style(style::row)
+        .on_press_maybe((!value.trim().is_empty()).then_some(DraftMsg::SaveName));
+    row![name_input(placeholder, value), save].spacing(SPACE[0]).align_y(Center).into()
+}
+
+/// The text input itself: Enter saves.
 fn name_input<'a>(placeholder: &'a str, value: &'a str) -> iced::widget::TextInput<'a, DraftMsg> {
     text_input(placeholder, value)
         .id(NAME_ID)

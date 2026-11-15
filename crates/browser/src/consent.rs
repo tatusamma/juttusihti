@@ -36,7 +36,7 @@ const EXTRA_RULES: &str = include_str!("../assets/consent-extra-rules.json");
 /// `compact-rules.json`: autoconsent's compact rules carry no opt-in steps.
 const DRIVER_JS: &str = r#"
 // Only web pages get autoconsent. Throwing stops this user script before the bundle runs: in
-// Servo 0.7 reading location.ancestorOrigins (autoconsent's top-frame check) panics the script
+// Servo (0.7 and 0.8) reading location.ancestorOrigins (autoconsent's top-frame check) panics the script
 // thread on documents that were not created by a navigation to an HTML page.
 if (!/^https?:$/.test(location.protocol) || !/^text\/html(;|$)/i.test(document.contentType)) {
   throw new Error("autoconsent: not a web page");
