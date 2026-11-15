@@ -9,7 +9,7 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-11-15
+## [0.7.1] - 2026-11-15
 
 ### Added
 
@@ -370,8 +370,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/tero-k/juttusihti/compare/v0.7.0...v0.8.0
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/tero-k/juttusihti/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/tero-k/juttusihti/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tero-k/juttusihti/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tero-k/juttusihti/compare/v0.4.0...v0.5.0
