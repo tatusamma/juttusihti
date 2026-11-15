@@ -286,7 +286,7 @@ fn labels_table_is_untouched_by_migration() {
     };
     assert_eq!(cols("labels"), ["id", "name", "normalized", "color", "created_at"]);
     assert_eq!(cols("article_labels"), ["article_id", "label_id", "origin", "status", "suggestion_id", "created_at"]);
-    assert_eq!(cols("categories"), ["id", "name", "normalized", "group_id", "position", "created_at"]);
+    assert_eq!(cols("categories"), ["id", "name", "normalized", "group_id", "position", "created_at", "hidden"]);
     assert_eq!(cols("article_categories"), ["article_id", "user_category_id", "ai_category_id", "updated_at"]);
     assert!(cols("feed_terms").contains(&"category_id".to_string()));
     assert!(!cols("feed_terms").contains(&"label_id".to_string()));
@@ -1639,4 +1639,40 @@ fn counts_match_the_list_under_every_scope() {
     assert_eq!(all.categories.get(&local), Some(&3), "manual 4, AI 6, h's default 11");
     assert_eq!(all.categories.get(&tech), Some(&4), "mapped 3, 5 and 9; AI 7");
     assert_eq!(all.uncategorized, 1, "only article 8");
+}
+
+#[test]
+fn a_hidden_category_leaves_the_list_but_not_its_own_view() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    ingest_unsorted(&mut s, f, &[entry("1", &["Urheilu"]), entry("2", &["AI"]), entry("3", &[]), entry("4", &[])])
+        .unwrap();
+    let (sport, ai) = (s.create_category("Urheilu").unwrap(), s.create_category("Tekoäly").unwrap());
+    map_term(&s, "Urheilu", sport);
+    map_term(&s, "AI", ai);
+    set_ai(&s, article_id(&s, "3"), sport);
+    // A manual choice of another category wins over the hidden term.
+    s.set_article_category(article_id(&s, "4"), Some(ai)).unwrap();
+    s.set_category_hidden(sport, true).unwrap();
+    assert!(s.category_tree().unwrap().ungrouped.iter().any(|n| n.category.id == sport && n.hidden));
+
+    let feed_q = SearchQuery { hide_hidden_categories: true, ..Default::default() };
+    assert_eq!(matching(&s, &feed_q), ["2", "4"]);
+    assert_eq!(matching(&s, &SearchQuery::default()), ["1", "2", "3", "4"], "off: nothing is left out");
+    assert_eq!(in_category(&s, sport), ["1", "3"]);
+
+    s.set_category_hidden(sport, false).unwrap();
+    assert_eq!(matching(&s, &feed_q), ["1", "2", "3", "4"]);
+    assert!(matches!(s.set_category_hidden(999, true), Err(Error::NotFound)));
+}
+
+#[test]
+fn a_hidden_feed_default_category_hides_the_feeds_articles() {
+    let mut s = Store::open_in_memory().unwrap();
+    let f = feed(&mut s, "https://a.example/rss");
+    ingest_unsorted(&mut s, f, &[entry("1", &[])]).unwrap();
+    let c = s.create_category("Urheilu").unwrap();
+    s.conn().execute("UPDATE feeds SET default_category_id = ?1 WHERE id = ?2", [c, f]).unwrap();
+    s.set_category_hidden(c, true).unwrap();
+    assert!(matching(&s, &SearchQuery { hide_hidden_categories: true, ..Default::default() }).is_empty());
 }

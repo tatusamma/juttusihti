@@ -40,7 +40,8 @@ The name is Finnish: *juttu* is a story, *sihti* a sieve.
 - **Find things again.** Fast full-text search on your own computer, with phrases, `OR`,
   `NOT` and field filters.
 - **Sort the news your way.** Categories and groups in a sidebar, built from the section names
-  publishers already send. A feed can have a default category, and a feed can sit in a group.
+  publishers already send. A feed can have a default category, and a feed can sit in a group. Hide a category with one click to keep
+  its articles out of your news.
 - **See through headlines.** Clickbait headlines rewritten from the article text, always marked
   as AI, with the original underneath.
 - **Check a claim.** One button has an AI check an article's factual claims against web

@@ -96,6 +96,8 @@ pub enum Op {
     MoveFavourite(Favourite, usize),
     MoveGroup(GroupId, usize),
     MoveCategory(CategoryId, Option<GroupId>, usize),
+    /// Hide a category's articles from the list, or show them again.
+    SetHidden(CategoryId, bool),
 }
 
 impl Op {
@@ -107,6 +109,7 @@ impl Op {
             Op::MoveFavourite(f, index) => s.move_favourite(f, index),
             Op::MoveGroup(id, index) => s.move_group(id, index),
             Op::MoveCategory(id, group, index) => s.move_category(id, group, index),
+            Op::SetHidden(id, hidden) => s.set_category_hidden(id, hidden),
         }
     }
 }
@@ -150,7 +153,17 @@ pub enum Event {
     Failed(String),
 }
 
-type Data = Box<(CategoryTree, CategoryCounts)>;
+/// The tree, the counts for the list's filter, and the categories with any stored article.
+pub(crate) type Data = Box<(CategoryTree, CategoryCounts, HashSet<CategoryId>)>;
+
+/// What the sidebar loads for `filter` (the list's All/Unread and feed picker).
+pub(crate) fn read_data(s: &Store, filter: ListFilter) -> juttusihti_core::Result<Data> {
+    let counts = s.category_counts(filter)?;
+    // Whatever the All/Unread or feed choice, a category with stored articles stays listed.
+    let all = if filter == ListFilter::default() { None } else { Some(s.category_counts(ListFilter::default())?) };
+    let stored = all.as_ref().unwrap_or(&counts).categories.iter().filter(|(_, n)| **n > 0).map(|(c, _)| *c).collect();
+    Ok(Box::new((s.category_tree()?, counts, stored)))
+}
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -173,6 +186,10 @@ pub enum Msg {
     /// Right-click: opens or closes the row's menu.
     Menu(Item),
     SetFavourite(Favourite, bool),
+    /// The eye: hide a category's articles from the list, or show them again.
+    SetHidden(CategoryId, bool),
+    /// A category was hidden or shown: the list differs.
+    HiddenSaved(Result<(), String>),
     Drag(DragMsg<Item, Target>),
     Organise,
     Done(Result<(), String>),
@@ -193,6 +210,8 @@ pub struct State {
     pub open: bool,
     tree: CategoryTree,
     counts: CategoryCounts,
+    /// Categories that hold at least one stored article; the others are not listed.
+    stored: HashSet<CategoryId>,
     /// The All/Unread and feed picker filter the counts were asked for.
     filter: ListFilter,
     /// Unfolded groups; kept in memory only.
@@ -215,6 +234,7 @@ impl State {
             open: true,
             tree: CategoryTree { groups: vec![], ungrouped: vec![], favourites: vec![], ungrouped_feeds: vec![] },
             counts: CategoryCounts::default(),
+            stored: HashSet::new(),
             filter: ListFilter::default(),
             expanded: HashSet::new(),
             find: String::new(),
@@ -245,15 +265,8 @@ impl State {
         };
         self.filter = filter;
         let db = self.db.clone();
-        let load = Cmd::perform(
-            async move {
-                db.call(move |s| -> juttusihti_core::Result<Data> {
-                    Ok(Box::new((s.category_tree()?, s.category_counts(filter)?)))
-                })
-                .await
-            },
-            move |r| Msg::Loaded(filter, r),
-        );
+        let load =
+            Cmd::perform(async move { db.call(move |s| read_data(s, filter)).await }, move |r| Msg::Loaded(filter, r));
         Cmd::batch([load, replan])
     }
 
@@ -280,7 +293,11 @@ impl State {
             Effect::Reload => (self.load(self.filter), Some(Event::Changed)),
             Effect::Run(op) => {
                 let db = self.db.clone();
-                let done = if matches!(op, Op::SetOpen(_)) { Msg::Saved } else { Msg::Done };
+                let done = match op {
+                    Op::SetOpen(_) => Msg::Saved,
+                    Op::SetHidden(..) => Msg::HiddenSaved,
+                    _ => Msg::Done,
+                };
                 (Cmd::perform(async move { db.call(move |s| op.apply(s)).await }, done), None)
             }
             Effect::Select(s) => (Cmd::none(), Some(Event::Select(s))),
@@ -302,8 +319,9 @@ impl State {
         match msg {
             Msg::OpenLoaded(Ok(open)) => self.open = open,
             Msg::Loaded(filter, Ok(data)) => {
-                let (tree, counts) = *data;
+                let (tree, counts, stored) = *data;
                 self.tree = tree;
+                self.stored = stored;
                 // Counts for an older All/Unread or feed choice wait for the newer load.
                 if filter == self.filter {
                     self.counts = counts;
@@ -364,6 +382,12 @@ impl State {
                 self.menu = None;
                 return Effect::Run(Op::Favourite(f, on));
             }
+            Msg::SetHidden(c, hidden) => {
+                self.menu = None;
+                return Effect::Run(Op::SetHidden(c, hidden));
+            }
+            // The list reloads as after AI categorizing.
+            Msg::HiddenSaved(Ok(())) => return Effect::Categorized,
             Msg::Drag(m) => {
                 // A press and release without movement is a click.
                 let click = match m {
@@ -415,7 +439,11 @@ impl State {
             Msg::Organise => return Effect::Organise,
             Msg::Done(Ok(())) => return Effect::Reload,
             Msg::Saved(Ok(())) => {}
-            Msg::OpenLoaded(Err(e)) | Msg::Loaded(_, Err(e)) | Msg::Done(Err(e)) | Msg::Saved(Err(e)) => {
+            Msg::OpenLoaded(Err(e))
+            | Msg::Loaded(_, Err(e))
+            | Msg::Done(Err(e))
+            | Msg::Saved(Err(e))
+            | Msg::HiddenSaved(Err(e)) => {
                 return Effect::Failed(e);
             }
         }
@@ -506,6 +534,25 @@ impl State {
         }
     }
 
+    /// Whether a category's articles are left out of the list.
+    pub fn is_hidden(&self, c: CategoryId) -> bool {
+        self.node(c).is_some_and(|n| n.hidden)
+    }
+
+    /// Whether a category is listed: it holds stored articles, is selected, or a row is
+    /// being dragged (so the drop places stay put).
+    fn listed(&self, c: CategoryId, selected: Selection) -> bool {
+        self.stored.contains(&c) || selected == Selection::Category(c) || self.dragged().is_some()
+    }
+
+    /// Whether a group is listed: it has feeds or listed categories, or is selected.
+    fn group_listed(&self, g: &GroupNode, selected: Selection) -> bool {
+        !g.feeds.is_empty()
+            || selected == Selection::Group(g.group.id)
+            || self.dragged().is_some()
+            || g.categories.iter().any(|c| self.listed(c.category.id, selected))
+    }
+
     pub fn is_favourite(&self, f: Favourite) -> bool {
         self.tree.favourites.contains(&f)
     }
@@ -538,7 +585,7 @@ impl State {
             if hit(&g.group.name) {
                 out.push(Match { selection: Selection::Group(g.group.id), name: &g.group.name, group: None });
             }
-            for c in g.categories.iter().filter(|c| hit(&c.category.name)) {
+            for c in g.categories.iter().filter(|c| self.stored.contains(&c.category.id) && hit(&c.category.name)) {
                 out.push(Match {
                     selection: Selection::Category(c.category.id),
                     name: &c.category.name,
@@ -549,7 +596,7 @@ impl State {
                 out.push(Match { selection: Selection::Feed(f.id), name: &f.title, group: Some(&g.group.name) });
             }
         }
-        for c in self.tree.ungrouped.iter().filter(|c| hit(&c.category.name)) {
+        for c in self.tree.ungrouped.iter().filter(|c| self.stored.contains(&c.category.id) && hit(&c.category.name)) {
             out.push(Match { selection: Selection::Category(c.category.id), name: &c.category.name, group: None });
         }
         out
@@ -677,6 +724,11 @@ impl State {
             let mut favs = column![container(heading).padding([SPACE[1], SPACE[1]])].spacing(1);
             for (i, f) in self.tree.favourites.iter().enumerate() {
                 let Some(name) = self.name((*f).into()) else { continue };
+                if let Favourite::Category(c) = f
+                    && !self.listed(*c, selected)
+                {
+                    continue;
+                }
                 let r = self.item_row(Item::Favourite(*f), name, selected, 0.0);
                 favs = favs.push(match dragged {
                     Some(Item::Favourite(_)) => self.slot(r, Target::FavouriteSlot(i)),
@@ -691,11 +743,12 @@ impl State {
         }
 
         col = col.push(Space::new().height(SPACE[1]));
-        for g in &self.tree.groups {
+        for g in self.tree.groups.iter().filter(|g| self.group_listed(g, selected)) {
             col = col.push(self.view_group(g, selected, dragged));
         }
         let moving_rows = matches!(dragged, Some(Item::Group(_) | Item::Category(_)));
-        if !self.tree.ungrouped.is_empty() || moving_rows {
+        let any_ungrouped = self.tree.ungrouped.iter().any(|c| self.listed(c.category.id, selected));
+        if any_ungrouped || moving_rows {
             let cats = &self.tree.ungrouped;
             let block = column![
                 container(text("Ungrouped").size(SIZE_SMALL).style(style::muted)).padding([SPACE[1], SPACE[1]]),
@@ -709,7 +762,7 @@ impl State {
                 _ => block.into(),
             });
         }
-        if self.tree.groups.is_empty() && self.tree.ungrouped.is_empty() {
+        if !any_ungrouped && !self.tree.groups.iter().any(|g| self.group_listed(g, selected)) {
             col = col.push(container(style::note("No categories yet.")).padding([SPACE[0], SPACE[1]]));
         }
         col.into()
@@ -742,6 +795,9 @@ impl State {
     ) -> Element<'a, Msg> {
         let mut col = column![].spacing(1);
         for (i, c) in cats.iter().enumerate() {
+            if !self.listed(c.category.id, selected) {
+                continue;
+            }
             let r = self.item_row(Item::Category(c.category.id), &c.category.name, selected, indent);
             col = col.push(match dragged {
                 Some(Item::Category(_)) => self.slot(r, Target::GroupSlot(group, i)),
@@ -786,7 +842,13 @@ impl State {
             Item::Favourite(_) => content = content.push(icon(Icon::Star).size(SIZE_SMALL).style(style::accent)),
             Item::Category(_) => {}
         }
+        let category = match item {
+            Item::Category(c) | Item::Favourite(Favourite::Category(c)) => Some(c),
+            _ => None,
+        };
+        let hidden = category.is_some_and(|c| self.is_hidden(c));
         let label = text(name).size(SIZE_BODY).width(Fill);
+        let label = if hidden { label.style(style::faint) } else { label };
         let strong = matches!(item, Item::Group(_) | Item::Favourite(Favourite::Group(_)));
         content = content.push(if strong { label.font(SEMIBOLD) } else { label });
         if hovered || self.menu == Some(item) {
@@ -794,6 +856,21 @@ impl State {
             content = content.push(tooltip(
                 button(star).padding(0).style(style::icon).on_press(Msg::SetFavourite(fav, !is_fav)),
                 style::tip(self.menu_label(fav)),
+                tooltip::Position::Top,
+            ));
+        }
+        // A hidden category always shows its crossed eye, so it is easy to show again.
+        if let Some(c) = category
+            && (hidden || hovered || self.menu == Some(item))
+        {
+            let eye = icon(if hidden { Icon::EyeOff } else { Icon::Eye }).size(SIZE_SMALL).style(if hidden {
+                style::accent
+            } else {
+                style::faint
+            });
+            content = content.push(tooltip(
+                button(eye).padding(0).style(style::icon).on_press(Msg::SetHidden(c, !hidden)),
+                style::tip(hide_label(hidden)),
                 tooltip::Position::Top,
             ));
         }
@@ -824,9 +901,24 @@ impl State {
             .padding([SPACE[0], SPACE[1]])
             .style(style::row)
             .on_press(Msg::SetFavourite(fav, !is_fav));
-        let menu = container(entry).padding(SPACE[0]).width(Fill).style(style::popover);
+        let mut entries = column![entry].spacing(1);
+        if let Some(c) = category {
+            entries = entries.push(
+                button(text(hide_label(hidden)).size(SIZE_SMALL))
+                    .width(Fill)
+                    .padding([SPACE[0], SPACE[1]])
+                    .style(style::row)
+                    .on_press(Msg::SetHidden(c, !hidden)),
+            );
+        }
+        let menu = container(entries).padding(SPACE[0]).width(Fill).style(style::popover);
         column![r, container(menu).padding(iced::padding::left(indent + SPACE[1]))].spacing(2).into()
     }
+}
+
+/// The eye's tooltip and menu entry.
+fn hide_label(hidden: bool) -> &'static str {
+    if hidden { "Show in feed" } else { "Hide from feed" }
 }
 
 /// A row that only selects (All articles and Find results).
