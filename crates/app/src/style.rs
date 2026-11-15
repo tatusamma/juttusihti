@@ -7,7 +7,7 @@ use iced::widget::{
     Space, Text, button, checkbox as cb, container, mouse_area, opaque, pin, radio as rd, row as ui_row, stack, text,
     tooltip,
 };
-use iced::widget::{pick_list as pl, text_input as ti};
+use iced::widget::{pick_list as pl, text_editor as te, text_input as ti};
 use iced::{
     Background, Border, Center, Color, Degrees, Element, Fill, Font, Point, Shadow, Theme, Vector, border, font,
     gradient,
@@ -344,6 +344,18 @@ pub fn text_input(theme: &Theme, status: ti::Status) -> ti::Style {
         icon: t.muted,
         placeholder: t.faint,
         value: if disabled { t.faint } else { t.text },
+        selection: Color { a: 0.35, ..t.accent },
+    }
+}
+
+/// The article body: read-only text that looks like plain body text but can be selected.
+pub fn reader_text(theme: &Theme, _status: te::Status) -> te::Style {
+    let t = tokens(theme);
+    te::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        placeholder: t.faint,
+        value: t.body,
         selection: Color { a: 0.35, ..t.accent },
     }
 }

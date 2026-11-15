@@ -7,7 +7,7 @@ use std::time::Duration;
 use iced::keyboard::{self, Key};
 use iced::widget::{
     Space, button, column, container, operation, pick_list, pin, responsive, rich_text, row, rule, scrollable, span,
-    stack, text, text_input, tooltip,
+    stack, text, text_editor, text_input, tooltip,
 };
 use iced::{Center, ContentFit, Element, Fill, Font, Padding, Point, Size, Subscription, Task, Theme, Vector, font};
 use juttusihti_analytics::{AnalyticsWorker, Limits};
@@ -42,6 +42,13 @@ const LIST_HEADER_PAD: f32 = 12.0;
 const LABEL_FILTER_WIDTH: f32 = 200.0;
 /// Width of the ⋯ menu above the article list.
 const LIST_MENU_WIDTH: f32 = 280.0;
+/// Width of the right-click menu on the article body.
+const BODY_MENU_WIDTH: f32 = 160.0;
+
+/// The pointer's last position in the window. Kept outside the app state so
+/// moving the mouse does not send a message and redraw the screen; it is read
+/// only when the body's right-click menu opens.
+static POINTER: std::sync::Mutex<Point> = std::sync::Mutex::new(Point::ORIGIN);
 /// Diameter of the unread dot in the article list.
 const UNREAD_DOT: f32 = 6.0;
 /// Height of one headline line: `SIZE_BODY` at Iced's default 1.3 line height. The unread
@@ -453,6 +460,12 @@ pub enum Message {
     FeedSaved(Result<(), String>),
     Reports(crate::reports::Msg),
     Key(keyboard::Key, keyboard::Modifiers),
+    /// Selection, copy or click in the read-only article body.
+    BodyAction(text_editor::Action),
+    /// Right-click on the article body: open its Copy / Select all menu.
+    BodyMenu,
+    /// Copy the selected body text to the clipboard.
+    CopySelection,
     DismissStatus,
 }
 
@@ -481,6 +494,8 @@ pub struct App {
     list_generation: u64,
     listing: Listing,
     preview: Option<Preview>,
+    /// The reading pane's body as a read-only editor, so it can be selected and copied.
+    body_editor: text_editor::Content,
     add_feed: String,
     refreshing: usize,
     status: Option<String>,
@@ -493,6 +508,8 @@ pub struct App {
     feeds_open: bool,
     /// The ⋯ menu above the article list.
     list_menu_open: bool,
+    /// Where the article body's right-click menu is open (window coordinates), if it is.
+    body_menu: Option<Point>,
     /// Feed waiting for the "Unsubscribe from …?" answer.
     confirm_unsubscribe: Option<FeedId>,
     reports: crate::reports::State,
@@ -564,6 +581,7 @@ impl App {
                 flagged: Default::default(),
             },
             preview: None,
+            body_editor: text_editor::Content::new(),
             add_feed: String::new(),
             refreshing: 0,
             status,
@@ -573,6 +591,7 @@ impl App {
             feed_edit: None,
             feeds_open: false,
             list_menu_open: false,
+            body_menu: None,
             confirm_unsubscribe: None,
             reports: crate::reports::State::new(analytics.clone()),
         };
@@ -612,7 +631,18 @@ impl App {
             Screen::Reader => self.categories.subscription().map(Message::Categories),
             _ => Subscription::none(),
         };
-        Subscription::batch([keys, refresh, organise])
+        // Remembers where the pointer is for the body's right-click menu, without a message.
+        let pointer = if self.screen == Screen::Reader {
+            iced::event::listen_with(|e, _status, _window| {
+                if let iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) = e {
+                    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = position;
+                }
+                None::<Message>
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([keys, refresh, organise, pointer])
     }
 
     /// Reloads the feeds, unread counts and labels, and the categories with their counts.
@@ -841,6 +871,7 @@ impl App {
     fn close_overlays(&mut self) {
         self.close_feeds_menu();
         self.list_menu_open = false;
+        self.body_menu = None;
         let _ = self.quick.update(crate::quick::Msg::Close);
     }
 
@@ -957,6 +988,7 @@ impl App {
                 if self.fetching == Some(preview.article.id) && preview.full != FullState::Fetched {
                     preview.full = FullState::Busy;
                 }
+                self.body_editor = text_editor::Content::with_text(&preview.body);
                 self.preview = Some(*preview);
                 Task::none()
             }
@@ -1176,6 +1208,7 @@ impl App {
             }
             Message::MenuPick(pick) => {
                 self.list_menu_open = false;
+                self.body_menu = None;
                 self.update(*pick)
             }
             Message::CloseOverlays => {
@@ -1571,6 +1604,21 @@ impl App {
                 Task::batch([self.load_sidebar(), self.load_list(), reload])
             }
             Message::Key(key, modifiers) => self.on_key(key, modifiers),
+            Message::BodyMenu => {
+                self.close_overlays();
+                self.body_menu = Some(*POINTER.lock().unwrap_or_else(|e| e.into_inner()));
+                Task::none()
+            }
+            Message::CopySelection => match self.body_editor.selection() {
+                Some(selected) => iced::clipboard::write(selected),
+                None => Task::none(),
+            },
+            Message::BodyAction(action) => {
+                if !action.is_edit() {
+                    self.body_editor.perform(action);
+                }
+                Task::none()
+            }
             Message::DismissStatus => {
                 self.status = None;
                 self.status_error = false;
@@ -1734,6 +1782,11 @@ impl App {
             let left = rail::WIDTH + 1.0 + side;
             let x = (left + list_width - LIST_HEADER_PAD - LIST_MENU_WIDTH).max(left);
             return style::overlay(layout, self.view_list_menu(), Point::new(x, below_header), Message::CloseOverlays);
+        }
+        if let Some(at) = self.body_menu.filter(|_| self.screen == Screen::Reader) {
+            let x = at.x.min(size.width - BODY_MENU_WIDTH).max(0.0);
+            let y = at.y.min(size.height - 90.0).max(0.0);
+            return style::overlay(layout, self.view_body_menu(), Point::new(x, y), Message::CloseOverlays);
         }
         if self.quick.open && self.screen == Screen::Reader {
             // Right-aligned under the ✨ button, like the ⋯ menu.
@@ -2092,6 +2145,45 @@ impl App {
         }
     }
 
+    /// The article body: selectable, read-only text, so it can be copied.
+    fn view_body(&self, empty: bool) -> Element<'_, Message> {
+        if empty {
+            return text("This entry has no text in the feed. Open it in the browser to read it.")
+                .size(SIZE_BODY)
+                .line_height(1.6)
+                .style(style::body)
+                .into();
+        }
+        let editor = text_editor(&self.body_editor)
+            .on_action(Message::BodyAction)
+            .key_binding(body_key_binding)
+            .size(SIZE_BODY)
+            .line_height(1.6)
+            .height(iced::Shrink)
+            .padding(0)
+            .style(style::reader_text);
+        iced::widget::mouse_area(editor).on_right_press(Message::BodyMenu).into()
+    }
+
+    /// The article body's right-click menu.
+    fn view_body_menu(&self) -> Element<'_, Message> {
+        let item = |label: &'static str, target: Option<Message>| -> Element<'_, Message> {
+            button(text(label).size(SIZE_BODY))
+                .width(Fill)
+                .padding([SPACE[0] + 2.0, SPACE[1]])
+                .style(style::row)
+                .on_press_maybe(target.map(|t| Message::MenuPick(Box::new(t))))
+                .into()
+        };
+        let copy = self.body_editor.selection().is_some().then_some(Message::CopySelection);
+        let all = Message::BodyAction(text_editor::Action::SelectAll);
+        container(column![item("Copy", copy), item("Select all", Some(all))].spacing(2))
+            .padding(SPACE[0])
+            .width(BODY_MENU_WIDTH)
+            .style(style::popover)
+            .into()
+    }
+
     fn view_preview(&self) -> Element<'_, Message> {
         let Some(p) = &self.preview else {
             return container(
@@ -2182,11 +2274,6 @@ impl App {
                 .padding([SPACE[0], SPACE[1]])
                 .width(140),
         );
-        let body = if p.body.is_empty() {
-            "This entry has no text in the feed. Open it in the browser to read it."
-        } else {
-            &p.body
-        };
         let mut head = column![
             column![text(meta).size(SIZE_SMALL).style(style::muted), self.view_headline(p)].spacing(SPACE[1]),
             actions,
@@ -2204,7 +2291,7 @@ impl App {
             rest = rest.push(crate::fact_check::view_card(fc, collapsed).map(Message::FactCheck));
         }
         let rest = rest
-            .push(text(body).size(SIZE_BODY).line_height(1.6).style(style::body))
+            .push(self.view_body(p.body.is_empty()))
             .push(rule::horizontal(1))
             .push(crate::article_category::view(&p.all_categories, &p.category, Message::SetCategory))
             .push(column![text("Labels").size(SIZE_SMALL).style(style::faint), labels.wrap()].spacing(SPACE[1]));
@@ -2242,6 +2329,18 @@ impl App {
             }
         };
         scrollable(content).height(Fill).into()
+    }
+}
+
+/// Keys the article body handles itself: only copying and selecting all.
+/// Every other key is left to the app, so j/k, s, m and the rest keep working
+/// while the body has focus.
+fn body_key_binding(key: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    match key.key.as_ref() {
+        Key::Character("c") if key.modifiers.command() => Some(text_editor::Binding::Copy),
+        Key::Character("a") if key.modifiers.command() => Some(text_editor::Binding::SelectAll),
+        Key::Named(keyboard::key::Named::Escape) => Some(text_editor::Binding::Unfocus),
+        _ => None,
     }
 }
 
@@ -3301,6 +3400,50 @@ mod tests {
         assert_eq!(s.fulltext(a).unwrap().unwrap().text, "Full text of A");
         let p = read_preview(&s, a).unwrap();
         assert_eq!((p.body.as_str(), &p.full), ("Full text of A", &FullState::Fetched));
+    }
+
+    #[test]
+    fn article_body_can_be_selected_but_not_edited() {
+        let (mut app, _, _) = app_with_articles();
+        app.body_editor = text_editor::Content::with_text("Body text");
+        let _ = app.update(Message::BodyAction(text_editor::Action::SelectAll));
+        assert_eq!(app.body_editor.selection().as_deref(), Some("Body text"));
+        let _ = app.update(Message::BodyAction(text_editor::Action::Edit(text_editor::Edit::Insert('x'))));
+        let _ = app.update(Message::BodyAction(text_editor::Action::Edit(text_editor::Edit::Backspace)));
+        assert_eq!(app.body_editor.text(), "Body text");
+    }
+
+    #[test]
+    fn body_menu_opens_on_right_click_and_closes_after_a_pick() {
+        let (mut app, _, _) = app_with_articles();
+        app.body_editor = text_editor::Content::with_text("Body text");
+        let _ = app.update(Message::BodyMenu);
+        assert!(app.body_menu.is_some());
+        let _ = app.update(Message::MenuPick(Box::new(Message::BodyAction(text_editor::Action::SelectAll))));
+        assert!(app.body_menu.is_none());
+        assert_eq!(app.body_editor.selection().as_deref(), Some("Body text"));
+        let _ = app.update(Message::BodyMenu);
+        let _ = app.update(Message::CloseOverlays);
+        assert!(app.body_menu.is_none());
+    }
+
+    #[test]
+    fn body_keys_leave_shortcuts_to_the_app() {
+        let press = |key: Key, modifiers: keyboard::Modifiers| text_editor::KeyPress {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+            modifiers,
+            text: None,
+            status: text_editor::Status::Focused { is_hovered: false },
+        };
+        for k in ["j", "k", "s", "m", "o", "c"] {
+            assert!(body_key_binding(press(Key::Character(k.into()), Default::default())).is_none(), "{k}");
+        }
+        assert!(matches!(
+            body_key_binding(press(Key::Character("c".into()), keyboard::Modifiers::CTRL)),
+            Some(text_editor::Binding::Copy)
+        ));
     }
 
     #[test]
