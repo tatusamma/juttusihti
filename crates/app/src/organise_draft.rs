@@ -280,6 +280,9 @@ pub enum Outcome {
     /// The draft changed: store it.
     Changed,
     Focus,
+    /// The draft changed (a name typed in the field that closed) and a new name field opened:
+    /// store it and focus the field.
+    ChangedAndFocus,
     Approve,
     Discard,
 }
@@ -367,6 +370,14 @@ impl Draft {
                 self.saving = true;
                 Outcome::Changed
             }
+            Outcome::ChangedAndFocus if self.saving => {
+                self.dirty = true;
+                Outcome::Focus
+            }
+            Outcome::ChangedAndFocus => {
+                self.saving = true;
+                Outcome::ChangedAndFocus
+            }
             o @ (Outcome::Approve | Outcome::Discard) => {
                 self.closing = true;
                 self.edit = None;
@@ -374,6 +385,15 @@ impl Draft {
                 o
             }
             o => o,
+        }
+    }
+
+    /// Closes the name field and applies what it holds; true when the draft changed.
+    fn save_typed(&mut self, snap: &Snapshot) -> bool {
+        match self.edit.take() {
+            Some(Edit::NewGroup(typed)) => self.add_group(typed.trim()),
+            Some(Edit::Rename(n, typed)) => self.rename(n, typed.trim(), snap),
+            None => false,
         }
     }
 
@@ -392,8 +412,13 @@ impl Draft {
                 None => Outcome::None,
             },
             DraftMsg::StartRename(n) => {
+                let saved = self.save_typed(snap);
                 self.edit = self.shown_name(n, snap).map(|s| Edit::Rename(n, s));
-                if self.edit.is_some() { Outcome::Focus } else { Outcome::None }
+                match (saved, self.edit.is_some()) {
+                    (true, true) => Outcome::ChangedAndFocus,
+                    (false, true) => Outcome::Focus,
+                    (saved, false) => changed(saved),
+                }
             }
             DraftMsg::EditName(s) => {
                 if let Some(Edit::NewGroup(typed) | Edit::Rename(_, typed)) = &mut self.edit {
@@ -401,14 +426,11 @@ impl Draft {
                 }
                 Outcome::None
             }
-            DraftMsg::SaveName => match self.edit.take() {
-                Some(Edit::NewGroup(typed)) => changed(self.add_group(typed.trim())),
-                Some(Edit::Rename(n, typed)) => changed(self.rename(n, typed.trim(), snap)),
-                None => Outcome::None,
-            },
+            DraftMsg::SaveName => changed(self.save_typed(snap)),
             DraftMsg::NewGroup => {
+                let saved = self.save_typed(snap);
                 self.edit = Some(Edit::NewGroup(String::new()));
-                Outcome::Focus
+                if saved { Outcome::ChangedAndFocus } else { Outcome::Focus }
             }
             DraftMsg::Escape => {
                 self.drag.update(DragMsg::Cancel);
@@ -708,7 +730,7 @@ impl Draft {
         if let Some(Edit::Rename(e, typed)) = &self.edit
             && *e == n
         {
-            return name_input("Name", typed).into();
+            return name_field("Name", typed);
         }
         let mut label = text(name).size(SIZE_BODY);
         if strong {
@@ -828,7 +850,7 @@ impl Draft {
 
     fn view_add_group(&self) -> Element<'_, DraftMsg> {
         match &self.edit {
-            Some(Edit::NewGroup(n)) => name_input("Group name", n).into(),
+            Some(Edit::NewGroup(n)) => name_field("Group name", n),
             _ => button(text("+ New group").size(SIZE_SMALL).style(style::accent))
                 .padding([0.0, SPACE[0]])
                 .style(style::row)
@@ -864,7 +886,17 @@ fn more_terms_line(n: usize) -> String {
     format!("{n} more {} will be offered next time.", if n == 1 { "term" } else { "terms" })
 }
 
-/// The inline name field: Enter saves, Esc cancels.
+/// The inline name field with its Save button: Enter or Save saves, Esc cancels, and opening
+/// another name field saves what is typed here.
+fn name_field<'a>(placeholder: &'a str, value: &'a str) -> Element<'a, DraftMsg> {
+    let save = button(text("Save").size(SIZE_SMALL).style(style::accent))
+        .padding([0.0, SPACE[0]])
+        .style(style::row)
+        .on_press_maybe((!value.trim().is_empty()).then_some(DraftMsg::SaveName));
+    row![name_input(placeholder, value), save].spacing(SPACE[0]).align_y(Center).into()
+}
+
+/// The text input itself: Enter saves.
 fn name_input<'a>(placeholder: &'a str, value: &'a str) -> iced::widget::TextInput<'a, DraftMsg> {
     text_input(placeholder, value)
         .id(NAME_ID)

@@ -44,7 +44,8 @@ The first start of this version updates your database once:
   groups yet: a new category that fits no group now goes to Ungrouped instead of being dropped,
   and the review shows it there.
 - A typed group or category name is no longer lost when you open another name field: it is
-  saved first. The name field has a Save button, and creating a group says so.
+  saved first, on the Categories screen and in the review of suggested categories. The name
+  field has a Save button, and creating a group says so.
 - ✨ Suggest categories no longer puts nearly every category into one existing group (such as
   "Kotimaa") and then suggests no grouping at all. Your groups are now treated as sections, not
   catch-alls: the AI proposes new sections such as Sport or Culture for the rest, and it is told

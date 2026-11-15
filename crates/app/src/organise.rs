@@ -233,6 +233,8 @@ enum Effect {
     Suggest,
     /// Store the edited draft (one save at a time; see [`Draft::saved`]).
     SaveDraft(i64, Box<CategoryDraft>),
+    /// Store the edited draft and focus the name field that just opened.
+    SaveDraftAndFocus(i64, Box<CategoryDraft>),
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +362,16 @@ impl State {
                     async move { db.call(move |s| s.update_category_draft(id, &draft)).await },
                     Msg::DraftSaved,
                 )
+            }
+            Effect::SaveDraftAndFocus(id, draft) => {
+                let db = self.db.clone();
+                Cmd::batch([
+                    Cmd::perform(
+                        async move { db.call(move |s| s.update_category_draft(id, &draft)).await },
+                        Msg::DraftSaved,
+                    ),
+                    operation::focus(NAME_ID).chain(operation::select_all(NAME_ID)),
+                ])
             }
             Effect::Suggest => match &self.suggest {
                 Some(Panel::Running(p)) => Cmd::perform(ai::run(self.db.clone(), (**p).clone()), Msg::Suggested),
@@ -580,6 +592,7 @@ impl State {
                     Outcome::None => Effect::None,
                     Outcome::Focus => Effect::Focus,
                     Outcome::Changed => Effect::SaveDraft(d.id, Box::new(d.plan.clone())),
+                    Outcome::ChangedAndFocus => Effect::SaveDraftAndFocus(d.id, Box::new(d.plan.clone())),
                     Outcome::Approve => Effect::Run(Op::ApproveDraft(d.id, Box::new(d.plan.clone()))),
                     Outcome::Discard => Effect::Run(Op::DiscardDraft(d.id)),
                 };
@@ -1246,7 +1259,7 @@ mod tests {
                 reload(st);
             }
             Effect::Load => reload(st),
-            Effect::SaveDraft(id, draft) => {
+            Effect::SaveDraft(id, draft) | Effect::SaveDraftAndFocus(id, draft) => {
                 let r = with(st, |s| s.update_category_draft(id, &draft)).map_err(|e| e.to_string());
                 send(st, Msg::DraftSaved(r));
             }
@@ -1908,6 +1921,33 @@ mod tests {
         assert!(st.armed(), "a draft row");
         st.cancel_drag();
         assert!(!st.armed());
+    }
+
+    #[test]
+    fn a_name_typed_in_the_draft_is_saved_when_another_name_field_opens() {
+        let mut st = state();
+        add_terms(&st, &["Tekoäly"]);
+        reload(&mut st);
+        let (draft, _, _) = ai_draft(&st);
+        open_draft(&mut st, &draft);
+
+        // A new group's name, then a click on a name to rename it.
+        draft_msg(&mut st, DraftMsg::NewGroup);
+        draft_msg(&mut st, DraftMsg::EditName("Mine".into()));
+        let Effect::SaveDraftAndFocus(id, plan) = st.handle(Msg::Draft(DraftMsg::StartRename(Name::Group(1)))) else {
+            panic!("the typed group is saved and the rename field focused");
+        };
+        let r = with(&st, |s| s.update_category_draft(id, &plan)).map_err(|e| e.to_string());
+        send(&mut st, Msg::DraftSaved(r));
+        let plan = st.draft.as_ref().unwrap().plan.clone();
+        assert!(plan.new_groups.iter().any(|g| g.by_user && g.name == "Mine"), "the typed group is kept");
+
+        // A rename, then + New group.
+        draft_msg(&mut st, DraftMsg::EditName("Teknologia".into()));
+        draft_msg(&mut st, DraftMsg::NewGroup);
+        let plan = &st.draft.as_ref().unwrap().plan;
+        assert_eq!(plan.new_groups[0].name, "Teknologia", "the typed rename is kept");
+        assert_eq!(pending(&st).unwrap().1, *plan, "and stored");
     }
 
     #[test]
