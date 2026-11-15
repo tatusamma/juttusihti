@@ -270,6 +270,10 @@ pub enum Msg {
     Suggest,
     Planned(u64, Result<Box<SuggestPlan>, String>),
     /// The consent: sends the request.
+    /// Ticks or unticks an ungrouped category for the AI to put into a group.
+    ToggleGrouping(CategoryId),
+    /// Ticks (true) or unticks every ungrouped category.
+    GroupAll(bool),
     SendSuggest,
     CloseSuggest,
     /// The saved draft's id, the draft and the terms left for later.
@@ -538,6 +542,8 @@ impl State {
             Msg::Ignore(id, ignored) => return Effect::Run(Op::Ignore(id, ignored)),
             Msg::Suggest
             | Msg::Planned(..)
+            | Msg::ToggleGrouping(_)
+            | Msg::GroupAll(_)
             | Msg::SendSuggest
             | Msg::CloseSuggest
             | Msg::Suggested(_)
@@ -564,6 +570,16 @@ impl State {
                         Ok(p) => Panel::Ready(p),
                         Err(e) => Panel::Failed(e),
                     });
+                }
+            }
+            Msg::ToggleGrouping(id) => {
+                if let Some(Panel::Ready(p)) = &mut self.suggest {
+                    p.toggle_grouping(id);
+                }
+            }
+            Msg::GroupAll(on) => {
+                if let Some(Panel::Ready(p)) = &mut self.suggest {
+                    p.group_all(on);
                 }
             }
             Msg::SendSuggest => {
@@ -1738,6 +1754,43 @@ mod tests {
         ] {
             draft_msg(st, DraftMsg::Drag(m));
         }
+    }
+
+    #[test]
+    fn the_user_picks_which_ungrouped_categories_the_ai_groups() {
+        let mut st = state();
+        let (ai, space) = with(&st, |s| (s.create_category("AI").unwrap(), s.create_category("Space").unwrap()));
+        reload(&mut st);
+        let _ = st.handle(Msg::Suggest);
+        let _ = st.handle(Msg::Planned(st.generation, Ok(suggest_plan(&st, Ok(())))));
+        let plan = |st: &State| match &st.suggest {
+            Some(Panel::Ready(p)) => p.clone(),
+            _ => panic!("the panel is ready"),
+        };
+        let p = plan(&st);
+        assert!(p.chosen_for_grouping(ai) && p.chosen_for_grouping(space), "all are chosen at first");
+        assert_eq!(p.grouping_line().as_deref(), Some("Put 2 of 2 ungrouped categories into groups:"));
+        let all_tokens = p.tokens;
+
+        assert_eq!(st.handle(Msg::ToggleGrouping(space)), Effect::None);
+        let p = plan(&st);
+        assert!(p.chosen_for_grouping(ai) && !p.chosen_for_grouping(space));
+        assert_eq!(p.input.leave_ungrouped, [space]);
+        assert!(p.tokens < all_tokens, "the estimate follows the choice");
+        let _ = st.view();
+
+        // None: nothing to group and no terms, so nothing to send.
+        let _ = st.handle(Msg::GroupAll(false));
+        let p = plan(&st);
+        assert_eq!(p.input.leave_ungrouped, [ai, space]);
+        assert_eq!(p.blocker().as_deref(), Some("Pick the categories to put into groups."));
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::None);
+
+        // All again, then Send carries the choice.
+        let _ = st.handle(Msg::GroupAll(true));
+        let _ = st.handle(Msg::ToggleGrouping(ai));
+        assert_eq!(st.handle(Msg::SendSuggest), Effect::Suggest);
+        assert!(matches!(&st.suggest, Some(Panel::Running(p)) if p.input.leave_ungrouped == [ai]));
     }
 
     #[test]

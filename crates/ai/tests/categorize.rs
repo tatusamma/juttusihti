@@ -24,6 +24,7 @@ fn input() -> PlanInput {
         categories: vec![cat(11, "Football", Some(3)), cat(12, "Space", None), cat(13, "Cooking", None)],
         terms: vec![term(5, "OpenAI"), term(6, "NASA"), term(9, "Misc")],
         more_terms: 0,
+        leave_ungrouped: vec![],
     }
 }
 
@@ -132,6 +133,7 @@ fn seven() -> PlanInput {
         categories: (21..=27).map(|id| cat(id, &format!("C{id}"), None)).collect(),
         terms: vec![term(5, "OpenAI")],
         more_terms: 0,
+        leave_ungrouped: vec![],
     }
 }
 
@@ -356,12 +358,7 @@ async fn suggest_without_ungrouped_categories_sends_only_the_terms_request() {
 
 #[tokio::test]
 async fn a_first_run_with_no_groups_keeps_new_categories_in_ungrouped() {
-    let fresh = PlanInput {
-        groups: vec![],
-        categories: vec![],
-        terms: vec![term(5, "Urheilu"), term(6, "Kotimaa")],
-        more_terms: 0,
-    };
+    let fresh = PlanInput { terms: vec![term(5, "Urheilu"), term(6, "Kotimaa")], ..Default::default() };
     let answer = json!({
         "new_categories": [{"ref": "new:1", "name": "Urheilu", "group": ""}],
         "map_terms": [{"term_id": 5, "category": "new:1"}],
@@ -373,4 +370,28 @@ async fn a_first_run_with_no_groups_keeps_new_categories_in_ungrouped() {
     assert_eq!(d.new_categories[0].group, None);
     assert_eq!(d.mappings[0].category, CategoryRef::New(1));
     assert!(!d.is_empty());
+}
+
+#[test]
+fn categories_left_ungrouped_are_not_sent_for_grouping_but_still_take_terms() {
+    // Category 12 "Space" is ungrouped but the user keeps it out of the grouping; 13 is sent.
+    let mut i = input();
+    i.leave_ungrouped = vec![12];
+    let v = data_of(&groups_request("m", &i).unwrap().user);
+    let sent: Vec<i64> = v["categories"].as_array().unwrap().iter().map(|c| c["id"].as_i64().unwrap()).collect();
+    assert_eq!(sent, [11, 13], "the grouped one as context, and only the chosen ungrouped one");
+    assert_eq!(v["max_per_group"], 1);
+    let none = json!({"new_groups": [], "place_categories": []});
+    let terms = data_of(&terms_request("m", &i, &none).unwrap().user);
+    assert_eq!(terms["categories"][1], json!({"ref": "id:12", "name": "Space", "group": null}), "a target for terms");
+    // A reply that places it anyway is not followed.
+    let answer = json!({
+        "new_groups": [], "new_categories": [], "map_terms": [], "leave_unsorted": [],
+        "place_categories": [{"category_id": 12, "group": "id:3"}, {"category_id": 13, "group": "id:3"}]
+    });
+    let d = parse(&answer, &i).unwrap();
+    assert_eq!(d.placements.iter().map(|p| p.category).collect::<Vec<_>>(), [13]);
+    // With every ungrouped category left out, only the terms step runs.
+    i.leave_ungrouped = vec![12, 13];
+    assert!(groups_request("m", &i).is_none());
 }

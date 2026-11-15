@@ -100,7 +100,9 @@ fn groups_message(input: &PlanInput) -> String {
     wrap(json!({
         "max_per_group": max_per_group(input),
         "groups": input.groups.iter().map(|g| json!({"id": g.id, "name": g.name})).collect::<Vec<_>>(),
+        // Categories kept out of the grouping are not sent here at all.
         "categories": input.categories.iter()
+            .filter(|c| c.group_id.is_some() || !input.leave_ungrouped.contains(&c.category.id))
             .map(|c| json!({"id": c.category.id, "name": c.category.name, "group_id": c.group_id}))
             .collect::<Vec<_>>(),
     }))
@@ -150,8 +152,15 @@ fn worst_input(system: &str, user: &str, schema: &Value) -> u64 {
     prompt * 135 / 100 + 64
 }
 
+/// The ungrouped categories sent to be put into groups: all of them except those the user
+/// keeps out of the grouping.
 fn ungrouped(input: &PlanInput) -> HashSet<CategoryId> {
-    input.categories.iter().filter(|c| c.group_id.is_none()).map(|c| c.category.id).collect()
+    input
+        .categories
+        .iter()
+        .filter(|c| c.group_id.is_none() && !input.leave_ungrouped.contains(&c.category.id))
+        .map(|c| c.category.id)
+        .collect()
 }
 
 /// Room for the proposed groups in the terms step's data, which is not known
@@ -281,8 +290,7 @@ pub fn parse(v: &Value, input: &PlanInput) -> Result<CategoryDraft, AiError> {
     let known_groups: HashSet<GroupId> = input.groups.iter().map(|g| g.id).collect();
     let by_name: HashMap<String, GroupId> = input.groups.iter().map(|g| (normalize_text(&g.name), g.id)).collect();
     let known_cats: HashSet<CategoryId> = input.categories.iter().map(|c| c.category.id).collect();
-    let ungrouped: HashSet<CategoryId> =
-        input.categories.iter().filter(|c| c.group_id.is_none()).map(|c| c.category.id).collect();
+    let ungrouped = ungrouped(input);
     let known_terms: HashSet<TermId> = input.terms.iter().map(|t| t.id).collect();
 
     let mut draft = CategoryDraft::default();

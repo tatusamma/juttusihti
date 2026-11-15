@@ -24,6 +24,9 @@ The first start of this version updates your database once:
   the AI set on articles do not change. Neither do the terms of feeds with a default category.
 - To undo a filing, move the term back to **Unsorted** or **Ignore** it; that choice now stays at
   later refreshes. Delete any new category you do not want on the Categories screen.
+- The new categories start in Ungrouped. To have them put into groups, use **✨ Suggest
+  categories** and tick the ones you want grouped: the AI files each under one of your groups,
+  or proposes a new group when none fits, and you review the result before anything is saved.
 
 ### Security
 
@@ -56,6 +59,8 @@ The first start of this version updates your database once:
 
 ### Changed
 
+- ✨ Suggest categories lets you pick which ungrouped categories it puts into groups: tick them in
+  its panel (All and None help with a long list); the others stay in Ungrouped.
 - **Publisher categories are accepted automatically.** A section name a feed gives its articles
   is filed under the category with the same name: at once when you have one, otherwise in a new
   category in Ungrouped once the name is on two articles, so "Kotimaa" from Yle and from

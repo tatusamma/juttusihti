@@ -48,25 +48,82 @@ pub struct SuggestPlan {
 
 impl SuggestPlan {
     pub fn build(d: &AiDefaults, input: PlanInput, price: Option<Price>, ready: Result<(), String>) -> Self {
-        let (worst_in, worst_out) = categorize::estimate_tokens(&input);
-        let worst = Usage { input: worst_in, output: worst_out, ..Default::default() };
-        Self {
+        let mut plan = Self {
             provider: d.provider,
             billing: d.billing(),
             model: d.model(),
-            tokens: worst.total(),
-            cost: price.as_ref().and_then(|p| p.cost(&worst, false)),
+            tokens: 0,
+            cost: None,
             price,
             input,
             limits: run_limits(d),
             ready,
+        };
+        plan.estimate();
+        plan
+    }
+
+    /// Works out the worst case of what is sent now.
+    fn estimate(&mut self) {
+        let (worst_in, worst_out) = categorize::estimate_tokens(&self.input);
+        let worst = Usage { input: worst_in, output: worst_out, ..Default::default() };
+        self.tokens = worst.total();
+        self.cost = self.price.as_ref().and_then(|p| p.cost(&worst, false));
+    }
+
+    /// The ungrouped categories, in tree order: the ones the user may send to be grouped.
+    pub fn ungrouped(&self) -> impl Iterator<Item = &CategoryNode> {
+        self.input.categories.iter().filter(|c| c.group_id.is_none())
+    }
+
+    /// Whether the ungrouped category `id` is sent to be put into a group.
+    pub fn chosen_for_grouping(&self, id: CategoryId) -> bool {
+        !self.input.leave_ungrouped.contains(&id)
+    }
+
+    fn chosen_count(&self) -> usize {
+        self.ungrouped().filter(|c| self.chosen_for_grouping(c.category.id)).count()
+    }
+
+    pub fn toggle_grouping(&mut self, id: CategoryId) {
+        if !self.ungrouped().any(|c| c.category.id == id) {
+            return;
         }
+        let leave = &mut self.input.leave_ungrouped;
+        match leave.iter().position(|l| *l == id) {
+            Some(i) => {
+                leave.remove(i);
+            }
+            None => leave.push(id),
+        }
+        let order: Vec<CategoryId> = self.ungrouped().map(|c| c.category.id).collect();
+        self.input.leave_ungrouped.sort_by_key(|l| order.iter().position(|o| o == l));
+        self.estimate();
+    }
+
+    /// Chooses every ungrouped category (true) or none.
+    pub fn group_all(&mut self, on: bool) {
+        self.input.leave_ungrouped = if on { Vec::new() } else { self.ungrouped().map(|c| c.category.id).collect() };
+        self.estimate();
+    }
+
+    /// The heading of the category choice, when there are ungrouped categories.
+    pub fn grouping_line(&self) -> Option<String> {
+        let total = self.ungrouped().count();
+        (total > 0).then(|| {
+            let what = if total == 1 { "ungrouped category" } else { "ungrouped categories" };
+            format!("Put {} of {total} {what} into groups:", self.chosen_count())
+        })
     }
 
     /// Why Send is disabled, if it is.
     pub fn blocker(&self) -> Option<String> {
-        if self.input.terms.is_empty() && self.input.categories.iter().all(|c| c.group_id.is_some()) {
-            return Some("Nothing is unsorted or ungrouped.".into());
+        if self.input.terms.is_empty() && self.chosen_count() == 0 {
+            return Some(if self.ungrouped().next().is_some() {
+                "Pick the categories to put into groups.".into()
+            } else {
+                "Nothing is unsorted or ungrouped.".into()
+            });
         }
         if let Err(e) = &self.ready {
             return Some(e.clone());
@@ -202,6 +259,9 @@ pub fn view_panel(panel: &Panel) -> Element<'_, Msg> {
                 style::note(p.limit_line()),
             ]
             .spacing(SPACE[1]);
+            if let Some(line) = p.grouping_line() {
+                col = col.push(view_grouping_choice(p, line));
+            }
             let blocker = p.blocker();
             if let Some(why) = &blocker {
                 col = col.push(text(why.clone()).size(SIZE_SMALL).style(style::danger));
@@ -218,6 +278,35 @@ pub fn view_panel(panel: &Panel) -> Element<'_, Msg> {
         }
     };
     container(content).padding(SPACE[3]).width(Fill).style(style::card).into()
+}
+
+/// The ungrouped categories with a tick each: the ticked ones go to the AI to be put into one of
+/// your groups or a new one; the others stay in Ungrouped.
+fn view_grouping_choice(p: &SuggestPlan, line: String) -> Element<'_, Msg> {
+    let quick = |label: &'static str, on: bool| style::quiet_button(None, label, style::quiet, Some(Msg::GroupAll(on)));
+    let heading =
+        row![text(line).size(SIZE_SMALL).style(style::body).width(Fill), quick("All", true), quick("None", false)]
+            .spacing(SPACE[1])
+            .align_y(Center);
+    let mut list = column![].spacing(2.0);
+    for c in p.ungrouped() {
+        let id = c.category.id;
+        list = list.push(
+            checkbox(p.chosen_for_grouping(id))
+                .label(c.category.name.as_str())
+                .size(SIZE_SMALL)
+                .text_size(SIZE_SMALL)
+                .style(style::checkbox)
+                .on_toggle(move |_| Msg::ToggleGrouping(id)),
+        );
+    }
+    column![
+        heading,
+        container(scrollable(list)).max_height(180.0),
+        style::note("Unticked categories stay in Ungrouped. Your groups and what is in them do not change."),
+    ]
+    .spacing(SPACE[0])
+    .into()
 }
 
 /// The message after Approve.

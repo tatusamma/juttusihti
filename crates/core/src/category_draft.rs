@@ -80,12 +80,15 @@ pub struct ApplyReport {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanInput {
     pub groups: Vec<Group>,
     pub categories: Vec<CategoryNode>,
     pub terms: Vec<TermRow>,
     pub more_terms: usize,
+    /// Ungrouped categories the user keeps out of the grouping: they are not sent to be put into
+    /// groups and are never placed, but terms can still be filed under them.
+    pub leave_ungrouped: Vec<CategoryId>,
 }
 
 impl CategoryDraft {
@@ -185,7 +188,7 @@ impl Store {
                 r.get(0)
             })?;
         let more_terms = (total as usize).saturating_sub(terms.len());
-        Ok(PlanInput { groups, categories, terms, more_terms })
+        Ok(PlanInput { groups, categories, terms, more_terms, leave_ungrouped: Vec::new() })
     }
 
     pub fn save_category_draft(&self, draft: &CategoryDraft, provider: Provider, model: &str) -> Result<i64> {
