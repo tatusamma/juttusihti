@@ -9,6 +9,15 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-15
+
+### Added
+
+- **Select and copy article text.** Drag across the text, or double- or triple-click to select a
+  word or a line, then press Ctrl+C. Ctrl+A selects the whole article, and right-clicking the
+  text opens a menu with Copy and Select all. The reader's single-key shortcuts keep working
+  while the text is selected.
+
 ## [0.7.5] - 2026-11-15
 
 ### Added
@@ -377,7 +386,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/tero-k/juttusihti/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/tero-k/juttusihti/compare/v0.7.1...v0.7.5
 [0.7.1]: https://github.com/tero-k/juttusihti/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/tero-k/juttusihti/compare/v0.6.0...v0.7.0
