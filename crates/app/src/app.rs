@@ -2796,6 +2796,18 @@ mod tests {
     }
 
     #[test]
+    fn ungrouped_folds_and_unfolds_when_an_ungrouped_category_is_picked() {
+        let (mut app, cats) = app_with_categories();
+        assert!(app.categories.ungrouped_open(), "Ungrouped starts unfolded");
+        app.categories.handle(SidebarMsg::FoldUngrouped);
+        assert!(!app.categories.ungrouped_open());
+        app.categories.handle(SidebarMsg::Select(Selection::Category(cats.ai)));
+        assert!(!app.categories.ungrouped_open(), "a grouped pick leaves Ungrouped folded");
+        app.categories.handle(SidebarMsg::Select(Selection::Category(cats.politics)));
+        assert!(app.categories.ungrouped_open(), "picking an ungrouped category unfolds it");
+    }
+
+    #[test]
     fn organise_link_in_the_sidebar_header_opens_the_categories_screen() {
         let (mut app, _) = app_with_categories();
         assert_eq!(app.categories.handle(SidebarMsg::Organise), SidebarEffect::Organise);
