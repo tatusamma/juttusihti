@@ -171,7 +171,7 @@ still shown, and pressing it reports that the browser engine is missing.
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome in
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports, ideas and pull requests are welcome in
 [GitHub Issues](https://github.com/tero-k/juttusihti/issues). Before opening a pull request,
 run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and
 `cargo test --workspace`; CI runs the same checks. Keep the [invariants](docs/development.md#invariants-enforced-in-code-and-tests) intact, and
