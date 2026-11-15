@@ -179,6 +179,8 @@ pub enum Msg {
     CloseAi,
     AiDone(Result<String, String>),
     Fold(GroupId),
+    /// Folds or unfolds the Ungrouped block.
+    FoldUngrouped,
     Find(String),
     ClearFind,
     Escape,
@@ -216,6 +218,8 @@ pub struct State {
     filter: ListFilter,
     /// Unfolded groups; kept in memory only.
     expanded: HashSet<GroupId>,
+    /// Whether the Ungrouped block is unfolded; kept in memory only.
+    ungrouped_open: bool,
     pub find: String,
     drag: DragState<Item, Target>,
     hover: Option<Item>,
@@ -237,6 +241,7 @@ impl State {
             stored: HashSet::new(),
             filter: ListFilter::default(),
             expanded: HashSet::new(),
+            ungrouped_open: true,
             find: String::new(),
             drag: DragState::default(),
             hover: None,
@@ -279,6 +284,12 @@ impl State {
     /// The loaded tree of groups and categories.
     pub fn tree(&self) -> &CategoryTree {
         &self.tree
+    }
+
+    /// Whether the Ungrouped block is unfolded.
+    #[cfg(test)]
+    pub fn ungrouped_open(&self) -> bool {
+        self.ungrouped_open
     }
 
     /// The "find categories with AI" panel, when open.
@@ -347,7 +358,13 @@ impl State {
                 self.menu = None;
                 // Unfold the group of a picked category so the selection shows in the tree.
                 let group = match s {
-                    Selection::Category(id) => self.node(id).and_then(|c| c.group_id),
+                    Selection::Category(id) => match self.node(id) {
+                        Some(c) if c.group_id.is_none() => {
+                            self.ungrouped_open = true;
+                            None
+                        }
+                        c => c.and_then(|c| c.group_id),
+                    },
                     Selection::Feed(f) => self.feed_group(f),
                     _ => None,
                 };
@@ -361,6 +378,7 @@ impl State {
                     self.expanded.insert(g);
                 }
             }
+            Msg::FoldUngrouped => self.ungrouped_open = !self.ungrouped_open,
             Msg::Find(s) => {
                 self.find = s;
                 self.menu = None;
@@ -750,11 +768,22 @@ impl State {
         let any_ungrouped = self.tree.ungrouped.iter().any(|c| self.listed(c.category.id, selected));
         if any_ungrouped || moving_rows {
             let cats = &self.tree.ungrouped;
-            let block = column![
-                container(text("Ungrouped").size(SIZE_SMALL).style(style::muted)).padding([SPACE[1], SPACE[1]]),
-                self.view_members(None, cats, selected, dragged, 0.0),
+            let open = self.ungrouped_open;
+            let heading = row![
+                icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }).size(SIZE_SMALL),
+                text("Ungrouped").size(SIZE_SMALL).style(style::muted),
             ]
-            .spacing(1);
+            .spacing(SPACE[0])
+            .align_y(Center);
+            let heading = button(heading)
+                .width(Fill)
+                .padding([SPACE[1], SPACE[1]])
+                .style(style::row)
+                .on_press(Msg::FoldUngrouped);
+            let mut block = column![heading].spacing(1);
+            if open {
+                block = block.push(self.view_members(None, cats, selected, dragged, 0.0));
+            }
             col = col.push(match dragged {
                 // Above Ungrouped is after the last group.
                 Some(Item::Group(_)) => self.slot(block, Target::GroupSlot(None, 0)),
