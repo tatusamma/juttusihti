@@ -9,6 +9,24 @@ The release workflow copies the section for a tag into the GitHub Release notes,
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-15
+
+### Added
+
+- **Hide a category from your news.** The eye that appears on a category in the sidebar (or
+  Hide from feed in its right-click menu) keeps its articles out of All articles, the groups and
+  the feeds. The category stays listed, greyed, and clicking it still shows its articles; press
+  the eye again to bring them back.
+
+### Changed
+
+- **A tidier categories sidebar.** Categories without any stored article are no longer listed
+  (they stay on the Categories screen), and a group with nothing to show is left out.
+
+### Fixed
+
+- **The app icon shows on the Windows taskbar.** The icon is now embedded in the .exe.
+
 ## [0.7.0] - 2026-11-15
 
 ### Changed
@@ -352,7 +370,8 @@ for Windows and Linux.
 - FTS5 has no Finnish stemmer: search inflected words with a prefix, such as
   `työttömyysturva*`.
 
-[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/tero-k/juttusihti/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tero-k/juttusihti/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/tero-k/juttusihti/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tero-k/juttusihti/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tero-k/juttusihti/compare/v0.4.0...v0.5.0
