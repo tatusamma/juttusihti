@@ -35,6 +35,8 @@ pub struct CategoryNode {
     pub term_count: u64,
     /// Titles of the feeds that use this category as their default, by title.
     pub default_for: Vec<String>,
+    /// Its articles are left out of the article list, except when it is viewed itself.
+    pub hidden: bool,
 }
 
 /// A feed listed in a group (or among the feeds in no group).
@@ -212,6 +214,7 @@ fn node_from_row(r: &rusqlite::Row) -> rusqlite::Result<CategoryNode> {
         group_id: r.get(2)?,
         term_count: r.get::<_, i64>(3)? as u64,
         default_for: vec![],
+        hidden: r.get(4)?,
     })
 }
 
@@ -250,7 +253,7 @@ impl Store {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT c.id, c.name, c.group_id,
-                    (SELECT COUNT(*) FROM feed_terms t WHERE t.category_id = c.id)
+                    (SELECT COUNT(*) FROM feed_terms t WHERE t.category_id = c.id), c.hidden
              FROM categories c ORDER BY c.position, c.name COLLATE NOCASE, c.id",
         )?;
         let nodes: Vec<CategoryNode> = stmt.query_map([], node_from_row)?.collect::<rusqlite::Result<_>>()?;
@@ -333,6 +336,14 @@ impl Store {
     /// category with the same normalized name already existed).
     pub fn create_category_checked(&self, name: &str) -> Result<(CategoryId, bool)> {
         insert_category(self.conn(), name, None)
+    }
+
+    /// Hides a category's articles from the article list (or shows them again).
+    pub fn set_category_hidden(&self, id: CategoryId, hidden: bool) -> Result<()> {
+        match self.conn().execute("UPDATE categories SET hidden = ?1 WHERE id = ?2", params![hidden, id])? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
+        }
     }
 
     pub fn rename_category(&self, id: CategoryId, name: &str) -> Result<()> {

@@ -747,6 +747,8 @@ impl App {
                 _ => None,
             },
             hide_dismissed: self.hide_dismissed,
+            // A hidden category's articles show only when that category is viewed.
+            hide_hidden_categories: !matches!(self.category, Selection::Category(_)),
             ..Default::default()
         }
     }
@@ -2631,6 +2633,7 @@ mod tests {
     #[test]
     fn sidebar_never_lists_labels() {
         let (mut app, _) = app_with_categories();
+        file_an_article_in_each(&mut app);
         app.db.shared().lock().unwrap().create_label("Sää").unwrap();
         reload_labels(&mut app);
         reload_categories(&mut app);
@@ -2652,9 +2655,8 @@ mod tests {
     /// Reloads the categories sidebar from the store, as a reload would.
     fn reload_categories(app: &mut App) {
         let filter = app.list_filter();
-        let tree = app.db.shared().lock().unwrap().category_tree().unwrap();
-        let counts = app.db.shared().lock().unwrap().category_counts(filter).unwrap();
-        let _ = app.update(Message::Categories(SidebarMsg::Loaded(filter, Ok(Box::new((tree, counts))))));
+        let data = crate::category_sidebar::read_data(&app.db.shared().lock().unwrap(), filter).unwrap();
+        let _ = app.update(Message::Categories(SidebarMsg::Loaded(filter, Ok(data))));
     }
 
     /// Groups "Tech" (Artificial Intelligence, Space) and "Local" (Local politics),
@@ -2677,6 +2679,91 @@ mod tests {
         };
         reload_categories(&mut app);
         (app, cats)
+    }
+
+    /// Files one new article in each category, so the sidebar lists them all; returns
+    /// the article filed in each category, by category id.
+    fn file_an_article_in_each(app: &mut App) -> std::collections::HashMap<CategoryId, ArticleId> {
+        let filed = {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let feed = s.feeds().unwrap()[0].id;
+            let cats: Vec<CategoryId> = s.categories().unwrap().into_iter().map(|c| c.id).collect();
+            let entries: Vec<juttusihti_core::NewArticle> = cats
+                .iter()
+                .map(|c| juttusihti_core::NewArticle {
+                    guid: format!("in-{c}"),
+                    url: Some(format!("https://www.is.fi/c/{c}")),
+                    title: format!("In {c}"),
+                    summary: None,
+                    content: None,
+                    author: None,
+                    published_at: Some(1_790_812_800),
+                    terms: vec![],
+                })
+                .collect();
+            s.ingest(feed, &entries).unwrap();
+            cats.into_iter()
+                .map(|c| {
+                    let a: ArticleId = s
+                        .conn()
+                        .query_row("SELECT id FROM articles WHERE guid = ?1", [format!("in-{c}")], |r| r.get(0))
+                        .unwrap();
+                    s.set_article_category(a, Some(c)).unwrap();
+                    (c, a)
+                })
+                .collect()
+        };
+        reload_categories(app);
+        filed
+    }
+
+    #[test]
+    fn categories_without_stored_articles_are_not_listed() {
+        let (mut app, c) = app_with_categories();
+        let _ = app.update(Message::Categories(SidebarMsg::Find("POL".into())));
+        assert!(app.categories.matches().is_empty(), "no category holds an article yet");
+        {
+            let shared = app.db.shared();
+            let mut s = shared.lock().unwrap();
+            let feed = s.feeds().unwrap()[0].id;
+            let e = juttusihti_core::NewArticle {
+                guid: "p".into(),
+                url: Some("https://www.is.fi/p".into()),
+                title: "P".into(),
+                summary: None,
+                content: None,
+                author: None,
+                published_at: Some(1_790_812_800),
+                terms: vec![],
+            };
+            s.ingest(feed, &[e]).unwrap();
+            let a: ArticleId =
+                s.conn().query_row("SELECT id FROM articles WHERE guid = 'p'", [], |r| r.get(0)).unwrap();
+            s.set_article_category(a, Some(c.politics)).unwrap();
+            // Read articles still count: the rule is "stored", not "unread".
+            s.set_read(a, true).unwrap();
+        }
+        let _ = app.update(Message::SetUnreadOnly(true));
+        reload_categories(&mut app);
+        let found: Vec<_> = app.categories.matches().into_iter().map(|m| m.selection).collect();
+        assert_eq!(found, vec![Selection::Category(c.politics)]);
+    }
+
+    #[test]
+    fn a_hidden_category_leaves_the_list_until_it_is_viewed() {
+        let (mut app, c) = app_with_categories();
+        let filed = file_an_article_in_each(&mut app);
+        let _ = app.update(Message::Categories(SidebarMsg::SetHidden(c.politics, true)));
+        app.db.shared().lock().unwrap().set_category_hidden(c.politics, true).unwrap();
+        reload_categories(&mut app);
+        assert!(app.categories.is_hidden(c.politics));
+        assert!(app.list_query().hide_hidden_categories);
+        assert!(!listed(&app).contains(&filed[&c.politics]), "left out of All articles");
+        assert!(listed(&app).contains(&filed[&c.ai]));
+        select(&mut app, Selection::Category(c.politics));
+        assert!(!app.list_query().hide_hidden_categories);
+        assert_eq!(listed(&app), vec![filed[&c.politics]], "its own view still lists it");
     }
 
     fn select(app: &mut App, s: Selection) {
@@ -2912,6 +2999,7 @@ mod tests {
     #[test]
     fn find_shows_flat_matches() {
         let (mut app, c) = app_with_categories();
+        file_an_article_in_each(&mut app);
         let _ = app.update(Message::Categories(SidebarMsg::Find("POL".into())));
         let found: Vec<_> = app.categories.matches().into_iter().map(|m| (m.selection, m.name, m.group)).collect();
         assert_eq!(

@@ -37,6 +37,8 @@ pub enum Icon {
     Help,
     Check,
     Rss,
+    Eye,
+    EyeOff,
 }
 
 /// Codepoints from lucide-static 1.55.0 `font/lucide.css`.
@@ -67,6 +69,8 @@ fn codepoint(i: Icon) -> char {
         Icon::Help => '\u{e082}',         // circle-question-mark
         Icon::Check => '\u{e06c}',        // check
         Icon::Rss => '\u{e14a}',          // rss
+        Icon::Eye => '\u{e0ba}',          // eye
+        Icon::EyeOff => '\u{e0bb}',       // eye-off
     }
 }
 
@@ -78,7 +82,7 @@ pub fn icon<'a>(i: Icon) -> Text<'a> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 25] = [
+    const ALL: [Icon; 27] = [
         Icon::News,
         Icon::Saved,
         Icon::Reports,
@@ -104,6 +108,8 @@ mod tests {
         Icon::Help,
         Icon::Check,
         Icon::Rss,
+        Icon::Eye,
+        Icon::EyeOff,
     ];
 
     #[test]

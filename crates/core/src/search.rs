@@ -444,6 +444,9 @@ pub struct SearchQuery {
     /// information or clickbait. Turning this off reveals them again.
     #[serde(default)]
     pub hide_dismissed: bool,
+    /// Leave out articles whose category is hidden.
+    #[serde(default)]
+    pub hide_hidden_categories: bool,
 }
 
 /// Counts stop at this many matches; beyond it the UI shows "10,000+".
@@ -555,6 +558,9 @@ pub(crate) fn build_where(q: &SearchQuery) -> Result<(String, Vec<Value>, Option
     }
     if q.uncategorized {
         sql.push_str(&format!(" AND NOT ({})", category_membership("IS NOT NULL")));
+    }
+    if q.hide_hidden_categories {
+        sql.push_str(&format!(" AND NOT ({})", category_membership("IN (SELECT id FROM categories WHERE hidden = 1)")));
     }
     if q.without_terms {
         sql.push_str(

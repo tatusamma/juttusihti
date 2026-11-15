@@ -42,6 +42,16 @@ and the feed menu. "Find category…" finds a category, group or feed by name (E
 to Favourites, and drag reorders. **«** hides the sidebar and **»** (or **c**) shows it again;
 **Organise…** opens the Categories screen.
 
+The sidebar lists only categories that hold at least one stored article (read or unread); a group
+shows when it has such a category or a feed. Empty categories are still on the Categories screen,
+where you can rename, move or delete them.
+
+To keep a topic out of your news, press the **eye** that appears when you point at a category (or
+right-click it and choose **Hide from feed**). Its articles leave All articles, the groups and the
+feeds; the category stays in the sidebar, greyed with a crossed-out eye, and clicking it still
+lists its articles. Press the eye again (**Show in feed**) to bring them back. An article counts as
+in the category it is actually filed under, so one you put in another category by hand still shows.
+
 **Uncategorized** lists the articles in no category; an article that is in a group only through
 its feed is still uncategorized. Its ✨ has AI find categories for the next 100 uncategorized
 articles whose feed gave no categories (or only ones you ignored) and has no default category: a

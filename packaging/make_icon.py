@@ -18,6 +18,10 @@ def main():
         path = os.path.join(HERE, "icons", f"juttusihti-{size}.png")
         art.resize((size, size), Image.LANCZOS).save(path, optimize=True)
         print(path)
+    # The Windows .exe embeds this (crates/app/build.rs); the taskbar shows it.
+    path = os.path.join(HERE, "icons", "juttusihti.ico")
+    art.save(path, sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
+    print(path)
 
 
 if __name__ == "__main__":

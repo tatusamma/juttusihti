@@ -22,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_feed_categories.sql"),
     include_str!("../migrations/0010_file_publisher_terms.sql"),
     include_str!("../migrations/0011_settled_terms.sql"),
+    include_str!("../migrations/0012_hidden_categories.sql"),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -167,7 +168,7 @@ mod tests {
         let store = crate::store::Store::open(&path).unwrap();
         let conn = store.conn();
         let v: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!((v, SCHEMA_VERSION), (11, 11));
+        assert_eq!((v, SCHEMA_VERSION), (12, 12));
         let labels: Vec<(i64, String, Option<String>)> = conn
             .prepare("SELECT id, name, color FROM labels ORDER BY id")
             .unwrap()
