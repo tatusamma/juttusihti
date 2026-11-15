@@ -4,7 +4,9 @@
 
 <h1 align="center">Juttusihti</h1>
 
-<p align="center"><b>Your news, sifted by you. A private RSS reader for Windows and Linux.</b></p>
+<p align="center"><b>Don't take the bait. Take back your news.</b><br>
+Your sources. Your rules. No tracking.<br>
+<sub>A private RSS reader for Windows and Linux.</sub></p>
 
 <p align="center">
   <a href="https://github.com/tero-k/juttusihti/actions/workflows/ci.yml"><img src="https://github.com/tero-k/juttusihti/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
